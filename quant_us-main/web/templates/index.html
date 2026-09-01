@@ -1,0 +1,942 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>quant_us - 美股实盘工具</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
+    <style>
+        :root {
+            --bg-dark: #0f1117;
+            --bg-card: #1a1d27;
+            --bg-card-hover: #22252f;
+            --text-primary: #e2e8f0;
+            --text-secondary: #64748b;
+            --accent-blue: #38bdf8;
+            --accent-green: #10b981;
+            --accent-red: #ef4444;
+            --accent-orange: #f59e0b;
+            --border-color: #2d3748;
+        }
+
+        [data-theme="light"] {
+            --bg-dark: #f8fafc;
+            --bg-card: #ffffff;
+            --bg-card-hover: #f1f5f9;
+            --text-primary: #1e293b;
+            --text-secondary: #64748b;
+            --border-color: #e2e8f0;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            background: var(--bg-dark);
+            color: var(--text-primary);
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            min-height: 100vh;
+        }
+
+        /* 顶部状态栏 */
+        .top-bar {
+            background: var(--bg-card);
+            border-bottom: 1px solid var(--border-color);
+            padding: 12px 24px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+
+        .top-bar .logo {
+            font-size: 20px;
+            font-weight: 700;
+            color: var(--accent-blue);
+        }
+
+        .market-status {
+            display: flex;
+            gap: 24px;
+            align-items: center;
+        }
+
+        .status-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 14px;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--accent-green);
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        /* 侧边导航 */
+        .sidebar {
+            width: 200px;
+            background: var(--bg-card);
+            border-right: 1px solid var(--border-color);
+            position: fixed;
+            top: 57px;
+            left: 0;
+            height: calc(100vh - 57px);
+            padding: 16px 0;
+        }
+
+        .nav-item {
+            padding: 12px 24px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 14px;
+            color: var(--text-secondary);
+            transition: all 0.2s;
+            border-left: 3px solid transparent;
+        }
+
+        .nav-item:hover {
+            background: var(--bg-card-hover);
+            color: var(--text-primary);
+        }
+
+        .nav-item.active {
+            background: var(--bg-card-hover);
+            color: var(--accent-blue);
+            border-left-color: var(--accent-blue);
+        }
+
+        /* 主内容区 */
+        .main-content {
+            margin-left: 200px;
+            padding: 24px;
+            min-height: calc(100vh - 57px);
+        }
+
+        .section { display: none; }
+        .section.active { display: block; }
+
+        /* 卡片 */
+        .card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+
+        .card-title {
+            font-size: 16px;
+            font-weight: 600;
+            margin-bottom: 16px;
+            color: var(--text-primary);
+        }
+
+        /* K线分析区域 */
+        .kline-toolbar {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        .kline-toolbar input {
+            background: var(--bg-dark);
+            border: 1px solid var(--border-color);
+            color: var(--text-primary);
+            padding: 8px 14px;
+            border-radius: 8px;
+            font-size: 14px;
+        }
+
+        .kline-toolbar input:focus {
+            outline: none;
+            border-color: var(--accent-blue);
+        }
+
+        .kline-toolbar .btn {
+            background: var(--accent-blue);
+            border: none;
+            color: white;
+            padding: 8px 20px;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 500;
+        }
+
+        .kline-toolbar .btn:hover {
+            opacity: 0.9;
+        }
+
+        /* K线统计卡片 */
+        .kline-stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            gap: 12px;
+            margin: 20px 0;
+        }
+
+        .stat-card {
+            background: var(--bg-dark);
+            border: 1px solid var(--border-color);
+            border-radius: 10px;
+            padding: 16px;
+            text-align: center;
+        }
+
+        .stat-label {
+            font-size: 11px;
+            color: var(--text-secondary);
+            margin-bottom: 6px;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .stat-value {
+            font-size: 24px;
+            font-weight: 700;
+        }
+
+        /* K线图容器 */
+        .chart-container {
+            background: var(--bg-dark);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 16px;
+            margin: 16px 0;
+        }
+
+        .chart-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 16px;
+        }
+
+        .period-tabs {
+            display: flex;
+            gap: 8px;
+        }
+
+        .period-tab {
+            padding: 6px 14px;
+            border-radius: 6px;
+            font-size: 12px;
+            cursor: pointer;
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            color: var(--text-secondary);
+            transition: all 0.2s;
+        }
+
+        .period-tab.active {
+            background: var(--accent-blue);
+            border-color: var(--accent-blue);
+            color: white;
+        }
+
+        .period-tab.overnight { border-left: 3px solid #6366f1; }
+        .period-tab.pre_market { border-left: 3px solid #f59e0b; }
+        .period-tab.regular { border-left: 3px solid #10b981; }
+        .period-tab.after_hours { border-left: 3px solid #ef4444; }
+
+        /* 信号表格 */
+        .signal-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 16px;
+        }
+
+        .signal-table th,
+        .signal-table td {
+            padding: 10px 14px;
+            text-align: left;
+            border-bottom: 1px solid var(--border-color);
+            font-size: 13px;
+        }
+
+        .signal-table th {
+            color: var(--text-secondary);
+            font-weight: 500;
+            font-size: 11px;
+            text-transform: uppercase;
+        }
+
+        .signal-table tr:hover {
+            background: var(--bg-card-hover);
+        }
+
+        .badge-strong {
+            background: var(--accent-green);
+            color: white;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+        }
+
+        .badge-buy {
+            background: var(--accent-orange);
+            color: white;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+        }
+
+        /* 加载和错误状态 */
+        .loading, .error, .empty {
+            text-align: center;
+            padding: 60px 20px;
+            color: var(--text-secondary);
+        }
+
+        .error { color: var(--accent-red); }
+
+        /* 响应式 */
+        @media (max-width: 768px) {
+            .sidebar { display: none; }
+            .main-content { margin-left: 0; }
+        }
+    </style>
+</head>
+<body data-theme="dark">
+
+<!-- 顶部状态栏 -->
+<div class="top-bar">
+    <div class="logo">📊 quant_us</div>
+    <div class="market-status" id="market-status">
+        <div class="status-item">
+            <span class="status-dot"></span>
+            <span id="market-session">加载中...</span>
+        </div>
+        <div class="status-item" style="color: var(--text-secondary); font-size: 13px;">
+            <span id="et-time">--:--</span>
+            <button id="tz-toggle" onclick="toggleTimezone()" style="margin-left: 8px; background: var(--card-bg); border: 1px solid var(--border-color); color: var(--text-primary); padding: 2px 8px; border-radius: 4px; cursor: pointer; font-size: 12px;">ET</button>
+            <button id="theme-toggle" onclick="toggleTheme()" style="margin-left: 4px; background: var(--card-bg); border: 1px solid var(--border-color); color: var(--text-primary); padding: 2px 8px; border-radius: 4px; cursor: pointer; font-size: 12px;">🌙</button>
+        </div>
+    </div>
+</div>
+
+<!-- 侧边导航 -->
+<div class="sidebar">
+    <div class="nav-item active" data-section="kline">
+        <i class="bi bi-graph-up"></i>
+        <span>K线分析</span>
+    </div>
+    <div class="nav-item" data-section="monitor">
+        <i class="bi bi-shield-check"></i>
+        <span>止盈止损</span>
+    </div>
+    <div class="nav-item" data-section="settings">
+        <i class="bi bi-gear"></i>
+        <span>设置</span>
+    </div>
+</div>
+
+<!-- 主内容区 -->
+<div class="main-content">
+
+    <!-- K线分析 -->
+    <div class="section active" id="section-kline">
+        <div class="card">
+            <div class="card-title">K线分析 (支持盘前/盘中/盘后/夜盘)</div>
+            <div class="kline-toolbar">
+                <input type="text" id="kline-code" placeholder="股票代码，如 US.SOXL 或 SOXL" style="width: 180px;">
+                <input type="date" id="kline-date" style="width: 150px;">
+                <input type="number" id="kline-threshold" value="10" min="1" max="15" step="1" title="买入信号得分阈值（默认10）" style="width: 70px;">
+                <span style="color: var(--text-secondary); font-size: 12px;">买入阈值</span>
+                <button class="btn" onclick="runKlineAnalysis()">
+                    <i class="bi bi-search"></i> 分析
+                </button>
+            </div>
+
+            <!-- 统计卡片 -->
+            <div class="kline-stats" id="kline-stats" style="display: none;">
+                <div class="stat-card">
+                    <div class="stat-label">总信号</div>
+                    <div class="stat-value" id="stat-total" style="color: var(--accent-blue);">0</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">买入信号</div>
+                    <div class="stat-value" id="stat-strong" style="color: var(--accent-green);">0</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">当前评分</div>
+                    <div class="stat-value" id="stat-score" style="color: var(--accent-orange);">--</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">RSI</div>
+                    <div class="stat-value" id="stat-rsi">--</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">ATR波动</div>
+                    <div class="stat-value" id="stat-atr-pct" style="color: var(--accent-purple);">--</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">超卖(×ATR)</div>
+                    <div class="stat-value" id="stat-dd-atr" style="color: var(--accent-orange);">--</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">布林位置</div>
+                    <div class="stat-value" id="stat-bb">--</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">时段</div>
+                    <div class="stat-value" id="stat-session" style="color: var(--accent-blue); font-size: 16px;">--</div>
+                </div>
+            </div>
+
+            <!-- 时段图例 -->
+            <div id="period-legend" style="display: none; margin: 12px 0; font-size: 12px; color: var(--text-secondary);">
+                <span style="margin-right: 16px;"><span style="color: #6366f1;">●</span> 🌙 夜盘</span>
+                <span style="margin-right: 16px;"><span style="color: #f59e0b;">●</span> 🌅 盘前</span>
+                <span style="margin-right: 16px;"><span style="color: #10b981;">●</span> 📈 盘中</span>
+                <span style="margin-right: 16px;"><span style="color: #ef4444;">●</span> 📉 盘后</span>
+            </div>
+
+            <!-- K线图 -->
+            <div id="kline-empty" class="chart-container" style="text-align: center; padding: 80px;">
+                <i class="bi bi-graph-up" style="font-size: 48px; color: var(--border-color);"></i>
+                <p style="margin-top: 16px; color: var(--text-secondary);">输入股票代码，点击"分析"查看K线</p>
+            </div>
+
+            <div id="kline-loading" class="loading" style="display: none;">
+                <div class="spinner-border text-primary" role="status"></div>
+                <p style="margin-top: 16px;">加载中...</p>
+            </div>
+
+            <div id="kline-error" class="error card" style="display: none;"></div>
+
+            <div id="kline-chart-area" style="display: none;">
+                <!-- 主图 -->
+                <div class="chart-container">
+                    <div id="chart-candlestick" style="height: 400px;"></div>
+                </div>
+                
+                <!-- 成交量图 -->
+                <div class="chart-container">
+                    <div id="chart-volume" style="height: 150px;"></div>
+                </div>
+
+                <!-- 信号表格 -->
+                <div id="signal-section" class="card" style="display: none;">
+                    <div class="card-title">买入信号</div>
+                    <table class="signal-table">
+                        <thead>
+                            <tr>
+                                <th>时间 (ET)</th>
+                                <th>时段</th>
+                                <th>价格</th>
+                                <th>信号</th>
+                                <th>评分</th>
+                                <th>RSI</th>
+                                <th>布林</th>
+                                <th>回撤(短/中/长)</th>
+                                <th>成交量</th>
+                            </tr>
+                        </thead>
+                        <tbody id="signal-table-body">
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- 评分系统说明 -->
+                <div class="card" id="scoring-system" style="margin-top: 16px;">
+                    <div class="card-title">评分系统说明（总分上限15分，≥10分触发买入）</div>
+                    <div style="font-size: 13px; color: var(--text-primary); line-height: 1.7;">
+                        <table class="signal-table" style="margin-top: 0;">
+                            <thead>
+                                <tr>
+                                    <th style="width: 90px;">因子</th>
+                                    <th style="width: 50px;">满分</th>
+                                    <th>评分标准</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr>
+                                    <td><strong>RSI</strong></td>
+                                    <td><span style="color: var(--accent-green);">3</span></td>
+                                    <td>RSI&lt;25 → 3分；&lt;30 → 2分；&lt;35 → 1分；否则 0</td>
+                                </tr>
+                                <tr>
+                                    <td><strong>布林</strong></td>
+                                    <td><span style="color: var(--accent-green);">2</span></td>
+                                    <td>价格跌破下轨(BB&lt;0%) → 2分；&lt;20% → 1分；否则 0</td>
+                                </tr>
+                                <tr>
+                                    <td><strong>成交量</strong></td>
+                                    <td><span style="color: var(--accent-green);">3</span></td>
+                                    <td>近期放量×1.5以上 + 2分；整体量能健康 + 1分</td>
+                                </tr>
+                                <tr>
+                                    <td><strong>量价背离</strong></td>
+                                    <td><span style="color: var(--accent-green);">3</span></td>
+                                    <td>上涨时放量 + 2分；下跌时缩量 + 1分</td>
+                                </tr>
+                                <tr>
+                                    <td><strong>回撤</strong></td>
+                                    <td><span style="color: var(--accent-green);">4</span></td>
+                                    <td>
+                                        短周期(20根高点)：&ge;10% → 3分，&ge;6% → 2分，&ge;3% → 1分<br>
+                                        中周期(60根高点)：&ge;15% → 2分，&ge;8% → 1分<br>
+                                        长周期(120根高点)：&ge;25% → 2分，&ge;15% → 1分
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <td><strong>趋势过滤</strong></td>
+                                    <td><span style="color: var(--accent-red);">-2~0</span></td>
+                                    <td>ADX&gt;25 且 -DI&gt;+DI（强下跌/阴跌）→ <span style="color: var(--accent-red);">-2分</span><br>
+                                    ADX&gt;25 且 +DI&gt;-DI（强上涨）→ <span style="color: var(--accent-orange);">-1分</span><br>
+                                    ADX&lt;20（弱趋势/震荡）→ 0</td>
+                                </tr>
+                                <tr>
+                                    <td><strong>买入阈值</strong></td>
+                                    <td><span style="color: var(--accent-blue);">10</span></td>
+                                    <td>总分 ≥ 10 分 → 触发买入信号；&lt;10 → watch观察；&lt;2 → none</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 止盈止损 -->
+    <div class="section" id="section-monitor">
+        <div class="card">
+            <div class="card-title">持仓监控</div>
+            <p style="color: var(--text-secondary); font-size: 14px;">
+                <i class="bi bi-info-circle"></i>
+                使用 <code>python scripts/live_trading/run_manager.py --dry-run</code> 启动监控服务
+            </p>
+        </div>
+    </div>
+
+    <!-- 设置 -->
+    <div class="section" id="section-settings">
+        <div class="card">
+            <div class="card-title">配置</div>
+            <p style="color: var(--text-secondary); font-size: 14px;">
+                配置文件: <code>config.yaml</code>
+            </p>
+        </div>
+    </div>
+
+</div>
+
+<script>
+// ==================== 全局变量 ====================
+let candlestickChart = null;
+let volumeChart = null;
+let candleSeries = null;
+let volumeSeries = null;
+
+// ==================== 导航 ====================
+document.querySelectorAll('.nav-item').forEach(item => {
+    item.addEventListener('click', () => {
+        document.querySelectorAll('.nav-item').forEach(i => i.classList.remove('active'));
+        document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+        item.classList.add('active');
+        document.getElementById('section-' + item.dataset.section).classList.add('active');
+    });
+});
+
+// ==================== 时间更新 ====================
+function updateMarketStatus() {
+    fetch('/api/market-status')
+        .then(r => r.json())
+        .then(data => {
+            if (data.success) {
+                document.getElementById('market-session').textContent = data.session_label;
+                document.getElementById('et-time').textContent = data.et_time.split(' ')[1];
+            }
+        })
+        .catch(() => {});
+}
+
+updateMarketStatus();
+setInterval(updateMarketStatus, 5000);
+
+// ==================== K线分析 ====================
+async function runKlineAnalysis() {
+    const stockCode = document.getElementById('kline-code').value.trim().toUpperCase();
+    const dateStr = document.getElementById('kline-date').value;
+    const thresholdVal = document.getElementById('kline-threshold').value;
+
+    if (!stockCode) {
+        alert('请输入股票代码');
+        return;
+    }
+
+    // 不自动加前缀，用户输入什么就用什么
+
+    document.getElementById('kline-empty').style.display = 'none';
+    document.getElementById('kline-chart-area').style.display = 'none';
+    document.getElementById('kline-loading').style.display = 'block';
+    document.getElementById('kline-error').style.display = 'none';
+    document.getElementById('signal-section').style.display = 'none';
+
+    try {
+        const params = new URLSearchParams({
+            stock_code: stockCode,
+            date: dateStr || new Date().toISOString().split('T')[0],
+            threshold: thresholdVal || '10',
+        });
+        const resp = await fetch(`/api/kline-analysis?${params}`);
+        const data = await resp.json();
+
+        document.getElementById('kline-loading').style.display = 'none';
+
+        if (!data.success) {
+            document.getElementById('kline-error').textContent = data.error;
+            document.getElementById('kline-error').style.display = 'block';
+            return;
+        }
+
+        // 更新统计
+        document.getElementById('kline-stats').style.display = 'grid';
+        document.getElementById('stat-total').textContent = data.total_signals;
+        document.getElementById('stat-strong').textContent = data.signals.filter(s => s.signal === 'buy').length;
+        document.getElementById('stat-score').textContent = data.analysis.score;
+        document.getElementById('stat-rsi').textContent = data.analysis.rsi;
+        document.getElementById('stat-atr-pct').textContent = (data.analysis.atr_pct || 0).toFixed(2) + '%';
+        document.getElementById('stat-dd-atr').textContent = (data.analysis.dd_atr || 0).toFixed(2) + '×';
+        document.getElementById('stat-bb').textContent = data.analysis.bb_position + '%';
+        document.getElementById('stat-session').textContent = data.session_label;
+
+        // RSI 颜色
+        const rsiEl = document.getElementById('stat-rsi');
+        rsiEl.style.color = data.analysis.rsi < 30 ? 'var(--accent-green)' :
+                            data.analysis.rsi > 70 ? 'var(--accent-red)' : 'var(--text-primary)';
+
+        // 时段图例
+        document.getElementById('period-legend').style.display = 'block';
+
+        // 渲染图表
+        renderChart(data.bars, data.signals);
+
+        // 信号表格
+        renderSignalTable(data.signals);
+
+        document.getElementById('kline-chart-area').style.display = 'block';
+        document.getElementById('signal-section').style.display = 'block';
+        document.getElementById('scoring-system').style.display = 'block';
+
+    } catch (e) {
+        document.getElementById('kline-loading').style.display = 'none';
+        document.getElementById('kline-error').textContent = '请求失败: ' + e.message;
+        document.getElementById('kline-error').style.display = 'block';
+    }
+}
+
+// ==================== 渲染K线图 ====================
+function renderChart(bars, signals) {
+    cachedBarsData = { bars, signals };  // 缓存供时区切换使用
+    const container = document.getElementById('chart-candlestick');
+    const volContainer = document.getElementById('chart-volume');
+
+    // 清理旧图表
+    if (candlestickChart) {
+        candlestickChart.remove();
+        volumeChart.remove();
+    }
+
+    // 创建主图
+    candlestickChart = LightweightCharts.createChart(container, {
+        width: container.clientWidth || 900,
+        height: 380,
+        layout: {
+            background: { type: 'solid', color: '#1a1d27' },
+            textColor: '#9ca3af',
+        },
+        grid: {
+            vertLines: { color: '#2d2d4a' },
+            horzLines: { color: '#2d2d4a' },
+        },
+        crosshair: {
+            mode: LightweightCharts.CrosshairMode.Normal,
+            vertLine: { color: '#758696', width: 1, style: 2 },
+            horzLine: { color: '#758696', width: 1, style: 2 },
+        },
+        timeScale: {
+            borderColor: '#2d2d4a',
+            timeVisible: true,
+            secondsVisible: false,
+        },
+        rightPriceScale: { borderColor: '#2d2d4a' },
+    });
+
+    // 成交量图
+    volumeChart = LightweightCharts.createChart(volContainer, {
+        width: volContainer.clientWidth || 900,
+        height: 130,
+        layout: {
+            background: { type: 'solid', color: '#1a1d27' },
+            textColor: '#9ca3af',
+        },
+        grid: {
+            vertLines: { color: '#2d2d4a' },
+            horzLines: { color: '#2d2d4a' },
+        },
+        timeScale: {
+            borderColor: '#2d2d4a',
+            timeVisible: true,
+            secondsVisible: false,
+        },
+        rightPriceScale: { borderColor: '#2d2d4a' },
+        crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+    });
+
+    // 同步时间轴
+    candlestickChart.timeScale().subscribeVisibleLogicalRangeChange(range => {
+        if (range) volumeChart.timeScale().setVisibleLogicalRange(range);
+    });
+
+    // K线系列
+    candleSeries = candlestickChart.addCandlestickSeries({
+        upColor: '#10b981',
+        downColor: '#ef4444',
+        borderUpColor: '#10b981',
+        borderDownColor: '#ef4444',
+        wickUpColor: '#10b981',
+        wickDownColor: '#ef4444',
+    });
+
+    // 成交量系列
+    volumeSeries = volumeChart.addHistogramSeries({
+        color: '#26a69a',
+        priceFormat: { type: 'volume' },
+        priceScaleId: '',
+    });
+    volumeSeries.priceScale().applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
+
+    // 信号标记
+    const signalMap = {};
+    (signals || []).forEach(s => {
+        // 转换时间字符串为时间戳
+        const timeParts = s.time.split(' ');
+        if (timeParts.length === 2) {
+            const [dateStr, timeStr] = timeParts;
+            const [year, month, day] = dateStr.split('-').map(Number);
+            const [hour, minute] = timeStr.split(':').map(Number);
+            // 创建日期并转为UTC时间戳（lightweight-charts需要UTC）
+            const d = new Date(Date.UTC(year, month - 1, day, hour, minute, 0));
+            signalMap[Math.floor(d.getTime() / 1000)] = s;
+        }
+    });
+
+    // 时段颜色映射
+    const periodColors = {
+        'overnight': '#6366f1',
+        'pre_market': '#f59e0b',
+        'regular': '#10b981',
+        'after_hours': '#ef4444',
+    };
+
+    const candleData = [];
+    const volData = [];
+    const markers = [];
+
+    bars.forEach((bar, i) => {
+        // 解析时间
+        const timeParts = bar.time.split(' ');
+        const [dateStr, timeStr] = timeParts;
+        const [year, month, day] = dateStr.split('-').map(Number);
+        const [hour, minute] = timeStr.split(':').map(Number);
+        const d = new Date(Date.UTC(year, month - 1, day, hour, minute, 0));
+        const time = Math.floor(d.getTime() / 1000);
+
+        const isUp = bar.close >= bar.open;
+
+        candleData.push({
+            time: time,
+            open: bar.open,
+            high: bar.high,
+            low: bar.low,
+            close: bar.close,
+            color: periodColors[bar.period] || '#9ca3af',
+        });
+
+        volData.push({
+            time: time,
+            value: bar.volume,
+            color: isUp ? 'rgba(16,185,129,0.9)' : 'rgba(239,68,68,0.9)',
+        });
+
+        // 信号标记（美股只有 buy 一档）
+        const sig = signalMap[time];
+        if (sig && sig.signal === 'buy') {
+            markers.push({
+                time: time,
+                position: 'belowBar',
+                color: '#10b981',
+                shape: 'arrowUp',
+                text: 'BUY',
+                size: 1,
+            });
+        }
+    });
+
+    candleSeries.setData(candleData);
+    volumeSeries.setData(volData);
+    if (markers.length > 0) {
+        candleSeries.setMarkers(markers);
+    }
+
+    // 自动调整视窗
+    if (candleData.length > 0) {
+        candlestickChart.timeScale().fitContent();
+    }
+}
+
+// ==================== 渲染信号表格 ====================
+function renderSignalTable(signals) {
+    const tbody = document.getElementById('signal-table-body');
+    if (!tbody) return;
+
+    if (!signals || signals.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="9" style="text-align: center; color: var(--text-secondary); padding: 40px;">暂无买入信号</td></tr>';
+        return;
+    }
+
+    tbody.innerHTML = signals.map(s => {
+        const dd = s.drawdown || {};
+        const ddStr = dd.short !== undefined ? `${dd.short}%` : '—';
+        return `
+        <tr>
+            <td><strong style="color: var(--accent-blue);">${s.time.split(' ')[1] || s.time}</strong></td>
+            <td>${s.period_label}</td>
+            <td><strong style="color: var(--accent-green);">$${s.price.toFixed(2)}</strong></td>
+            <td>
+                <span class="badge-buy">买入
+                </span>
+            </td>
+            <td><strong style="color: var(--accent-orange);">${s.score}</strong></td>
+            <td style="color: ${s.rsi < 30 ? 'var(--accent-green)' : s.rsi > 70 ? 'var(--accent-red)' : 'var(--text-primary)'};">
+                ${s.rsi}
+            </td>
+            <td style="color: ${s.bb_position < 20 ? 'var(--accent-green)' : 'var(--text-secondary)'};">
+                ${s.bb_position}%
+            </td>
+            <td title="短周期(20根)回撤" style="color: ${dd.short >= 5 ? 'var(--accent-green)' : 'var(--text-secondary)'};">
+                ${ddStr}
+            </td>
+            <td style="color: ${s.volume_score > 0 ? 'var(--accent-green)' : 'var(--text-secondary)'};">
+                ${s.volume_score > 0 ? '▲+' + s.volume_score : '—'}
+            </td>
+        </tr>
+    `;}).join('');
+}
+
+// ==================== 键盘快捷键 ====================
+document.getElementById('kline-code').addEventListener('keydown', e => {
+    if (e.key === 'Enter') runKlineAnalysis();
+});
+
+// ==================== 时区切换 ====================
+let currentTimezone = 'bj';  // 'bj' 北京时间 | 'et' 美东时间
+let cachedBarsData = null;
+
+function toggleTimezone() {
+    const btn = document.getElementById('tz-toggle');
+    if (currentTimezone === 'bj') {
+        currentTimezone = 'et';
+        btn.textContent = 'BJ';
+    } else {
+        currentTimezone = 'bj';
+        btn.textContent = 'ET';
+    }
+    // 如果有缓存数据，重新渲染
+    if (cachedBarsData) {
+        renderChartWithTimezone(cachedBarsData);
+    }
+}
+
+// ==================== 主题切换 ====================
+function toggleTheme() {
+    const html = document.documentElement;
+    const btn = document.getElementById('theme-toggle');
+    if (html.getAttribute('data-theme') === 'light') {
+        html.removeAttribute('data-theme');
+        btn.textContent = '🌙';
+    } else {
+        html.setAttribute('data-theme', 'light');
+        btn.textContent = '☀️';
+    }
+    // 重渲染图表（新背景颜色）
+    if (candleSeries && volumeSeries && cachedBarsData) {
+        const isLight = html.getAttribute('data-theme') === 'light';
+        const bgColor = isLight ? '#ffffff' : '#1a1d27';
+        const textColor = isLight ? '#64748b' : '#9ca3af';
+        const gridColor = isLight ? '#e2e8f0' : '#2d2d4a';
+        candlestickChart.applyOptions({
+            layout: { background: { type: 'solid', color: bgColor }, textColor },
+            grid: { vertLines: { color: gridColor }, horzLines: { color: gridColor } },
+        });
+        volumeChart.applyOptions({
+            layout: { background: { type: 'solid', color: bgColor }, textColor },
+            grid: { vertLines: { color: gridColor }, horzLines: { color: gridColor } },
+        });
+    }
+}
+
+function renderChartWithTimezone(data) {
+    cachedBarsData = data;
+    const useET = currentTimezone === 'et';
+    
+    // 重新转换数据（根据时区选择）
+    const candleData = [];
+    const volData = [];
+    data.bars.forEach(bar => {
+        const timeStr = useET ? bar.time_et : bar.time;
+        const d = new Date(timeStr.replace(' ', 'T') + 'Z');  // UTC
+        const time = Math.floor(d.getTime() / 1000);
+        
+        const isUp = bar.close >= bar.open;
+        candleData.push({
+            time,
+            open: bar.open,
+            high: bar.high,
+            low: bar.low,
+            close: bar.close,
+            color: periodColors[bar.period] || '#9ca3af',
+        });
+        volData.push({
+            time,
+            value: bar.volume,
+            color: isUp ? 'rgba(16,185,129,0.9)' : 'rgba(239,68,68,0.9)',
+        });
+    });
+    
+    candleSeries.setData(candleData);
+    volumeSeries.setData(volData);
+}
+
+// ==================== 响应式调整 ====================
+window.addEventListener('resize', () => {
+    if (candlestickChart) {
+        const container = document.getElementById('chart-candlestick');
+        candlestickChart.applyOptions({ width: container.clientWidth });
+        volumeChart.applyOptions({ width: container.clientWidth });
+    }
+});
+
+// ==================== 初始化日期 ====================
+document.getElementById('kline-date').value = new Date().toISOString().split('T')[0];
+</script>
+
+</body>
+</html>

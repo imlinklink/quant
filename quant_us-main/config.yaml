@@ -1,0 +1,93 @@
+live_manager:
+  enabled: true
+  use_extended_hours: true
+  check_interval: 60
+  atr_refresh_interval: 3600
+  market_open: 04:00
+  market_close: '20:00'
+  thread_pool_size: 4
+  quote_size: 3
+  trd_size: 2
+  health_check_interval: 300
+  max_reconnect: 3
+  trd_env: REAL
+  ignore_hk_stocks: true
+
+# ===== 抄底买入监控配置 =====
+dip_buy:
+  # 监控股票列表（美股/港股）
+  watch_list:
+    - US.SOXL
+    - US.YINN
+  
+  check_interval: 30           # 检查间隔（秒）
+  buy_threshold: 7              # 买入阈值（超卖+布林+量+背离四维满分10分，≥7触发）
+  min_bars: 30                 # 最少K线根数
+  max_positions: 3              # 最大持仓数
+  cooldown_minutes: 30          # 冷却期（分钟）
+  
+  # ===== 仓位配置 =====
+  position_size_usd: 5000       # 单只股票仓位（美元）
+futu:
+  host: 127.0.0.1
+  port: 11111
+chandelier:
+  atr_period: 14
+  # ===== 模式开关 =====
+  trailing_enabled: false      # false=ATR吊灯(随最高价上移,ratchet只升不降); true=4阶段固定%移动止盈
+  # ===== 固定止损 (Phase1, 永远生效) =====
+  fixed_stop_pct: 0.05        # 初始固定止损: -5%
+  # ===== ATR固定止盈 (trailing_enabled=false 时, 开仓算定) =====
+  atr_trailing_mult: 2.0      # 止损线 = 最高价 - 2.0×ATR (随最高价上移)
+  # ===== 以下为 trailing_enabled=true 时的4阶段参数 (当前未使用) =====
+  breakeven_pct: 0.03         # Phase2 盈利+3%后止损移至保本价
+  trailing_activate_pct: 0.05 # Phase3 盈利+5%后激活trailing stop
+  trailing_pullback_pct: 0.03 # Phase3 trailing回撤-3%触发止盈
+  atr_threshold_pct: 0.0      # Phase4 盈利≥15%切换到ATR trailing
+backtest_chandelier:
+  kline_type: 60min
+  direction: long
+  holding_days: 22
+  atr_period: 14
+  fixed_stop_pct: 0.05
+  breakeven_pct: 0.03
+  trailing_activate_pct: 0.06
+  trailing_pullback_pct: 0.03
+  atr_threshold_pct: 0.20
+  atr_trailing_mult: 2.0
+data:
+  rate_limit_sleep: 0.05
+  kl_type_1min_days: 4
+  kl_type_5min_days: 15
+
+trading:
+  market_open: 09:30
+  market_close: '16:00'
+  live_trading:
+    buy_timing:
+      # 趋势检测（前30根1分钟K线判断上涨/震荡/下跌）
+      analysis:
+        strong_buy_threshold: 13  # 评分≥13触发买入（canonical ATR自适应评分）
+        watch_threshold: 2
+        trend_detection:
+          observe_bars: 30
+          uptrend_return_pct: 0.005        # 上涨 > 0.5%
+          ma_period_short: 5
+          ma_period_long: 20
+
+        # 追涨模式（上涨趋势用）
+        momentum:
+          strong_buy_threshold: 6
+          rsi_strong: 65
+          rsi_moderate: 55
+          rsi_weak: 50
+          bb_breakout_pct: 80
+          max_rally_pct: 0.03
+
+        # 抄底模式（震荡/下跌用）
+        hybrid:
+          watch_threshold: 4
+          rsi_severe: 28
+          rsi_oversold: 32
+          bb_tight_pct: 20
+          bb_low_pct: 30

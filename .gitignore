@@ -1,0 +1,26 @@
+# ===== 敏感配置文件（含真实 API Key / Token）=====
+mt5-ea/llm_bridge/bridge_config.json
+!mt5-ea/llm_bridge/bridge_config.json.example
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+
+# ===== IDE =====
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ===== 日志 =====
+*.log
+logs/
+
+# ===== OS =====
+.DS_Store
+Thumbs.db
+
+# ===== 环境变量 =====
+.env
