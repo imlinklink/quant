@@ -6,6 +6,10 @@
     python run_all.py --dry-run     # 模拟模式
     python run_all.py --real        # 实盘
     python run_all.py --web-only    # 仅Web（调参用）
+
+人工确认模式（config.yaml -> trading.live_trading.human_approval.enabled: true）：
+    买入信号只推送到 http://127.0.0.1:8899/approvals，
+    页面显示规则理由 + 大模型判定，点「下单」才真正执行。
 """
 import sys
 import os
@@ -61,11 +65,48 @@ class UnifiedSystem:
         logger.info("🌐 Web服务启动 http://127.0.0.1:8899")
         app.run(host="0.0.0.0", port=8899, debug=False, use_reloader=False)
 
+    def _prepare_approval(self):
+        """
+        人工确认：创建/复用与 Web 共用的提案存储，并注入 Flask。
+
+        启用后 DipBuyMonitor 只推信号不自动下单，由确认页点单执行。
+        """
+        from web import app as webapp
+
+        ha = self.config.get('trading', {}).get('live_trading', {}).get('human_approval', {})
+        enabled = bool(ha.get('enabled', False))
+        webapp.approval_enabled = enabled
+
+        if enabled and webapp.approval_store is None:
+            try:
+                from scripts.live_trading.approval.proposal_store import ProposalStore
+                webapp.approval_store = ProposalStore(
+                    ttl_seconds=float(ha.get('proposal_ttl_seconds', 180))
+                )
+            except Exception as e:
+                logger.error(f"[人工确认] 存储初始化失败，系统将暂停买入（fail-closed）: {e}")
+
+        self.approval_store = webapp.approval_store
+        if self.dry_run:
+            webapp.approval_env = 'DRY-RUN'
+        else:
+            webapp.approval_env = str(
+                self.config.get('live_manager', {}).get('trd_env', 'SIMULATE')
+            )
+
+        if enabled:
+            logger.warning(
+                "[人工确认] 已启用：买入信号只推送到确认页，点「下单」才执行。"
+                "页面 http://127.0.0.1:8899/approvals"
+            )
+
     def start(self):
         logger.info("=" * 60)
         mode = "仅Web" if self.web_only else ("DRY-RUN" if self.dry_run else "REAL")
         logger.info(f"  🚀 美股交易系统启动  [{mode}]")
         logger.info("=" * 60)
+
+        self._prepare_approval()
 
         if self.web_only:
             # 仅 Web
@@ -87,12 +128,35 @@ class UnifiedSystem:
             # 抄底监控
             from scripts.live_trading.dip_buy_monitor import DipBuyMonitor
             watch_list = self.config.get("dip_buy", {}).get("watch_list", [])
-            self.dip_monitor = DipBuyMonitor(watch_list, self.config, dry_run=self.dry_run)
+            self.dip_monitor = DipBuyMonitor(
+                watch_list,
+                self.config,
+                dry_run=self.dry_run,
+                approval_store=self.approval_store,
+            )
             self.dip_monitor.start()
             logger.info(f"✅ 抄底监控器已启动 ({', '.join(watch_list) or '无'})")
 
+            # 把 LLM 实际可用状态同步到 Web（便于页面显示徽标）
+            try:
+                from web import app as webapp
+                webapp.approval_llm_enabled = bool(getattr(self.dip_monitor, 'llm_enabled', False))
+                webapp.dip_monitor_ref = self.dip_monitor
+            except Exception:
+                pass
+
         logger.info("\n💡 Ctrl+C 优雅退出")
         logger.info("🌐 http://127.0.0.1:8899")
+
+        # ChandelierExitManager 启动时会注册自己的信号处理器并覆盖主控，
+        # 这里重新接管，保证 Ctrl+C / TERM 能整体优雅退出
+        def _unified_signal(sig, _frame):
+            logger.info("🛑 收到退出信号，正在整体停止...")
+            self.shutdown()
+            sys.exit(0)
+
+        signal.signal(signal.SIGINT, _unified_signal)
+        signal.signal(signal.SIGTERM, _unified_signal)
 
         try:
             while self.running:

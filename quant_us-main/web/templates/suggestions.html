@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>大模型选股建议 - quant_us</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+         margin: 0; background: #0f1117; color: #e2e8f0; }
+  header { background: #1a1d27; border-bottom: 1px solid #2d3748; color: #fff;
+           padding: 14px 22px; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  header h1 { font-size: 18px; margin: 0; }
+  a.link { color: #38bdf8; text-decoration: none; font-size: 13px; }
+  .muted { color: #64748b; font-size: 13px; margin-left: auto; }
+  main { max-width: 1080px; margin: 20px auto; padding: 0 16px; }
+  .empty { text-align: center; color: #6b7280; padding: 60px 0; font-size: 15px; line-height: 1.8; }
+  .summary { background: #1a1d27; border: 1px solid #2d3748; border-radius: 10px;
+             padding: 14px 18px; margin-bottom: 16px; font-size: 14px; line-height: 1.6; }
+  .card { background: #1a1d27; border: 1px solid #2d3748; border-radius: 10px;
+          padding: 16px 18px; margin-bottom: 14px; border-left: 5px solid #38bdf8; }
+  .card.US { border-left-color: #38bdf8; }
+  .card.HK { border-left-color: #f59e0b; }
+  .card.added { opacity: .6; }
+  .card.ignored { opacity: .45; }
+  .row { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .mkt { font-size: 12px; padding: 2px 8px; border-radius: 10px; font-weight: 700; }
+  .mkt.US { background: #0ea5e9; color: #fff; }
+  .mkt.HK { background: #d97706; color: #fff; }
+  .code { font-size: 17px; font-weight: 700; }
+  .dir { font-size: 13px; padding: 2px 8px; border-radius: 10px; }
+  .dir.多头 { background: #dcfce7; color: #15803d; }
+  .dir.观察 { background: #e0f2fe; color: #0369a1; }
+  .dir.空头 { background: #fee2e2; color: #b91c1c; }
+  .status { margin-left: auto; font-size: 13px; color: #94a3b8; }
+  .field { font-size: 13px; color: #94a3b8; margin: 6px 0; }
+  .field b { color: #e2e8f0; }
+  .section { font-size: 12px; font-weight: 700; color: #64748b; margin: 10px 0 4px; }
+  .box { background: #0f1117; border: 1px solid #2d3748; border-radius: 8px;
+         padding: 10px 12px; font-size: 13px; line-height: 1.55; margin-bottom: 6px; }
+  .actions { display: flex; gap: 10px; margin-top: 12px; }
+  button { border: 0; border-radius: 8px; padding: 8px 20px; font-size: 14px;
+           font-weight: 600; cursor: pointer; }
+  button.add { background: #059669; color: #fff; }
+  button.add:hover { background: #047857; }
+  button.ignore { background: #374151; color: #fff; }
+  button.ignore:hover { background: #4b5563; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .tips { font-size: 12px; color: #64748b; margin-top: 16px; line-height: 1.7; }
+</style>
+</head>
+<body>
+<header>
+  <h1>大模型选股建议</h1>
+  <a class="link" href="/approvals">买入确认台 →</a>
+  <span id="meta" class="muted"></span>
+</header>
+<main>
+  <div class="summary" id="summary">加载中…</div>
+  <div id="content"></div>
+  <div class="tips">
+    说明：建议来自宏观日报（盘前+盘后）→ 大模型推理。点「加入观察池」只把它加进监控列表，
+    之后仍需通过抄底评分并到「买入确认台」点单才会执行。大模型永远不能直接下单。
+  </div>
+</main>
+<script>
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g,
+  c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function card(c) {
+  const st = c.status || 'pending';
+  const buttons = st === 'pending'
+    ? '<div class="actions"><button class="add" data-id="' + esc(c.id) + '">加入观察池</button>' +
+      '<button class="ignore" data-id="' + esc(c.id) + '">忽略</button></div>' : '';
+  return '<div class="card ' + esc(c.market) + ' ' + esc(st) + '">' +
+    '<div class="row"><span class="mkt ' + esc(c.market) + '">' + esc(c.market) + '</span>' +
+    '<span class="code">' + esc(c.code) + '</span>' +
+    '<span class="name">' + esc(c.name || '') + '</span>' +
+    '<span class="dir ' + esc(c.direction || '') + '">' + esc(c.direction || '-') + '</span>' +
+    '<span class="status">conf ' + esc((Number(c.confidence || 0) * 100).toFixed(0) + '%') +
+    ' · ' + esc(c.horizon || '-') + (st !== 'pending' ? ' · ' + esc(st === 'added' ? '已加入' : '已忽略') : '') +
+    '</span></div>' +
+    '<div class="section">推荐逻辑（报告依据）</div><div class="box">' + esc(c.rationale || '-') + '</div>' +
+    (c.catalyst ? '<div class="field">催化：<b>' + esc(c.catalyst) + '</b></div>' : '') +
+    (c.risks ? '<div class="field">风险：<b>' + esc(c.risks) + '</b></div>' : '') +
+    buttons + '</div>';
+}
+async function load() {
+  try {
+    const r = await fetch('/api/suggestions');
+    const d = await r.json();
+    const data = d.data || {};
+    const cs = data.candidates || [];
+    const now = new Date().toLocaleString('zh-CN', { hour12: false });
+    document.getElementById('meta').textContent = now + ' · ' + cs.length + ' 条建议 · ' +
+      '美股池 ' + (d.us_watch || []).length + ' 只 · 港股池 ' + (d.hk_watch || []).length + ' 只';
+    const s = document.getElementById('summary');
+    if (!data.generated_at) {
+      s.innerHTML = '⚠️ 还没有生成建议。<br>先运行：<b>python scripts/live_trading/llm_suggestions/run_suggestions.py</b>';
+    } else {
+      s.innerHTML = '<b>宏观结论：</b>' + esc(data.summary || '-') +
+        '<br><span class="muted">生成于 ' + esc(data.generated_at) +
+        ' · 盘前: ' + esc((data.reports || {}).pre ? '✓' : '无') +
+        ' · 盘后: ' + esc((data.reports || {}).post ? '✓' : '无') + '</span>';
+    }
+    const el = document.getElementById('content');
+    if (!cs.length) {
+      el.innerHTML = '<div class="empty">暂无建议候选</div>';
+      return;
+    }
+    el.innerHTML = cs.map(card).join('');
+  } catch (e) {
+    document.getElementById('content').innerHTML = '<div class="empty">连接失败：' + esc(e.message || e) + '</div>';
+  }
+}
+document.addEventListener('click', async function (e) {
+  const btn = e.target.closest('button[data-id]');
+  if (!btn) return;
+  btn.disabled = true;
+  const action = btn.classList.contains('add') ? 'add' : 'ignore';
+  try {
+    const r = await fetch('/api/suggestions/' + encodeURIComponent(btn.dataset.id) + '/' + action,
+      { method: 'POST' });
+    const res = await r.json();
+    if (res.message) alert(res.message);
+    if (!res.ok && res.error) alert(res.error);
+  } catch (err) {
+    alert('网络错误：' + err.message);
+  } finally {
+    load();
+  }
+});
+load();
+setInterval(load, 5000);
+</script>
+</body>
+</html>

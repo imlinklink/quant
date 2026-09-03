@@ -441,18 +441,28 @@ class FutuTrader:
                 raise OrderError(f"查询账户信息失败: {data}")
 
             # 港股优先读取 hk_cash，美股优先读取 us_cash，兜底读 cash
-            cash = 0.0
+            # SIMULATE 账户可能返回 'N/A'/'--'，按 0 处理
+            def _f(v):
+                try:
+                    return float(v)
+                except (TypeError, ValueError):
+                    return 0.0
+
+            row0 = data.iloc[0] if data is not None and len(data) > 0 else None
+            if row0 is None:
+                return {'cash': 0.0, 'total_assets': 0.0, 'market_value': 0.0}
+
             if 'hk_cash' in data.columns:
-                cash = float(data['hk_cash'][0])
+                cash = _f(row0.get('hk_cash'))
             elif 'us_cash' in data.columns:
-                cash = float(data['us_cash'][0])
+                cash = _f(row0.get('us_cash'))
             else:
-                cash = float(data['cash'][0]) if len(data) > 0 and 'cash' in data.columns else 0.0
+                cash = _f(row0.get('cash', 0.0)) if 'cash' in data.columns else 0.0
 
             return {
                 'cash': cash,
-                'total_assets': float(data['total_assets'][0]),
-                'market_value': float(data['market_val'][0])
+                'total_assets': _f(row0.get('total_assets', 0.0)),
+                'market_value': _f(row0.get('market_val', 0.0)),
             }
 
         except (OSError, IOError) as e:

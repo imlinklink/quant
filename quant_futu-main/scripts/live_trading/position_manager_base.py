@@ -379,6 +379,8 @@ class PositionManagerBase(ABC):
         with self._position_lock:
             if not self.strategy_positions:
                 logger.info(f"[{self.market_type}] 当前无持仓，跳过止盈止损检查")
+                if self.live_manager is not None and hasattr(self.live_manager, 'prune_positions_snapshot'):
+                    self.live_manager.prune_positions_snapshot()
                 return
 
             # 创建副本以避免在迭代时修改
@@ -457,6 +459,27 @@ class PositionManagerBase(ABC):
                 
                 logger.info(log_msg)
 
+                # 发布最新持仓状态给监控页（价格/盈亏/止盈止损线都是本轮回测结果）
+                if self.live_manager is not None and hasattr(self.live_manager, 'update_positions_snapshot'):
+                    self.live_manager.update_positions_snapshot(stock_code, {
+                        'stock_code': stock_code,
+                        'stock_name': stock_name,
+                        'manual': is_manual,
+                        'entry_mode': entry_mode,
+                        'quantity': quantity,
+                        'cost_price': cost_price,
+                        'price': price,
+                        'highest_price': highest_price,
+                        'return_pct': return_pct,
+                        'profit_amount': profit_amount,
+                        'atr': atr,
+                        'take_profit_price': take_profit_price,
+                        'stop_loss_price': stop_loss_price,
+                        'should_exit': bool(should_exit),
+                        'reason': reason or '',
+                        'status_text': status,
+                    })
+
                 if should_exit:
                     exits_to_execute.append((stock_code, quantity, cost_price, reason))
 
@@ -469,6 +492,10 @@ class PositionManagerBase(ABC):
         # 执行退出操作
         for stock_code, quantity, cost_price, reason in exits_to_execute:
             self._execute_exit(stock_code, quantity, cost_price, reason)
+
+        # 同步监控页快照：本轮结束后移除已平仓的股票
+        if self.live_manager is not None and hasattr(self.live_manager, 'prune_positions_snapshot'):
+            self.live_manager.prune_positions_snapshot()
 
         logger.info(f"[{self.market_type}] 持仓检查完成")
 

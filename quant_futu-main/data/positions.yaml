@@ -3,7 +3,7 @@ positions:
   stock_code: HK.03690
   stock_name: null
   market: 美团-W
-  position_side: 500
+  position_side: 1000
   qty: 52.12
   avg_price: 80.75
   highest_price: null
@@ -14,8 +14,8 @@ positions:
   strategy_instance: null
   manual: false
   env: REAL
-  create_time: '2026-06-05 13:56:44'
-  update_time: '2026-06-05 13:56:44'
+  create_time: '2026-09-04 01:21:49'
+  update_time: '2026-09-04 01:21:49'
 - id: 2
   stock_code: HK.03277
   stock_name: null
@@ -30,5 +30,5 @@ positions:
   strategy_instance: null
   manual: false
   env: REAL
-  create_time: '2026-06-05 13:56:44'
-  update_time: '2026-06-05 13:56:44'
+  create_time: '2026-09-04 01:21:49'
+  update_time: '2026-09-04 01:21:49'

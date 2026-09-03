@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>美股交易确认台 - quant_us</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+         margin: 0; background: #0f1117; color: #e2e8f0; }
+  header { background: #1a1d27; border-bottom: 1px solid #2d3748; color: #fff;
+           padding: 14px 22px; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  header h1 { font-size: 18px; margin: 0; }
+  .badge { padding: 3px 10px; border-radius: 12px; font-size: 13px; font-weight: 600; }
+  .badge.real { background: #dc2626; color: #fff; }
+  .badge.sim { background: #2563eb; color: #fff; }
+  .badge.llm-on { background: #059669; color: #fff; }
+  .badge.llm-off { background: #6b7280; color: #fff; }
+  .muted { color: #9ca3af; font-size: 13px; margin-left: auto; }
+  main { max-width: 1080px; margin: 20px auto; padding: 0 16px; }
+  .empty { text-align: center; color: #6b7280; padding: 60px 0; font-size: 15px; }
+  .card { background: #1a1d27; border: 1px solid #2d3748; border-radius: 10px;
+          padding: 16px 18px; margin-bottom: 14px; border-left: 5px solid #d1d5db; }
+  .card.pending { border-left-color: #f59e0b; }
+  .card.approved, .card.executing { border-left-color: #38bdf8; }
+  .card.executed { border-left-color: #10b981; }
+  .card.rejected, .card.expired, .card.failed, .card.skipped { opacity: .72; }
+  .row { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .code { font-size: 17px; font-weight: 700; }
+  .name { font-size: 15px; color: #94a3b8; }
+  .status { margin-left: auto; font-size: 13px; padding: 2px 10px; border-radius: 10px;
+            background: #2d3748; font-weight: 600; }
+  .kv { font-size: 13px; color: #94a3b8; margin: 6px 0; display: flex; gap: 18px; flex-wrap: wrap; }
+  .kv b { color: #e2e8f0; }
+  .section-title { font-size: 12px; font-weight: 700; color: #64748b; margin: 10px 0 4px;
+                   text-transform: uppercase; letter-spacing: .03em; }
+  .reason-box, .llm-box { background: #0f1117; border: 1px solid #2d3748; border-radius: 8px;
+                           padding: 10px 12px; font-size: 13px; line-height: 1.55; }
+  .llm-verdict { font-weight: 700; }
+  .verdict-allow, .verdict-pass { color: #10b981; }
+  .verdict-block, .verdict-veto { color: #ef4444; }
+  .verdict-watch, .verdict-delay { color: #f59e0b; }
+  .actions { display: flex; gap: 10px; margin-top: 10px; }
+  button { border: 0; border-radius: 8px; padding: 8px 22px; font-size: 14px;
+           font-weight: 600; cursor: pointer; }
+  button.buy { background: #059669; color: #fff; }
+  button.buy:hover { background: #047857; }
+  button.reject { background: #ef4444; color: #fff; }
+  button.reject:hover { background: #dc2626; }
+  button:disabled { background: #374151; cursor: not-allowed; }
+  .countdown { color: #f87171; font-size: 13px; }
+  .note { font-size: 12px; color: #64748b; margin-top: 6px; }
+  a.back { color: #38bdf8; text-decoration: none; font-size: 13px; margin-left: auto; }
+</style>
+</head>
+<body>
+<header>
+  <h1>美股交易确认台</h1>
+  <span id="envBadge" class="badge">-</span>
+  <span id="llmBadge" class="badge">-</span>
+  <a class="back" href="/">← 返回行情页</a>
+  <span id="clock" class="muted"></span>
+</header>
+<main>
+  <div id="content"><div class="empty">加载中…</div></div>
+</main>
+<script>
+const STATUS_TEXT = {
+  pending: '待确认', approved: '已确认，准备下单', executing: '正在下单',
+  executed: '已成交', rejected: '已拒绝', expired: '已过期', failed: '执行失败', skipped: '已跳过'
+};
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g,
+    c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function fmtTs(sec) {
+  if (!sec) return '-';
+  const d = new Date(sec * 1000);
+  return d.toLocaleString('zh-CN', { hour12: false });
+}
+function llmHtml(llm) {
+  if (!llm) {
+    return '<div class="llm-box"><span class="muted">大模型未启用或本轮无判定（纯规则信号）</span></div>';
+  }
+  if (!llm.verdict) {
+    return '<div class="llm-box"><span class="muted">本轮大模型无判定</span>'
+         + (llm.reason ? '<div>说明：' + esc(llm.reason) + '</div>' : '')
+         + '</div>';
+  }
+  const v = esc(llm.verdict);
+  const cls = (v === 'allow' || v === 'pass') ? 'verdict-allow'
+            : (v === 'block' || v === 'veto') ? 'verdict-block' : 'verdict-watch';
+  const conf = llm.confidence == null ? '-' : (Number(llm.confidence) * 100).toFixed(0) + '%';
+  const label = {allow:'允许买入', pass:'通过', watch:'观望', delay:'暂缓(轻仓)', block:'建议否决', veto:'建议否决'}[v] || v;
+  const modeText = {shadow:'影子模式', real_veto:'真实否决'}[llm.mode] || llm.mode || '';
+  return '<div class="llm-box"><div>大模型判定：<span class="llm-verdict ' + cls + '">' + esc(label) +
+         '</span> <span class="muted">(conf ' + conf + ', ' + esc(modeText) + ')</span></div>' +
+         (llm.risk_level ? '<div>市场风险：' + esc(llm.risk_level) + '</div>' : '') +
+         (llm.reason ? '<div>理由：' + esc(llm.reason) + '</div>' : '') +
+         (llm.model ? '<div class="note">model: ' + esc(llm.model) + '</div>' : '') +
+         '</div>';
+}
+function card(item, now) {
+  const id = esc(item.id);
+  const left = Math.max(0, (item.expires_at || 0) - now);
+  const countdown = item.status === 'pending'
+    ? '<span class="countdown">' + Math.ceil(left / 1000) + 's 后自动过期</span>' : '';
+  const buttons = item.status === 'pending'
+    ? '<div class="actions"><button class="buy" data-id="' + id + '" data-act="approve">下单</button>' +
+      '<button class="reject" data-id="' + id + '" data-act="reject">拒绝</button></div>' : '';
+  const kline = item.kline_score != null
+    ? '<div>日内评分：<b>' + esc(item.kline_score) + '</b>（' + esc(item.kline_signal || '-') + '）</div>' : '';
+  return '<div class="card ' + esc(item.status) + '">' +
+    '<div class="row"><span class="code">' + esc(item.stock_code) + '</span>' +
+    '<span class="name">' + esc(item.stock_name || '') + '</span>' +
+    '<span class="status">' + esc(STATUS_TEXT[item.status] || item.status) + '</span></div>' +
+    '<div class="kv"><span>信号价 <b>' + esc(item.price) + '</b></span>' +
+    '<span>数量 <b>' + esc(item.quantity) + '</b> 股</span>' +
+    '<span>预计金额 <b>$' + esc(item.estimated_cost) + '</b></span>' +
+    '<span>入场方式 <b>' + esc(item.entry_mode || '-') + '</b></span>' +
+    '<span>信号时间 ' + fmtTs(item.created_at) + '</span>' + countdown + '</div>' +
+    (kline ? '<div class="kv">' + kline + '</div>' : '') +
+    '<div class="section-title">规则触发理由</div>' +
+    '<div class="reason-box">' + esc(item.reason || '无') + '</div>' +
+    '<div class="section-title">大模型判定</div>' + llmHtml(item.llm) +
+    (item.note ? '<div class="note">备注：' + esc(item.note) + '</div>' : '') +
+    buttons + '</div>';
+}
+async function load() {
+  try {
+    const r = await fetch('/api/approvals');
+    const data = await r.json();
+    const now = (data.server_time || Date.now() / 1000) * 1000;
+    const envBadge = document.getElementById('envBadge');
+    envBadge.textContent = data.env || '-';
+    envBadge.className = 'badge ' + (String(data.env || '').toUpperCase().includes('REAL') ? 'real' : 'sim');
+    const llmBadge = document.getElementById('llmBadge');
+    llmBadge.textContent = data.llm_enabled ? 'LLM 已接入' : 'LLM 未启用';
+    llmBadge.className = 'badge ' + (data.llm_enabled ? 'llm-on' : 'llm-off');
+    document.getElementById('clock').textContent =
+      new Date(Date.now()).toLocaleString('zh-CN', { hour12: false }) + ' · 2s 自动刷新';
+    const order = { pending: 0, approved: 1, executing: 2 };
+    const items = (data.items || []).sort((a, b) =>
+      (order[a.status] == null ? 9 : order[a.status]) - (order[b.status] == null ? 9 : order[b.status]) ||
+      (b.created_at || 0) - (a.created_at || 0));
+    const el = document.getElementById('content');
+    if (!items.length) {
+      el.innerHTML = '<div class="empty">暂无待确认的交易信号<br><span class="note">抄底评分达到阈值时会出现在这里，点「下单」才真正执行。</span></div>';
+      return;
+    }
+    el.innerHTML = items.map(i => card(i, now)).join('');
+  } catch (e) {
+    document.getElementById('content').innerHTML =
+      '<div class="empty">连接失败：' + esc(e.message || e) + '</div>';
+  }
+}
+document.addEventListener('click', async function (e) {
+  const btn = e.target.closest('button[data-act]');
+  if (!btn) return;
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/approvals/' + encodeURIComponent(btn.dataset.id) + '/' + btn.dataset.act,
+      { method: 'POST' });
+    const res = await r.json();
+    if (!res.ok) alert(res.error || '操作失败');
+  } catch (err) {
+    alert('网络错误：' + err.message);
+  } finally {
+    load();
+  }
+});
+load();
+setInterval(load, 2000);
+</script>
+</body>
+</html>

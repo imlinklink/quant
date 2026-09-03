@@ -31,12 +31,19 @@ logger = logging.getLogger(__name__)
 class DipBuyMonitor:
     """抄底买入监控器"""
     
-    def __init__(self, watch_codes: List[str], config: Dict, dry_run: bool = True):
+    def __init__(
+        self,
+        watch_codes: List[str],
+        config: Dict,
+        dry_run: bool = True,
+        approval_store=None,
+    ):
         """
         Args:
             watch_codes: 监控股票列表 ['US.MU', 'US.AAPL', ...]
             config: 配置字典（来自 config.yaml）
             dry_run: 模拟模式（不实际下单）
+            approval_store: 人工确认提案存储（由 run_all.py 注入，与 Flask 共用）
         """
         self.watch_codes = watch_codes
         self.config = config
@@ -59,10 +66,235 @@ class DipBuyMonitor:
         # 状态
         self._running = False
         self._stop_event = threading.Event()
+
+        # ===== 人工确认（Human-in-the-loop）=====
+        # 启用后：抄底信号只推送到确认页，用户点「下单」才真正执行
+        approval_cfg = config.get('trading', {}).get('live_trading', {}).get('human_approval', {})
+        self.approval_cfg = approval_cfg
+        self.approval_enabled = bool(approval_cfg.get('enabled', False))
+        self.approval_store = approval_store
+        self.approval_max_drift = float(approval_cfg.get('max_price_drift_pct', 0.03))
+        self._approval_rejected_codes: Set[str] = set()
+        self._approval_reject_date: Optional[str] = None
+        self._approval_processed_reject_ids: Set[str] = set()
+
+        # LLM 判定（仅用于页面展示，最终由人工点单决定）
+        self.llm_advisor = None
+        self.llm_enabled = False
+        self.llm_mode_label = 'shadow'
+
+        if self.approval_enabled:
+            if self.approval_store is None:
+                # 独立运行没有 Flask 页面：自建存储，提案只记录不执行（安全）
+                from scripts.live_trading.approval.proposal_store import ProposalStore
+                self.approval_store = ProposalStore(
+                    ttl_seconds=float(approval_cfg.get('proposal_ttl_seconds', 180))
+                )
+                logger.warning(
+                    "[人工确认] 未检测到 Web 确认页注入，提案只记录不执行；"
+                    "请通过 run_all.py 启动（页面 http://127.0.0.1:8899/approvals）"
+                )
+            self._setup_llm()
         
         # 数据源
         self.pool = None
         self.analyzer = None
+
+    def _env_label(self) -> str:
+        """页面/提案上展示的环境标签"""
+        if self.dry_run:
+            return 'DRY-RUN'
+        return str(self.config.get('live_manager', {}).get('trd_env', 'SIMULATE'))
+
+    def _setup_llm(self):
+        """初始化 LLM 顾问（可选，页面展示判定结果用）"""
+        llm_cfg = self.config.get('llm', {})
+        if not llm_cfg.get('enabled', False):
+            return
+        self.llm_mode_label = 'shadow' if llm_cfg.get('shadow_mode', True) else 'real_veto'
+        try:
+            from mutifactor.llm import LLMAdvisor
+            self.llm_advisor = LLMAdvisor(llm_cfg)
+            self.llm_enabled = bool(getattr(self.llm_advisor, 'enabled', False))
+            if not self.llm_enabled:
+                logger.warning("[LLM] 已配置但不可用（API key 缺失/未展开），页面将显示无判定")
+        except Exception as e:
+            logger.warning(f"[LLM] 初始化失败，页面显示无判定: {e}")
+            self.llm_advisor = None
+            self.llm_enabled = False
+
+    def _ask_llm_verdict(self, code: str, price: float) -> Optional[Dict]:
+        """获取大模型对本笔买入的市场风险判定（失败返回 None，不阻塞）"""
+        if self.llm_advisor is None or not self.llm_enabled:
+            return None
+        try:
+            et_now = datetime.now().astimezone(ZoneInfo("America/New_York"))
+            t = et_now.hour * 60 + et_now.minute
+            if t >= 20 * 60 or t < 4 * 60:
+                session = 'overnight(夜盘)'
+            elif t < 9 * 60 + 30:
+                session = 'pre_market(盘前)'
+            elif t < 16 * 60:
+                session = 'regular(盘中)'
+            else:
+                session = 'after_hours(盘后)'
+
+            result = self.llm_advisor.veto_buy(
+                buy_list=[code],
+                holdings=[],
+                cash=float(self.position_size_usd),
+                market_context=f'US 个股 {code}，当前时段 {session}，信号价 ${price:.2f}',
+            )
+            if not result:
+                return {
+                    'verdict': None,
+                    'confidence': None,
+                    'reason': '本轮 LLM 未返回结果（调用失败），纯规则信号',
+                    'mode': self.llm_mode_label,
+                }
+            return {
+                'model': getattr(self.llm_advisor, 'model', ''),
+                'mode': self.llm_mode_label,
+                'verdict': result.get('verdict', 'allow'),
+                'risk_level': result.get('risk_level', 'LOW'),
+                'confidence': result.get('confidence'),
+                'reason': result.get('reason', ''),
+            }
+        except Exception as e:
+            logger.warning(f"[LLM] 判定调用异常: {e}")
+            return {
+                'verdict': None,
+                'confidence': None,
+                'reason': f'LLM 调用异常: {e}',
+                'mode': self.llm_mode_label,
+            }
+
+    def _queue_approval(self, code: str, price: float, result: Dict) -> bool:
+        """把抄底信号推送到确认页（不自动下单）"""
+        if self.approval_store is None:
+            return False
+
+        # 每日重置拒绝记录
+        today = datetime.now().strftime('%Y-%m-%d')
+        if self._approval_reject_date != today:
+            self._approval_rejected_codes.clear()
+            self._approval_reject_date = today
+
+        if code in self._approval_rejected_codes:
+            logger.info(f"[人工确认] {code} 今日已被拒绝，跳过")
+            return False
+        if self.approval_store.has_active_for_code(code):
+            logger.info(f"[人工确认] {code} 已有待确认提案，跳过")
+            return False
+
+        score = int(result.get('score', 0))
+        qty = int(self.position_size_usd / price) if price > 0 else 0
+        if qty <= 0:
+            logger.warning(f"[人工确认] {code} 数量计算为0，无法推送")
+            return False
+
+        details = str(result.get('details', '')).strip()
+        reason = f"抄底信号触发: 评分 {score} ≥ 阈值 {self.buy_threshold}（{result.get('signal', '-')}）"
+        if details:
+            reason += f"；{details}"
+        reason += f"；单票仓位 ${self.position_size_usd:.0f}，信号价约 {qty} 股"
+
+        self.approval_store.create(
+            stock_code=code,
+            stock_name=code,
+            market_type='US',
+            env=self._env_label(),
+            price=price,
+            quantity=qty,
+            estimated_cost=round(price * qty, 2),
+            per_stock_capital=float(self.position_size_usd),
+            entry_mode='dip_buy',
+            trigger_reason='抄底评分 ≥ 阈值',
+            kline_score=score,
+            kline_signal=result.get('signal'),
+            reason=reason,
+            llm=self._ask_llm_verdict(code, price),
+        )
+        logger.warning(
+            f"[人工确认] {code} 推送待确认: 评分={score}/{self.buy_threshold} "
+            f"@{price:.2f} 约{qty}股 —— 请在确认页点「下单」"
+        )
+        return True
+
+    def _execute_approved(self, item: Dict):
+        """执行用户确认的下单（复检持仓/价格漂移后走原有下单逻辑）"""
+        pid = item.get('id')
+        code = item.get('stock_code')
+        if not pid or not code:
+            return
+        try:
+            if not self.approval_store.mark(pid, 'executing', note='用户已确认，开始下单'):
+                return
+
+            # 复检：持仓数上限
+            if self._get_position_count() >= self.max_positions:
+                self.approval_store.mark(pid, 'skipped', note='持仓已满，跳过')
+                return
+
+            # 复检：最新价格与漂移保护
+            price = self._get_current_price(code)
+            if not price or price <= 0:
+                self.approval_store.mark(pid, 'failed', note='无法获取最新价格')
+                return
+            base_price = float(item.get('price') or 0)
+            if base_price > 0:
+                drift = abs(price - base_price) / base_price
+                if drift > self.approval_max_drift:
+                    self.approval_store.mark(
+                        pid,
+                        'expired',
+                        note=f'价格偏离 {drift * 100:.1f}% > {self.approval_max_drift * 100:.0f}%，放弃执行',
+                    )
+                    return
+
+            score = int(item.get('kline_score') or 0)
+            ok = self._execute_buy(code, price, score)
+            if ok:
+                self.approval_store.mark(
+                    pid, 'executed', note=f'按最新价 ${price:.2f} 下单'
+                )
+            else:
+                self.approval_store.mark(pid, 'failed', note='下单失败，请查看日志')
+        except Exception as e:
+            logger.error(f"[人工确认] 执行下单异常 {code}: {e}")
+            try:
+                self.approval_store.mark(pid, 'failed', note=f'异常: {e}')
+            except Exception:
+                pass
+
+    def _process_approvals(self):
+        """处理确认页点击结果（每个监控循环调用一次）"""
+        if self.approval_store is None:
+            return
+
+        today = datetime.now().strftime('%Y-%m-%d')
+        if self._approval_reject_date != today:
+            self._approval_rejected_codes.clear()
+            self._approval_reject_date = today
+
+        self.approval_store.expire_old()
+
+        # 用户拒绝 → 当日不再推送同一只；同股票其它提案一并取消
+        for item in self.approval_store.rejected_items():
+            if item.get('id') in self._approval_processed_reject_ids:
+                continue
+            self._approval_processed_reject_ids.add(item.get('id', ''))
+            self._approval_rejected_codes.add(item.get('stock_code', ''))
+            for other in self.approval_store.get_all():
+                if (
+                    other.get('stock_code') == item.get('stock_code')
+                    and other['status'] in ('pending', 'approved')
+                ):
+                    self.approval_store.mark(other['id'], 'expired', note='同一股票已被拒绝，取消')
+
+        # 用户确认 → 执行
+        for item in self.approval_store.approved_items():
+            self._execute_approved(item)
         
     def _setup(self):
         """初始化连接和分析器"""
@@ -286,7 +518,11 @@ class DipBuyMonitor:
             
             # 5. 判断是否买入（美股只一档阈值）
             if result['score'] >= self.buy_threshold:
-                self._execute_buy(code, price, result['score'])
+                if self.approval_enabled:
+                    # 人工确认模式：只推送，不自动下单
+                    self._queue_approval(code, price, result)
+                else:
+                    self._execute_buy(code, price, result['score'])
                 logger.info(f"  📊 {code} {result['details']}")
             else:
                 logger.info(f"  ℹ️  {code} 评分={result['score']} 未达阈值({self.buy_threshold})")
@@ -300,6 +536,10 @@ class DipBuyMonitor:
         
         while self._running:
             try:
+                # 人工确认模式：先处理页面上的「下单 / 拒绝」结果
+                if self.approval_enabled:
+                    self._process_approvals()
+
                 for code in self.watch_codes:
                     if self._stop_event.is_set():
                         break

@@ -111,6 +111,11 @@ def start_trading(config_path: str, debug: bool = False):
 
         if not manager.start():
             logger.error("交易启动失败（连接步骤失败），请检查上面的错误日志")
+            # 确保确认页/连接资源被释放，避免残留进程占住端口
+            try:
+                manager.stop()
+            except Exception as e:
+                logger.warning(f"清理启动失败资源时出错: {e}")
             process_manager.cleanup()
             sys.exit(1)
 

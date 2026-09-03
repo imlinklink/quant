@@ -139,3 +139,10 @@ capital_records:
   env: REAL
   record_date: '2026-06-05'
   create_time: '2026-06-05 13:56:44'
+- id: 21
+  total_capital: 300000.0
+  used_capital: 0
+  free_capital: 300000.0
+  env: REAL
+  record_date: '2026-09-04'
+  create_time: '2026-09-04 01:29:19'

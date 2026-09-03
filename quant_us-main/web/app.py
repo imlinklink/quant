@@ -83,6 +83,15 @@ logging.basicConfig(
     ]
 )
 
+# ─── 人工确认下单（Human-in-the-loop）───────────────────────────
+# run_all.py 会把与 DipBuyMonitor 共用的提案存储注入到这里；
+# web_only / 独立运行时也会在 load_config() 里自建（没有监控器写入则为空列表）。
+approval_store = None
+approval_enabled = False
+approval_env = 'DRY-RUN'
+approval_llm_enabled = False
+dip_monitor_ref = None
+
 # ─── 配置加载 ──────────────────────────────────────────────────────
 APP_CONFIG = {
     'buy_threshold': 10,  # 运行时可通过 /api/kline-analysis?threshold= 覆盖
@@ -90,6 +99,7 @@ APP_CONFIG = {
 
 def load_config():
     """从 config.yaml 加载默认阈值（启动时一次性读）"""
+    global approval_store, approval_enabled, approval_env, approval_llm_enabled
     config_path = os.path.join(BASE_DIR, 'config.yaml')
     try:
         with open(config_path, 'r', encoding='utf-8') as f:
@@ -97,6 +107,15 @@ def load_config():
         dip = cfg.get('dip_buy', {})
         # 兼容老的 strong/normal 两档配置
         APP_CONFIG['buy_threshold'] = dip.get('buy_threshold', dip.get('strong_buy_threshold', 10))
+        ha = cfg.get('trading', {}).get('live_trading', {}).get('human_approval', {})
+        approval_enabled = bool(ha.get('enabled', False))
+        approval_env = str(cfg.get('live_manager', {}).get('trd_env', 'SIMULATE'))
+        approval_llm_enabled = bool(cfg.get('llm', {}).get('enabled', False))
+        if approval_enabled and approval_store is None:
+            from scripts.live_trading.approval.proposal_store import ProposalStore
+            approval_store = ProposalStore(
+                ttl_seconds=float(ha.get('proposal_ttl_seconds', 180))
+            )
     except Exception as e:
         logger.warning(f'加载 config.yaml 失败，使用默认值: {e}')
 
@@ -446,6 +465,117 @@ def api_kline_analysis():
         'total_bars': len(bars_data),
         'total_signals': len(signals),
     })
+
+
+# ─── 人工确认下单 API ────────────────────────────────────────────
+
+@app.route('/approvals')
+def approvals_page():
+    """人工确认页：显示待确认买入（规则理由 + 大模型判定），点单后才下单"""
+    return render_template('approvals.html')
+
+
+@app.route('/api/approvals')
+def api_approvals():
+    items = approval_store.get_all() if approval_store is not None else []
+    return jsonify({
+        'ok': True,
+        'enabled': approval_enabled,
+        'env': approval_env,
+        'llm_enabled': approval_llm_enabled,
+        'server_time': datetime.now().timestamp(),
+        'items': items,
+    })
+
+
+@app.route('/api/approvals/<proposal_id>/<action>', methods=['POST'])
+def api_approval_action(proposal_id: str, action: str):
+    """用户点击「下单 / 拒绝」"""
+    if approval_store is None:
+        return jsonify({'ok': False, 'error': '人工确认未启用'}), 400
+
+    note = ''
+    try:
+        body = request.get_json(silent=True) or {}
+        note = str(body.get('note', ''))
+    except Exception:
+        pass
+
+    if action == 'approve':
+        ok = approval_store.approve(proposal_id)
+    elif action == 'reject':
+        ok = approval_store.reject(proposal_id, note or '用户点击拒绝')
+    else:
+        return jsonify({'ok': False, 'error': 'unknown action'}), 400
+
+    if not ok:
+        item = approval_store.get(proposal_id)
+        state = item['status'] if item else 'not_found'
+        return jsonify({
+            'ok': False,
+            'error': f'当前状态 {state} 不允许该操作',
+            'status': state,
+        }), 409
+
+    item = approval_store.get(proposal_id)
+    return jsonify({'ok': True, 'status': item['status'] if item else action})
+
+
+# ─── LLM 选股建议页（宏观日报 → 候选 → 一键加入观察池）────────────
+
+@app.route('/suggestions')
+def suggestions_page():
+    return render_template('suggestions.html')
+
+
+@app.route('/api/suggestions')
+def api_suggestions():
+    from scripts.live_trading.llm_suggestions import load_latest
+    from scripts.live_trading.llm_suggestions import watchlist
+
+    data = load_latest()
+    return jsonify({
+        'ok': True,
+        'data': data,
+        'us_watch': watchlist.current_us_watch(),
+        'hk_watch': watchlist.current_hk_watch(),
+        'server_time': datetime.now().timestamp(),
+    })
+
+
+@app.route('/api/suggestions/<suggestion_id>/<action>', methods=['POST'])
+def api_suggestion_action(suggestion_id: str, action: str):
+    from scripts.live_trading.llm_suggestions import load_latest, update_item_status
+    from scripts.live_trading.llm_suggestions import watchlist
+
+    data = load_latest()
+    item = next((c for c in data.get('candidates', []) if c.get('id') == suggestion_id), None)
+    if not item:
+        return jsonify({'ok': False, 'error': '建议不存在（先运行生成器）'}), 404
+
+    if action == 'add':
+        added = False
+        if item.get('market') == 'US':
+            added = watchlist.add_us_watch(item.get('code', ''))
+            # 美股系统正在运行时，立即加入当前监控，不用重启
+            global dip_monitor_ref
+            if dip_monitor_ref is not None:
+                code = str(item.get('code', '')).upper()
+                if code and code not in list(dip_monitor_ref.watch_codes):
+                    dip_monitor_ref.watch_codes.append(code)
+                    added = True
+                    logger.info(f'[LLM选股] 已热加入当前美股监控: {code}')
+        elif item.get('market') == 'HK':
+            added = watchlist.add_hk_watch(item.get('code', ''))
+        update_item_status(suggestion_id, 'added')
+        msg = '已加入观察池' if added else '已在观察池中（或代码格式不正确）'
+        return jsonify({'ok': True, 'message': msg, 'added': added})
+
+    if action == 'ignore':
+        update_item_status(suggestion_id, 'ignored')
+        return jsonify({'ok': True, 'message': '已忽略'})
+
+    return jsonify({'ok': False, 'error': 'unknown action'}), 400
 
 
 if __name__ == '__main__':

@@ -24,3 +24,8 @@ Thumbs.db
 
 # ===== 环境变量 =====
 .env
+
+# ===== 运行时生成数据 =====
+.quant_suggestions/
+quant_us-main/data/llm_decisions/
+quant_futu-main/data/llm_decisions/

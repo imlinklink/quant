@@ -112,6 +112,8 @@ class LiveTradingManager(ABC):
         self.approval_env = 'SIMULATE'
         self.approval_cfg = {}
         self._approval_rejected_codes: Set[str] = set()
+        self._approval_processed_reject_ids: Set[str] = set()
+        self._positions_snapshot: Dict[str, Dict] = {}
         self._init_human_approval()
 
         # 信号处理
@@ -612,7 +614,7 @@ class LiveTradingManager(ABC):
         from datetime import datetime, timedelta
 
         try:
-            stock_codes = self._shared_fetcher.get_blue_chip_stocks()
+            stock_codes = self._get_watch_pool()
             if not stock_codes:
                 logger.warning(f"[{self.market_type}] 股票池为空，跳过同步")
                 return
@@ -631,6 +633,10 @@ class LiveTradingManager(ABC):
 
     def _do_selection(self, current_time: dt_time, current_timestamp: float, current_date):
         """执行选股 - 复用 kline_cache，不重复拉日K线"""
+        # 盘中热加入：config hk.watch_list 新增的股票自动补拉 K 线，
+        # 这样白天点「加入观察池」后无需重启，下一轮选股即可参与
+        self._hot_add_extra_watch_codes(current_date)
+
         should_select = False
         start_time, end_time = self._get_selection_time_window()
 
@@ -656,7 +662,7 @@ class LiveTradingManager(ABC):
                 if not self._shared_fetcher:
                     logger.error(f"{self.market_type}共享数据获取器未初始化")
                     return
-                stock_codes = self._shared_fetcher.get_blue_chip_stocks()
+                stock_codes = self._get_watch_pool()
                 if not stock_codes:
                     return
                 end_date = datetime.now().date()
@@ -894,7 +900,7 @@ class LiveTradingManager(ABC):
         #       若在9:00前启动，两个线程会先触发自己的 _refresh_kline_cache_daily，
         #       与 main thread 的 _daily_data_sync 竞争拉同一批股票，导致永久卡死。
         try:
-            logger.info(f"[{self.market_type}] 启动前预同步K线数据（{len(self._shared_fetcher.get_blue_chip_stocks())}只）...")
+            logger.info(f"[{self.market_type}] 启动前预同步K线数据（{len(self._get_watch_pool())}只）...")
             self._daily_data_sync(require_latest=True)
             self.last_data_sync_date = datetime.now().date()
             self.last_kline_update_date = datetime.now().date()  # 和 _refresh_kline_cache_daily 保持一致，防止线程重复同步
@@ -918,6 +924,7 @@ class LiveTradingManager(ABC):
         logger.info(f"{self.market_type}持仓检查线程已启动")
 
         logger.info(f"{self.market_type}交易已启动（买入+持仓检查双线程）")
+        self.state = TradingState.RUNNING
 
         return True
 
@@ -925,10 +932,10 @@ class LiveTradingManager(ABC):
         """停止交易 - 优雅退出"""
         if self.state == TradingState.STOPPED:
             logger.warning(f"{self.market_type}交易已经处于停止状态")
-            return
-
-        logger.info(f"正在停止{self.market_type}交易...")
-        self.state = TradingState.STOPPED
+            logger.info(f"{self.market_type}重复停止请求，继续清理线程/连接/确认页资源...")
+        else:
+            logger.info(f"正在停止{self.market_type}交易...")
+            self.state = TradingState.STOPPED
 
         # 通知所有线程停止
         self.stop_event.set()
@@ -1245,6 +1252,78 @@ class LiveTradingManager(ABC):
 
     # ==================== 人工确认下单实现 ====================
 
+    def _get_watch_pool(self) -> List[str]:
+        """
+        港股观察池 = Futu 蓝筹股票池 + config hk.watch_list 额外标的。
+
+        额外标的由「大模型选股建议」页人工确认后写入 config，
+        这样 LLM 推荐的港股也能进入选股/监控流程。
+        """
+        pool: List[str] = []
+        try:
+            if self._shared_fetcher is not None:
+                pool = list(self._shared_fetcher.get_blue_chip_stocks() or [])
+        except Exception as e:
+            logger.warning(f"[{self.market_type}] 获取默认股票池失败: {e}")
+
+        extra = self.config.get('hk', {}).get('watch_list', []) or []
+        for code in extra:
+            c = str(code).strip()
+            if c and c not in pool:
+                pool.append(c)
+        if extra:
+            logger.info(
+                f"[{self.market_type}] 观察池: 默认 {len(pool) - len(extra)} 只"
+                f"（部分额外标的可能与默认池重复） + 额外 {len(extra)} 只，共 {len(pool)} 只"
+            )
+        return pool
+
+    def _hot_add_extra_watch_codes(self, current_date=None):
+        """
+        盘中热加入：检测 config hk.watch_list 里还没有日K缓存的股票，
+        单只补拉历史日K线进 kline_cache，让下一轮选股立即参与。
+
+        新股票若历史K线不足 30 根（动量/RSRS 计算需要），会跳过并告警，
+        这是策略的数据要求，不是故障。
+        """
+        try:
+            extra = self.config.get('hk', {}).get('watch_list', []) or []
+            missing = [str(c).strip() for c in extra if str(c).strip() and str(c).strip() not in self.kline_cache]
+            if not missing:
+                return
+            if self._shared_fetcher is None:
+                logger.warning(f"[{self.market_type}] 热加入失败：共享数据获取器未初始化")
+                return
+
+            end_dt = datetime.now().date() if current_date is None else current_date
+            start_dt = end_dt - timedelta(days=200)
+            added = 0
+            for code in missing:
+                try:
+                    df = self._shared_fetcher.fetch_stock_kline(
+                        stock_code=code,
+                        start_date=start_dt.strftime('%Y-%m-%d'),
+                        end_date=end_dt.strftime('%Y-%m-%d'),
+                    )
+                    if df is None or len(df) < 30:
+                        logger.warning(
+                            f"[{self.market_type}] 热加入 {code} 跳过：K线不足30根"
+                            f"（{0 if df is None else len(df)}），需历史数据才能评分"
+                        )
+                        continue
+                    self.kline_cache[code] = df
+                    added += 1
+                    logger.info(f"[{self.market_type}] 热加入成功: {code}（{len(df)} 根日K，已入缓存）")
+                except Exception as e:
+                    logger.warning(f"[{self.market_type}] 热加入 {code} 拉取失败: {e}")
+
+            if added:
+                # 强制下一轮选股立刻使用新缓存
+                self.last_selection_time = 0
+                logger.info(f"[{self.market_type}] 热加入完成: 新增 {added} 只，下一轮选股将包含它们")
+        except Exception as e:
+            logger.error(f"[{self.market_type}] 热加入流程异常: {e}", exc_info=True)
+
     def _init_human_approval(self):
         """
         初始化人工确认模块。
@@ -1277,6 +1356,8 @@ class LiveTradingManager(ABC):
                 llm_enabled=llm_on,
             )
             self.approval_server.start()
+            # 持仓监控页数据源：由持仓检查循环持续更新的快照
+            self.approval_server.positions_provider = self._positions_api_payload
             logger.warning(
                 f"[人工确认] 已启用：买入前必须在页面点「下单」才会执行。"
                 f"打开 http://{host}:{self.approval_server.bound_port} "
@@ -1295,6 +1376,38 @@ class LiveTradingManager(ABC):
             except Exception as e:
                 logger.warning(f"[人工确认] 停止服务失败: {e}")
             self.approval_server = None
+
+    # ==================== 持仓监控页（实时状态快照）====================
+
+    def update_positions_snapshot(self, stock_code: str, status: Dict):
+        """持仓检查循环每 30 秒发布一次最新状态（价格/盈亏/止盈止损线）。"""
+        info = dict(status)
+        info['updated_at'] = time.time()
+        self._positions_snapshot[stock_code] = info
+
+    def prune_positions_snapshot(self):
+        """移除已平仓/已不在账户的股票快照。"""
+        keep = set()
+        if self.position_manager is not None and hasattr(self.position_manager, 'strategy_positions'):
+            keep = set(self.position_manager.strategy_positions.keys())
+        self._positions_snapshot = {
+            code: info for code, info in self._positions_snapshot.items() if code in keep
+        }
+
+    def _positions_api_payload(self) -> Dict:
+        """确认页服务调用：返回持仓监控快照。"""
+        env = str(self.config.get('trading', {}).get('env', self.approval_env))
+        positions = [dict(v) for v in self._positions_snapshot.values()]
+        return {
+            'ok': True,
+            'env': env,
+            'llm_enabled': bool(
+                self.llm_advisor is not None and getattr(self.llm_advisor, 'enabled', False)
+            ),
+            'server_time': time.time(),
+            'count': len(positions),
+            'positions': positions,
+        }
 
     def _queue_buy_proposals(
         self,
@@ -1402,6 +1515,9 @@ class LiveTradingManager(ABC):
             return
 
         for item in self.approval_store.rejected_items():
+            if item.get('id') in self._approval_processed_reject_ids:
+                continue
+            self._approval_processed_reject_ids.add(item.get('id', ''))
             self._approval_rejected_codes.add(item.get('stock_code', ''))
             # 同一只股票其它待确认提案一并取消，避免重复弹出
             for other in self.approval_store.get_all():
@@ -1513,7 +1629,7 @@ class LiveTradingManager(ABC):
                 logger.warning(f"[{self.market_type}] K线缓存刷新失败 - 共享数据获取器未初始化")
                 return
 
-            stock_codes = self._shared_fetcher.get_blue_chip_stocks()
+            stock_codes = self._get_watch_pool()
             if not stock_codes:
                 return
 
