@@ -50,3 +50,6 @@ Thumbs.db
 # Cache
 .cache/
 *.cache
+
+# Approval smoke test
+_smoke_logs/

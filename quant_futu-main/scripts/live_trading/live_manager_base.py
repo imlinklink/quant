@@ -101,7 +101,18 @@ class LiveTradingManager(ABC):
         self.context_builder = None
         self.llm_shadow_mode = True
         self.llm_cooldown = {}  # {trigger: 下次可调用时间戳}
+        self._last_buy_veto_result = None
         self._init_llm()
+
+        # ==================== 人工确认下单（Human-in-the-loop）====================
+        # 启用后买入信号推送到本地确认页，用户点「下单」才真正执行
+        self.approval_enabled_requested = False
+        self.approval_store = None
+        self.approval_server = None
+        self.approval_env = 'SIMULATE'
+        self.approval_cfg = {}
+        self._approval_rejected_codes: Set[str] = set()
+        self._init_human_approval()
 
         # 信号处理
         signal.signal(signal.SIGINT, self._handle_signal)
@@ -391,10 +402,15 @@ class LiveTradingManager(ABC):
                 if self.last_trading_date != current_date:
                     self.buy_timing.reset_daily_state()
                     self.last_trading_date = current_date
+                    # 人工确认模式：前一天拒绝过的股票，新的一天允许重新出信号
+                    self._approval_rejected_codes.clear()
                     # 每日刷新K线缓存
                     self._refresh_kline_cache_daily(current_date)
                     # 标记为需要强制刷新K线（新的一天）
                     self._force_refresh_kline = True
+                # 人工确认模式：先清理超时未点单的提案
+                if self.approval_store is not None:
+                    self.approval_store.expire_old()
 
                 # 检查是否在交易时间窗口内
                 trading_start_time, trading_end_time = self._get_trading_time_window()
@@ -402,6 +418,14 @@ class LiveTradingManager(ABC):
                     # 非交易时段，休眠等待
                     time.sleep(60)
                     continue
+
+                # 人工确认模式：处理页面上的「下单 / 拒绝」点击结果
+                if self.approval_store is not None:
+                    self._process_approval_actions()
+                    if self.approval_store.has_active():
+                        # 还有待确认/正在执行的提案：不产生新信号，2秒后回来继续处理
+                        time.sleep(2)
+                        continue
 
                 # 检查持仓是否已满
                 current_positions_count = len(self.position_manager.strategy_positions)
@@ -679,6 +703,7 @@ class LiveTradingManager(ABC):
 
     def _do_buy(self):
         """执行买入"""
+        self._last_buy_veto_result = None
         cached_stocks = self.cached_selected_stocks.copy() if self.cached_selected_stocks else []
 
         should_buy, reason, entry_mode = self.buy_timing.should_buy_now(
@@ -737,10 +762,12 @@ class LiveTradingManager(ABC):
         kline_cfg = self.config.get('trading', {}).get('live_trading', {}).get('buy_timing', {}).get('analysis', {})
         kline_enabled = kline_cfg.get('enabled', False)
         strict_mode = kline_cfg.get('strict_mode', True)  # 默认严格模式
+        kline_details_by_code = {}
 
         if kline_enabled and hasattr(self.buy_timing, '_get_intraday_kline_scores'):
             kline_results = self.buy_timing._get_intraday_kline_scores(stocks_to_buy, self.price_fetcher)
             if kline_results:
+                kline_details_by_code = {r['stock_code']: r for r in kline_results}
                 logger.info(f"[K线分析] 候选{len(stocks_to_buy)}只，K线强买{sum(1 for r in kline_results if r['signal']=='strong_buy')}只")
                 for r in kline_results[:5]:
                     rsi_str = f"{r['rsi']:.0f}" if r['rsi'] is not None else '-'
@@ -807,11 +834,26 @@ class LiveTradingManager(ABC):
 
         logger.info(f"买入列表: {buy_list}")
 
-        # 执行买入
-        if buy_list:
-            self.position_manager.execute_buy(buy_list)
-        else:
+        # ===== 人工确认模式：只推送，不自动下单 =====
+        if not buy_list:
             logger.warning("没有可买入的股票，买入流程结束")
+            return
+        if self.approval_enabled_requested:
+            if self.approval_store is None:
+                # fail-closed：确认模块不可用也绝不放行自动下单
+                logger.error("[人工确认] 确认模块未启动，为安全起见本轮暂停买入，请检查日志")
+                return
+            self._queue_buy_proposals(
+                buy_list=buy_list,
+                trigger_reason=reason,
+                entry_mode=entry_mode,
+                per_stock_capital=per_stock_capital,
+                kline_details_by_code=kline_details_by_code,
+            )
+            return
+
+        # 传统全自动模式：直接下单
+        self.position_manager.execute_buy(buy_list)
 
     def _save_selection_result(self):
         """保存选股结果"""
@@ -949,6 +991,9 @@ class LiveTradingManager(ABC):
             logger.warning(f"断开{self.market_type}行情连接时IO错误: {e}")
         except Exception as e:
             logger.warning(f"断开{self.market_type}行情连接时出错: {type(e).__name__}: {e}")
+
+        # 关闭人工确认页面
+        self._stop_human_approval()
 
         logger.info(f"{self.market_type}交易已停止")
 
@@ -1131,6 +1176,7 @@ class LiveTradingManager(ABC):
                 cash=cash,
             )
             latency_ms = int((time.time() - t0) * 1000)
+            self._last_buy_veto_result = result
 
             if result is None:
                 final_action = 'LLM 返回 None，降级回纯规则'
@@ -1196,6 +1242,255 @@ class LiveTradingManager(ABC):
         )
 
         return final_list
+
+    # ==================== 人工确认下单实现 ====================
+
+    def _init_human_approval(self):
+        """
+        初始化人工确认模块。
+
+        fail-closed：一旦请求启用但初始化失败，approval_store 保持 None，
+        买入路径会暂停而不是退回自动下单。
+        """
+        cfg = self.config.get('trading', {}).get('live_trading', {}).get('human_approval', {})
+        self.approval_enabled_requested = bool(cfg.get('enabled', False))
+        if not self.approval_enabled_requested:
+            return
+        self.approval_cfg = cfg
+        self.approval_env = str(self.config.get('trading', {}).get('env', 'SIMULATE'))
+        try:
+            from .approval.proposal_store import ProposalStore
+            from .approval.server import ApprovalServer
+
+            ttl = float(cfg.get('proposal_ttl_seconds', 180))
+            host = str(cfg.get('host', '127.0.0.1'))
+            port = int(cfg.get('port', 8899))
+            llm_on = self.llm_advisor is not None and bool(getattr(self.llm_advisor, 'enabled', False))
+
+            self.approval_store = ProposalStore(ttl_seconds=ttl)
+            self.approval_server = ApprovalServer(
+                store=self.approval_store,
+                host=host,
+                port=port,
+                env=self.approval_env,
+                market_type=self.market_type,
+                llm_enabled=llm_on,
+            )
+            self.approval_server.start()
+            logger.warning(
+                f"[人工确认] 已启用：买入前必须在页面点「下单」才会执行。"
+                f"打开 http://{host}:{self.approval_server.bound_port} "
+                f"(env={self.approval_env})"
+            )
+        except Exception as e:
+            logger.error(f"[人工确认] 初始化失败，为安全起见禁止自动下单: {e}")
+            self.approval_store = None
+            self.approval_server = None
+
+    def _stop_human_approval(self):
+        """停止确认页服务。"""
+        if self.approval_server is not None:
+            try:
+                self.approval_server.stop()
+            except Exception as e:
+                logger.warning(f"[人工确认] 停止服务失败: {e}")
+            self.approval_server = None
+
+    def _queue_buy_proposals(
+        self,
+        buy_list: List[Dict],
+        trigger_reason: str,
+        entry_mode: str,
+        per_stock_capital: float,
+        kline_details_by_code: Dict,
+    ):
+        """把准备买入的股票推送到确认页，等待用户点「下单」。"""
+        if self.approval_store is None:
+            return
+
+        # 组装本轮大模型判定（buy_veto 的结果，整批级别）
+        llm_info = None
+        if self.llm_advisor is not None and getattr(self.llm_advisor, 'enabled', False):
+            veto = self._last_buy_veto_result
+            if veto:
+                llm_info = {
+                    'model': getattr(self.llm_advisor, 'model', ''),
+                    'mode': 'shadow' if self.llm_shadow_mode else 'real_veto',
+                    'verdict': veto.get('verdict', 'allow'),
+                    'risk_level': veto.get('risk_level', 'LOW'),
+                    'confidence': veto.get('confidence'),
+                    'reason': veto.get('reason', ''),
+                }
+            else:
+                llm_info = {
+                    'model': getattr(self.llm_advisor, 'model', ''),
+                    'mode': 'shadow' if self.llm_shadow_mode else 'real_veto',
+                    'verdict': None,
+                    'confidence': None,
+                    'reason': '本轮 LLM 未返回结果（调用失败或未启用该接入点），纯规则信号',
+                }
+
+        queued = 0
+        for item in buy_list:
+            code = item['code']
+            if code in self._approval_rejected_codes:
+                logger.debug(f"[人工确认] {code} 今日已被拒绝，不再推送")
+                continue
+            if self.approval_store.has_active_for_code(code):
+                logger.debug(f"[人工确认] {code} 已有待确认提案，跳过")
+                continue
+
+            kline = (kline_details_by_code or {}).get(code)
+            self.approval_store.create(
+                stock_code=code,
+                stock_name=self._get_stock_name(code) or code,
+                market_type=self.market_type,
+                env=self.approval_env,
+                price=item['price'],
+                quantity=item['quantity'],
+                estimated_cost=round(float(item['price']) * int(item['quantity']), 2),
+                per_stock_capital=float(per_stock_capital),
+                entry_mode=entry_mode or item.get('entry_mode', ''),
+                trigger_reason=str(trigger_reason),
+                kline_score=(kline or {}).get('score'),
+                kline_signal=(kline or {}).get('signal'),
+                reason=self._build_proposal_reason(
+                    code, item, trigger_reason, entry_mode, kline
+                ),
+                llm=llm_info,
+            )
+            queued += 1
+            logger.info(
+                f"[人工确认] 已推送待确认: {code} x {item['quantity']} @ {item['price']}"
+            )
+
+        if queued:
+            url_port = self.approval_server.bound_port if self.approval_server else '-'
+            logger.warning(
+                f"[人工确认] {queued} 笔买入信号等待人工确认，"
+                f"请打开页面点击「下单」（http://127.0.0.1:{url_port}）"
+            )
+
+    def _build_proposal_reason(
+        self,
+        code: str,
+        item: Dict,
+        trigger_reason: str,
+        entry_mode: str,
+        kline: Dict,
+    ) -> str:
+        """生成给用户看的规则触发理由。"""
+        parts = [f"买入触发: {trigger_reason}"]
+        if entry_mode:
+            parts.append(f"入场方式: {entry_mode}")
+        if kline:
+            details = str(kline.get('details') or '').strip()
+            parts.append(
+                f"日内K线: {kline.get('score')}分/{kline.get('signal', '-')}"
+                + (f" {details}" if details else "")
+            )
+        parts.append(f"信号价 {item['price']}，约 {item['quantity']} 股")
+        return "；".join(parts)
+
+    def _process_approval_actions(self):
+        """
+        处理确认页上的点击结果（由买入线程每轮调用）：
+          - 用户拒绝 → 记入当日拒绝集合，同股票其余提案一并取消
+          - 用户确认 → 复检后执行下单
+        """
+        if self.approval_store is None:
+            return
+
+        for item in self.approval_store.rejected_items():
+            self._approval_rejected_codes.add(item.get('stock_code', ''))
+            # 同一只股票其它待确认提案一并取消，避免重复弹出
+            for other in self.approval_store.get_all():
+                if (
+                    other.get('stock_code') == item.get('stock_code')
+                    and other['status'] in ('pending', 'approved')
+                ):
+                    self.approval_store.mark(
+                        other['id'], 'expired', note='同一股票已被拒绝，取消'
+                    )
+
+        for item in self.approval_store.approved_items():
+            self._execute_approved_proposal(item)
+
+    def _execute_approved_proposal(self, item: Dict):
+        """
+        执行用户确认的下单：复检持仓/价格漂移/资金后真正下单。
+
+        这里仍然走 position_manager.execute_buy，与全自动模式同一条交易链路，
+        因此 ATR 等硬风控、成交确认、持仓更新逻辑完全不变。
+        """
+        pid = item.get('id')
+        code = item.get('stock_code')
+        if not pid or not code:
+            return
+        try:
+            if not self.approval_store.mark(pid, 'executing', note='用户已确认，开始下单'):
+                return  # 已在执行或已结束，防止重复下单
+
+            # 复检 1：是否已持仓 / 今日已买 / 冷却期
+            if code in self.position_manager.strategy_positions:
+                self.approval_store.mark(pid, 'skipped', note='已持仓，跳过')
+                return
+            if code in self._get_today_bought_stocks():
+                self.approval_store.mark(pid, 'skipped', note='今日已买入过，跳过')
+                return
+            if self.position_manager.is_in_cooldown(code):
+                self.approval_store.mark(pid, 'skipped', note='止损冷却期内，跳过')
+                return
+
+            # 复检 2：最新价格与价格漂移保护
+            price = self.price_fetcher.get_current_price(code)
+            if not price or price <= 0:
+                self.approval_store.mark(pid, 'failed', note='无法获取最新价格')
+                return
+            base_price = float(item.get('price') or 0)
+            if base_price > 0:
+                drift = abs(price - base_price) / base_price
+                max_drift = float(self.approval_cfg.get('max_price_drift_pct', 0.03))
+                if drift > max_drift:
+                    self.approval_store.mark(
+                        pid,
+                        'expired',
+                        note=f'价格偏离 {drift * 100:.1f}% > {max_drift * 100:.0f}%，放弃执行',
+                    )
+                    return
+
+            # 复检 3：按最新价重算数量（仍满足单票资金上限与整手约束）
+            remaining = self.position_manager.get_remaining_capital()
+            per_capital = float(item.get('per_stock_capital') or 0)
+            quantity = self._calculate_buy_quantity(code, per_capital, price, remaining)
+            if quantity <= 0:
+                self.approval_store.mark(
+                    pid, 'skipped', note=f'按最新价 {price:.3f} 重算后不足一手/资金不足'
+                )
+                return
+
+            before = set(self.position_manager.strategy_positions.keys())
+            self.position_manager.execute_buy([{
+                'code': code,
+                'quantity': quantity,
+                'price': price,
+                'entry_mode': item.get('entry_mode') or 'bottom_fish',
+            }])
+            after = set(self.position_manager.strategy_positions.keys())
+            if code in after and code not in before:
+                self.approval_store.mark(
+                    pid, 'executed', note=f'按最新价 {price:.3f} 下单 {quantity} 股'
+                )
+            else:
+                self.approval_store.mark(
+                    pid, 'failed', note='下单流程未更新本地持仓，请核对交易记录'
+                )
+        except Exception as e:
+            logger.error(f"[人工确认] 执行下单异常 {code}: {e}")
+            try:
+                self.approval_store.mark(pid, 'failed', note=f'异常: {e}')
+            except Exception:
+                pass
 
     def _refresh_kline_cache_daily(self, current_date, require_latest=False):
         """每日刷新K线缓存 - 直接从 OpenD 拉，不走数据库

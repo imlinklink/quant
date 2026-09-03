@@ -323,6 +323,17 @@ trading:
           strong_buy_threshold: 6     # 追涨强买阈值
           watch_threshold: 4          # 追涨观望阈值
 
+    # ==================== 人工确认下单（Human-in-the-loop）====================
+    # enabled=true 后：买入信号不再自动下单，而是推送到本地确认页，
+    # 页面显示「规则触发理由 + 大模型判定」，你点「下单」才真正执行。
+    # 确认页地址在启动日志里打印（默认 http://127.0.0.1:8899）。
+    human_approval:
+      enabled: false                 # false=传统全自动下单（维持原行为）
+      host: 127.0.0.1                # 只监听本机，请勿改成 0.0.0.0
+      port: 8899                     # 确认页端口
+      proposal_ttl_seconds: 180      # 超过 N 秒没人点，自动过期不执行
+      max_price_drift_pct: 0.03      # 点「下单」时价格偏离超过 3% 则放弃执行
+
   # 实盘止盈止损配置（与回测共享risk配置）
   # 使用config.yaml中的risk.percentage_stop_loss配置
 
