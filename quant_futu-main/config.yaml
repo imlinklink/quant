@@ -325,3 +325,32 @@ trading:
 
   # 实盘止盈止损配置（与回测共享risk配置）
   # 使用config.yaml中的risk.percentage_stop_loss配置
+
+# ==================== LLM 大模型顾问配置 ====================
+# 所有 LLM 调用默认"影子模式"（只记录不执行），Phase 2 以后才会真正否决。
+# 要启用真实否决，把 shadow_mode 改成 false。
+llm:
+  enabled: false                   # 总开关（false 则完全不调用 LLM，系统降级回纯量化）
+  shadow_mode: true                # 影子模式=true: LLM 输出只记录日志，不影响实际决策
+  api_key: ${DEEPSEEK_API_KEY}     # 环境变量注入（不要写死）
+  base_url: https://api.deepseek.com
+  model: deepseek-chat             # 盘中否决用快模型；复盘/盘前建议可以换更强的
+  timeout: 30                      # 单次调用超时（秒）
+  max_retries: 2                   # 失败重试次数
+
+  # 启用哪些接入点（Phase 1 默认全关，测试 OK 后再逐步开）
+  use_in:
+    candidate_review: false        # 接入点 A：选股后候选复核（影子模式）
+    buy_veto: false                # 接入点 B：买入前市场风险否决（影子模式）
+    market_status: false            # 接入点 C：盘前市场状态判断（Phase 3）
+
+  # 调用频率限制（防止盘中频繁调 LLM 拖慢交易）
+  cooldown_seconds:
+    candidate_review: 900          # 选股复核冷却：同一只股票 15 分钟内只调一次
+    buy_veto: 300                  # 买入否决冷却：5 分钟
+
+  # 安全硬边界（LLM 输出会被强制限制）
+  safety:
+    max_veto_ratio: 0.5            # LLM 最多否决 50% 候选（避免它把候选清光）
+    min_confidence_to_veto: 0.5    # LLM 信心度低于此值不否决
+    never_override_hard_stop: true # LLM 绝对不能 override 硬止损

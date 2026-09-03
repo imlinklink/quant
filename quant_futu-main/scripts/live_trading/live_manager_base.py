@@ -94,9 +94,51 @@ class LiveTradingManager(ABC):
         self._last_trigger_reason = None
         self._last_buy_log_key = None
 
+        # ==================== LLM 顾问模块初始化 ====================
+        # 延迟导入，避免未安装 jsonschema 时 import 级报错
+        self.llm_advisor = None
+        self.llm_logger = None
+        self.context_builder = None
+        self.llm_shadow_mode = True
+        self.llm_cooldown = {}  # {trigger: 下次可调用时间戳}
+        self._init_llm()
+
         # 信号处理
         signal.signal(signal.SIGINT, self._handle_signal)
         signal.signal(signal.SIGTERM, self._handle_signal)
+
+    def _init_llm(self):
+        """初始化 LLM 顾问模块（可降级）"""
+        llm_cfg = self.config.get('llm', {})
+        if not llm_cfg.get('enabled', False):
+            logger.info("[LLM] 未启用，跳过初始化")
+            return
+
+        try:
+            from mutifactor.llm import LLMAdvisor, DecisionLogger, ContextBuilder
+            self.llm_advisor = LLMAdvisor(llm_cfg)
+            self.llm_logger = DecisionLogger()
+            self.context_builder = ContextBuilder()
+            self.llm_shadow_mode = llm_cfg.get('shadow_mode', True)
+            self.llm_cooldown_seconds = llm_cfg.get('cooldown_seconds', {})
+            self.llm_use_in = llm_cfg.get('use_in', {})
+            self.llm_safety = llm_cfg.get('safety', {})
+            logger.info(
+                f"[LLM] 初始化完成: enabled=True, shadow_mode={self.llm_shadow_mode}, "
+                f"use_in={self.llm_use_in}"
+            )
+        except Exception as e:
+            logger.warning(f"[LLM] 初始化失败，降级为纯规则: {e}")
+            self.llm_advisor = None
+
+    def _llm_can_call(self, trigger: str) -> bool:
+        """检查冷却期"""
+        cooldown = self.llm_cooldown_seconds.get(trigger, 60)
+        next_call = self.llm_cooldown.get(trigger, 0)
+        if time.time() < next_call:
+            return False
+        self.llm_cooldown[trigger] = time.time() + cooldown
+        return True
 
     def _handle_signal(self, signum, _frame):
         """处理退出信号"""
@@ -614,7 +656,12 @@ class LiveTradingManager(ABC):
                                                             pool_size=candidate_pool_size)
 
                 if selected:
-                    self.cached_selected_stocks: List[str] = selected[:candidate_pool_size]
+                    selected = self._llm_candidate_review(
+                        selected=selected[:candidate_pool_size],
+                        stocks_data=stocks_data,
+                        current_date=current_date.isoformat(),
+                    )
+                    self.cached_selected_stocks: List[str] = selected
                     self.last_selection_time = current_timestamp
                     logger.info(f"选股完成: {self.cached_selected_stocks}")
                     self._save_selection_result()
@@ -716,6 +763,12 @@ class LiveTradingManager(ABC):
                         logger.info("[K线排序] 无达标股票，保留原始候选（宽松模式）")
             else:
                 logger.warning("[K线分析] 无K线数据，保留原始候选")
+
+        # ==================== 接入点 B: LLM 买入前否决（影子模式）====================
+        stocks_to_buy = self._llm_buy_veto(stocks_to_buy)
+        if not stocks_to_buy:
+            logger.info("LLM 否决买入，本轮跳过")
+            return
 
         # 计算买入数量和资金
         strategy_remaining = self.position_manager.get_remaining_capital()
@@ -905,6 +958,244 @@ class LiveTradingManager(ABC):
             self.position_manager.cleanup_cooldown()
         except Exception as e:
             logger.debug(f"[{self.market_type}] 清理止损冷却期记录时出错: {e}")
+
+    # ==================== LLM 接入点实现 ====================
+
+    def _llm_candidate_review(
+        self,
+        selected: List[str],
+        stocks_data: Dict,
+        current_date: str,
+    ) -> List[str]:
+        """
+        接入点 A: 选股后 LLM 候选复核（影子模式下只记录不执行）
+
+        即使 LLM 关了/挂了，也必须把 selected 原样返回。
+        """
+        if self.llm_advisor is None:
+            return selected
+        if not self.llm_use_in.get('candidate_review', False):
+            return selected
+        if not self._llm_can_call('candidate_review'):
+            return selected
+
+        snapshot = ''
+        result = None
+        latency_ms = 0
+        # 这些在 finally 之前一定会被赋值（try 里有 return，finally 之后再 record）
+        final_list = selected
+        final_action = '未触发（降级）'
+        adopted = False
+        t0 = time.time()
+
+        try:
+            snapshot = self.context_builder.build_candidate_snapshot(
+                selected, stocks_data, current_date
+            )
+            holdings = list(self.position_manager.strategy_positions.keys())
+            result = self.llm_advisor.assess_candidates(
+                candidates=selected,
+                context_snapshot=snapshot,
+                date=current_date,
+                holdings=holdings,
+            )
+            latency_ms = int((time.time() - t0) * 1000)
+
+            if result is None:
+                logger.debug("[LLM] candidate_review 返回 None，按原规则结果执行")
+                final_action = 'LLM 返回 None，降级回纯规则'
+                final_list = selected
+                adopted = False
+
+            # 影子模式：只记录不修改
+            elif self.llm_shadow_mode:
+                verdict = result.get('verdict', 'pass')
+                vetoed = result.get('vetoed', [])
+                confidence = result.get('confidence', 0)
+                logger.info(
+                    f"[LLM-影子] 选股复核: verdict={verdict} "
+                    f"vetoed={vetoed} confidence={confidence:.2f}"
+                )
+                final_action = f'影子模式 verdict={verdict} vetoed={vetoed}'
+                final_list = selected
+                adopted = False
+
+            # Phase 2+: 真正执行否决
+            else:
+                final_list, _vetoed, final_action = self._llm_apply_candidate_veto(
+                    selected, result
+                )
+                adopted = (len(final_list) != len(selected))  # 只有真的删了才 adopted
+
+        except Exception as e:
+            logger.warning(f"[LLM] candidate_review 异常，降级回纯规则: {e}")
+            final_action = f'异常降级: {e}'
+            final_list = selected
+            adopted = False
+
+        # 一次性写日志（走到这里所有变量都已是最新真实值）
+        self.llm_logger.record(
+            trigger='candidate_review',
+            snapshot=snapshot or '(none)',
+            prompt=f'候选股 {len(selected)} 只，日期 {current_date}',
+            llm_output=result,
+            latency_ms=latency_ms,
+            adopted=adopted,
+            final_action=final_action,
+        )
+
+        return final_list
+
+    def _llm_apply_candidate_veto(self, selected: List[str], result: Dict):
+        """
+        Phase 2: 真正执行 LLM 候选否决 —— 带完整安全边界。
+
+        Returns:
+            (final_list, vetoed_list, final_action_str)
+        """
+        safety = self.llm_safety
+        min_confidence = safety.get('min_confidence_to_veto', 0.5)
+        max_veto_ratio = safety.get('max_veto_ratio', 0.5)
+
+        confidence = result.get('confidence', 0)
+        vetoed_raw = result.get('vetoed', [])
+
+        # 信心度不够 → 不否决
+        if confidence < min_confidence:
+            logger.info(f"[LLM] 信心度 {confidence:.2f} < {min_confidence}，不否决")
+            return selected, [], f'信心度不足 ({confidence:.2f}<{min_confidence})，放行'
+
+        # 安全 3 修复: 单候选时 max_veto_count=0，禁止 100% 否决
+        min_keep = max(1, len(selected) - int(len(selected) * max_veto_ratio))
+        max_veto_count = len(selected) - min_keep
+        if max_veto_count <= 0:
+            logger.info(f"[LLM] 候选只有 {len(selected)} 只，安全边界禁止否决")
+            return selected, [], f'候选={len(selected)} 只，安全边界禁止否决'
+
+        vetoed = [c for c in vetoed_raw if c in selected][:max_veto_count]
+        if not vetoed:
+            return selected, [], 'LLM 未建议否决'
+
+        final = [c for c in selected if c not in vetoed]
+        logger.warning(
+            f"[LLM] 真实否决: 原候选={selected} → 否决={vetoed} → 最终={final}"
+        )
+        return final, vetoed, f'真实否决 {vetoed}，最终 {final}'
+
+    def _llm_buy_veto(self, stocks_to_buy: List[str]) -> List[str]:
+        """
+        接入点 B: 买入前 LLM 市场风险否决（影子模式下只记录不执行）
+
+        修复点:
+          - 安全 3: block 也过 confidence 门槛
+          - 安全 4: 持仓盈亏实时算
+          - 日志状态永远反映真实结果（不再提前写死 final_action）
+        """
+        if self.llm_advisor is None:
+            return stocks_to_buy
+        if not self.llm_use_in.get('buy_veto', False):
+            return stocks_to_buy
+        if not self._llm_can_call('buy_veto'):
+            return stocks_to_buy
+
+        result = None
+        latency_ms = 0
+        final_list = stocks_to_buy
+        final_action = '未触发（降级）'
+        adopted = False
+        holdings_info_str = ''
+        t0 = time.time()
+
+        try:
+            # 安全 4: 实时计算持仓盈亏，不再读不存在的 pnl_pct 字段
+            holdings_raw = getattr(self.position_manager, 'strategy_positions', {}) or {}
+            holdings_info = []
+            for code, pos in list(holdings_raw.items())[:6]:
+                try:
+                    current_price = self.price_fetcher.get_current_price(code)
+                    cost_price = pos.get('cost_price', pos.get('avg_price', 0))
+                    if current_price and cost_price > 0:
+                        pnl_pct = (current_price - cost_price) / cost_price
+                    else:
+                        pnl_pct = 0
+                    holdings_info.append(f"{code}:{pnl_pct*100:+.1f}%")
+                except Exception:
+                    holdings_info.append(f"{code}")
+            holdings_info_str = ', '.join(holdings_info)
+
+            cash = getattr(self.position_manager, 'get_remaining_capital', lambda: 0)()
+
+            result = self.llm_advisor.veto_buy(
+                buy_list=stocks_to_buy,
+                holdings=holdings_info,
+                cash=cash,
+            )
+            latency_ms = int((time.time() - t0) * 1000)
+
+            if result is None:
+                final_action = 'LLM 返回 None，降级回纯规则'
+                final_list = stocks_to_buy
+                adopted = False
+
+            # 影子模式
+            elif self.llm_shadow_mode:
+                verdict = result.get('verdict', 'allow')
+                confidence = result.get('confidence', 0)
+                logger.info(
+                    f"[LLM-影子] 买入否决: verdict={verdict} "
+                    f"risk={result.get('risk_level','LOW')} confidence={confidence:.2f}"
+                )
+                final_action = f'影子模式 verdict={verdict} confidence={confidence:.2f}'
+                final_list = stocks_to_buy
+                adopted = False
+
+            # Phase 2+: 真实否决
+            else:
+                verdict = result.get('verdict', 'allow')
+                confidence = result.get('confidence', 0)
+                reason = result.get('reason', '')
+                min_confidence = self.llm_safety.get('min_confidence_to_veto', 0.5)
+
+                if verdict == 'block' and confidence >= min_confidence:
+                    logger.warning(
+                        f"[LLM] 真实否决买入 (conf={confidence:.2f}): "
+                        f"{stocks_to_buy}, reason={reason}"
+                    )
+                    final_action = f'block {stocks_to_buy}: {reason}'
+                    final_list = []
+                    adopted = True
+                elif verdict == 'block' and confidence < min_confidence:
+                    final_action = f'block 但 confidence 不足 ({confidence:.2f}<{min_confidence})，放行'
+                    final_list = stocks_to_buy
+                    adopted = False
+                elif verdict == 'delay':
+                    # delay=轻仓；减仓逻辑尚未实现，先按原计划执行，记录原因供复盘
+                    final_action = f'delay（轻仓未实现，按原计划执行）: {reason}'
+                    final_list = stocks_to_buy
+                    adopted = False
+                else:
+                    final_action = f'allow: {reason}'
+                    final_list = stocks_to_buy
+                    adopted = False
+
+        except Exception as e:
+            logger.warning(f"[LLM] buy_veto 异常，降级回纯规则: {e}")
+            final_action = f'异常降级: {e}'
+            final_list = stocks_to_buy
+            adopted = False
+
+        # 一次性写日志
+        self.llm_logger.record(
+            trigger='buy_veto',
+            snapshot=f"待买入={stocks_to_buy}, 持仓={holdings_info_str}",
+            prompt=f'buy_list={stocks_to_buy}',
+            llm_output=result,
+            latency_ms=latency_ms,
+            adopted=adopted,
+            final_action=final_action,
+        )
+
+        return final_list
 
     def _refresh_kline_cache_daily(self, current_date, require_latest=False):
         """每日刷新K线缓存 - 直接从 OpenD 拉，不走数据库
