@@ -1,0 +1,34 @@
+positions:
+- id: 1
+  stock_code: HK.03690
+  stock_name: null
+  market: 美团-W
+  position_side: 500
+  qty: 52.12
+  avg_price: 80.75
+  highest_price: null
+  init_qty: &id001 !!python/object/apply:mutifactor.infra.yaml_storage.TradingEnv
+  - REAL
+  init_cost: 4208.69
+  strategy: null
+  strategy_instance: null
+  manual: false
+  env: REAL
+  create_time: '2026-06-05 13:56:44'
+  update_time: '2026-06-05 13:56:44'
+- id: 2
+  stock_code: HK.03277
+  stock_name: null
+  market: 长光辰芯
+  position_side: 1400
+  qty: 107.88571428571429
+  avg_price: 108.9
+  highest_price: null
+  init_qty: *id001
+  init_cost: 11748.754285714287
+  strategy: null
+  strategy_instance: null
+  manual: false
+  env: REAL
+  create_time: '2026-06-05 13:56:44'
+  update_time: '2026-06-05 13:56:44'

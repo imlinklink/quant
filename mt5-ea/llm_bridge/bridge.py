@@ -18,6 +18,7 @@ MT5 <-> DeepSeek 人工确认桥接服务
 
 import http.server
 import json
+import csv
 import os
 import re
 import sys
@@ -26,6 +27,7 @@ import time
 import urllib.error
 import urllib.request
 import webbrowser
+from datetime import datetime, timedelta, timezone
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(SCRIPT_DIR, "bridge_config.json")
@@ -44,6 +46,8 @@ CONFIG = {
     "files_dir": DEFAULT_FILES_DIR,
     "llm_folder": "llm_bridge",
     "skills_dir": "",
+    "strategy": "",
+    "default_strategy": "",
     "auto_open_browser": True,
     "request_timeout": 90,
 }
@@ -62,6 +66,55 @@ SYSTEM_PROMPT = """\
 6. close 表示建议平掉当前持仓；此时 stop_loss/take_profit 填 0。
 """
 
+# ================= 策略池 v1 =================
+DEFAULT_STRATEGY_ID = "ema_trend_pullback"
+STRATEGIES = {
+    "ema_trend_pullback": {"name": "EMA趋势回调", "label": "03-EMA趋势回调", "skill_file": "03-黄金EMA趋势回调策略.md"},
+    "london_breakout":    {"name": "伦敦突破",   "label": "10-伦敦突破",    "skill_file": "10-伦敦突破.md"},
+}
+STRATEGY_SKILL_FILES = {v["skill_file"] for v in STRATEGIES.values()}
+
+
+def _last_sunday(year, month):
+    import calendar
+    day = calendar.monthrange(year, month)[1]
+    while datetime(year, month, day).weekday() != 6:
+        day -= 1
+    return datetime(year, month, day)
+
+
+def _europe_dst_on(dt_utc):
+    """欧洲夏令时: 3月最后一个周日01:00 UTC ~ 10月最后一个周日01:00 UTC"""
+    start = _last_sunday(dt_utc.year, 3).replace(hour=1, tzinfo=timezone.utc)
+    end = _last_sunday(dt_utc.year, 10).replace(hour=1, tzinfo=timezone.utc)
+    return start <= dt_utc < end
+
+
+def choose_strategy(snapshot):
+    """确定性路由: 周一~周五伦敦开盘窗口内且亚盘区间数据齐全 -> 伦敦突破, 否则 EMA趋势回调"""
+    default_id = CONFIG.get("default_strategy") or DEFAULT_STRATEGY_ID
+    if default_id not in STRATEGIES:
+        default_id = DEFAULT_STRATEGY_ID
+    utc = safe_float(snapshot.get("UTC_EPOCH"))
+    if utc <= 0:
+        return default_id
+    try:
+        dt_utc = datetime.fromtimestamp(utc, timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return default_id
+    bj = dt_utc + timedelta(hours=8)
+    if bj.weekday() >= 5:  # 周末黄金休市
+        return default_id
+    asia_h = safe_float(snapshot.get("ASIA_HIGH"))
+    asia_l = safe_float(snapshot.get("ASIA_LOW"))
+    if not (asia_h > 0 and asia_l > 0 and asia_h > asia_l):
+        return default_id
+    start_hour = 15 if _europe_dst_on(dt_utc) else 16  # 伦敦08:00 = 北京15:00(夏) / 16:00(冬)
+    if start_hour <= bj.hour < start_hour + 1:
+        return "london_breakout"
+    return default_id
+
+
 state_lock = threading.Lock()
 state = {
     "snapshot_id": None,
@@ -71,10 +124,14 @@ state = {
     "decision_status": "none",  # none/thinking/pending/confirmed/rejected/error/done
     "error": None,
     "executed": None,
+    "strategy": DEFAULT_STRATEGY_ID,
     "updated_at": None,
 }
 server_instance = None
 snapshot_path = decision_path = executed_path = ""
+ledger_path = ""
+ledger_lock = threading.Lock()
+ledger_seen = set()
 
 
 def load_config():
@@ -113,6 +170,7 @@ def parse_snapshot(text):
                     candles.append(tuple(float(x) for x in fields))
                 except ValueError:
                     pass
+    candles.reverse()  # EA按新->旧写入；反转后为旧->新(时间正序)
     return data, candles
 
 
@@ -123,8 +181,21 @@ def safe_float(v):
         return 0.0
 
 
-def build_user_message(snapshot, candles):
+def build_user_message(snapshot, candles, strategy_id=None):
     lines = ["以下是 MT5 终端刚刚生成的市场快照："]
+    info = STRATEGIES.get(strategy_id)
+    if info:
+        lines.append(f"- 路由激活策略: {info['label']}（只有该策略的入场规则可用）")
+    utc = safe_float(snapshot.get("UTC_EPOCH"))
+    if utc > 0:
+        try:
+            bj = datetime.fromtimestamp(utc, timezone.utc) + timedelta(hours=8)
+            lines.append(f"- 北京时间(路由判断用): {bj:%Y-%m-%d %H:%M} 周{bj.isoweekday()}")
+        except (OverflowError, OSError, ValueError):
+            pass
+    for k in ("ASIA_HIGH", "ASIA_LOW", "D1_HIGH", "D1_LOW"):
+        if snapshot.get(k):
+            lines.append(f"- {k}: {snapshot[k]}")
     keys = (
         "SYMBOL", "TIMEFRAME", "BID", "ASK", "SPREAD",
         "FASTMA", "SLOWMA", "LOCAL_SIGNAL",
@@ -135,8 +206,12 @@ def build_user_message(snapshot, candles):
         if snapshot.get(k):
             lines.append(f"- {k}: {snapshot[k]}")
     if candles:
-        parts = [f"o{h[0]} h{h[1]} l{h[2]} c{h[3]}" for h in candles[-5:]]
-        lines.append("- 最近K线(OHLC): " + " | ".join(parts))
+        recent = candles[-6:]  # 时间正序下取最近6根已收盘K线
+        parts = []
+        for j, h in enumerate(recent):
+            k = len(recent) - j  # K-1 为最新一根已收盘
+            parts.append(f"K-{k}: o{h[0]} h{h[1]} l{h[2]} c{h[3]}")
+        lines.append("- 最近K线(旧->新, K-1=最新已收盘): " + " | ".join(parts))
     lines.append("请给出你的交易决策(JSON)。")
     return "\n".join(lines)
 
@@ -174,14 +249,34 @@ def load_skills(cfg):
     return result
 
 
-def build_system_prompt(cfg):
+def load_skill_content(cfg, filename):
+    """读取 skills/ 目录下单个技能文件内容"""
+    skills_dir = cfg.get("skills_dir") or os.path.join(SCRIPT_DIR, "skills")
+    path = os.path.join(skills_dir, filename)
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def build_system_prompt(cfg, strategy_id=None):
     prompt = SYSTEM_PROMPT
-    skills = load_skills(cfg)
-    if skills:
-        parts = [prompt, "\n\n## 你掌握的技能（每次决策前必须遵守）\n"]
-        for name, content in skills:
+    general = [(n, c) for n, c in load_skills(cfg) if n not in STRATEGY_SKILL_FILES]
+    if general:
+        parts = [prompt, "\n\n## 通用技能（每次决策前必须遵守）\n"]
+        for name, content in general:
             parts.append(f"### {name}\n{content}\n")
         prompt = "\n".join(parts)
+    sid = strategy_id or cfg.get("default_strategy") or DEFAULT_STRATEGY_ID
+    if sid not in STRATEGIES:
+        sid = DEFAULT_STRATEGY_ID
+    info = STRATEGIES[sid]
+    text = load_skill_content(cfg, info["skill_file"])
+    if text:
+        prompt += ("\n\n## 本次激活的交易策略: " + info["label"] + "\n"
+                   "只允许执行本策略的入场规则；其他策略的入场规则一律禁用。持仓管理按通用技能执行。\n\n"
+                   + text + "\n")
     return prompt
 
 
@@ -224,13 +319,14 @@ def normalize_decision(parsed, snapshot, cfg):
     }
 
 
-def ask_deepseek(snapshot, candles, cfg):
+def ask_deepseek(snapshot, candles, cfg, strategy_id=None):
     url = cfg["base_url"].rstrip("/") + "/chat/completions"
+    sid = strategy_id or choose_strategy(snapshot)
     payload = {
         "model": cfg["model"],
         "messages": [
-            {"role": "system", "content": build_system_prompt(cfg)},
-            {"role": "user", "content": build_user_message(snapshot, candles)},
+            {"role": "system", "content": build_system_prompt(cfg, sid)},
+            {"role": "user", "content": build_user_message(snapshot, candles, sid)},
         ],
         "temperature": 0.2,
         "response_format": {"type": "json_object"},
@@ -262,7 +358,72 @@ def write_decision(signal_id, status, decision=None):
     os.replace(tmp, decision_path)
 
 
+# ---- 决策台账: 只追加 CSV，记录每个信号的生命周期事件 ----
+LEDGER_COLUMNS = ["ts", "signal_id", "status", "strategy", "action", "lot", "sl", "tp",
+                  "confidence", "reason", "error", "bid", "ask", "spread",
+                  "position", "balance", "equity"]
+
+
+def append_ledger(signal_id, status, action="", lot="", sl="", tp="", confidence="",
+                  reason="", error="", market=None, strategy=None):
+    """向 ledger.csv 追加一条事件；同一 (signal_id, status) 只记一次。"""
+    if not ledger_path:
+        return
+    key = (str(signal_id), status)
+    with ledger_lock:
+        if key in ledger_seen:
+            return
+        ledger_seen.add(key)
+        if market is None:
+            with state_lock:
+                market = state.get("snapshot") or {}
+        field_map = {"BID": "bid", "ASK": "ask", "SPREAD": "spread",
+                     "POSITION": "position", "BALANCE": "balance", "EQUITY": "equity"}
+        if strategy is None:
+            with state_lock:
+                st_id = state.get("strategy") or CONFIG.get("default_strategy") or DEFAULT_STRATEGY_ID
+            st_info = STRATEGIES.get(st_id) or STRATEGIES[DEFAULT_STRATEGY_ID]
+            strategy = st_info["label"]
+        row = {"ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+               "signal_id": str(signal_id), "status": status,
+               "strategy": strategy or "",
+               "action": str(action), "lot": str(lot), "sl": str(sl), "tp": str(tp),
+               "confidence": str(confidence), "reason": reason or "", "error": error or ""}
+        for k, col in field_map.items():
+            row[col] = str(market.get(k, ""))
+        try:
+            exists = os.path.exists(ledger_path) and os.path.getsize(ledger_path) > 0
+            with open(ledger_path, "a", newline="", encoding="utf-8") as f:
+                w = csv.DictWriter(f, fieldnames=LEDGER_COLUMNS)
+                if not exists:
+                    w.writeheader()
+                w.writerow(row)
+        except OSError as e:
+            print(f"[警告] 决策台账写入失败: {e}")
+
+
+def load_ledger_history():
+    """启动时读取已有 ledger.csv，把 (signal_id, status) 记入去重集合。"""
+    try:
+        if ledger_path and os.path.exists(ledger_path):
+            with open(ledger_path, newline="", encoding="utf-8") as f:
+                for row in csv.DictReader(f):
+                    if row.get("signal_id") and row.get("status"):
+                        ledger_seen.add((row["signal_id"], row["status"]))
+    except OSError:
+        pass
+
+
+def ledger_has_answer(signal_id):
+    """该快照是否已经产生过答案(排除纯 error，允许重启后重试失败请求)。"""
+    sid = str(signal_id)
+    with ledger_lock:
+        return any(st in ("pending", "confirmed", "rejected", "executed", "failed")
+                   for i, st in ledger_seen if i == sid)
+
+
 def on_new_snapshot(data, candles):
+    active = choose_strategy(data)
     with state_lock:
         state.update(
             snapshot_id=data.get("ID"),
@@ -272,9 +433,12 @@ def on_new_snapshot(data, candles):
             decision_status="thinking",
             error=None,
             executed=None,
+            strategy=active,
             updated_at=time.time(),
         )
+    info = STRATEGIES.get(active, STRATEGIES[DEFAULT_STRATEGY_ID])
     print(f"\n[新快照] {data.get('SYMBOL')} ID={data.get('ID')}，正在询问 DeepSeek…")
+    print(f"[路由] 激活策略: {info['label']}（{info['name']}）")
     threading.Thread(target=ask_and_publish, daemon=True).start()
 
 
@@ -283,14 +447,20 @@ def ask_and_publish():
         sid = state["snapshot_id"]
         snap = dict(state["snapshot"] or {})
         candles = list(state["candles"])
+        active = state.get("strategy") or choose_strategy(snap)
+    info = STRATEGIES.get(active, STRATEGIES[DEFAULT_STRATEGY_ID])
     try:
-        decision = ask_deepseek(snap, candles, CONFIG)
+        decision = ask_deepseek(snap, candles, CONFIG, strategy_id=active)
         with state_lock:
             state["decision"] = decision
             state["decision_status"] = "pending"
             state["error"] = None
             state["updated_at"] = time.time()
         write_decision(sid, "pending", decision)
+        append_ledger(sid, "pending", action=decision["action"],
+                      lot=decision["lot_size"], sl=decision["stop_loss"],
+                      tp=decision["take_profit"], confidence=decision["confidence"],
+                      reason=decision["reason"], market=snap, strategy=info["label"])
         print(
             f"[待确认] {decision['action']} lot={decision['lot_size']} "
             f"SL={decision['stop_loss']} TP={decision['take_profit']} 置信度={decision['confidence']}"
@@ -304,6 +474,7 @@ def ask_and_publish():
             state["error"] = str(e)
             state["updated_at"] = time.time()
         print(f"[错误] 询问 DeepSeek 失败: {e}")
+        append_ledger(sid, "error", error=str(e)[:300], market=snap, strategy=info["label"])
 
 
 def confirm_decision():
@@ -315,6 +486,9 @@ def confirm_decision():
         state["decision_status"] = "confirmed"
         state["updated_at"] = time.time()
     write_decision(sid, "confirmed", d)
+    append_ledger(sid, "confirmed", action=d["action"], lot=d["lot_size"],
+                  sl=d["stop_loss"], tp=d["take_profit"],
+                  confidence=d["confidence"], reason=d["reason"])
     print(f"[已确认] 将按建议执行: {d['action']} SL={d['stop_loss']} TP={d['take_profit']}")
     return True, "已确认，等待 EA 执行"
 
@@ -324,9 +498,14 @@ def reject_decision():
         if state["decision_status"] != "pending":
             return False, "当前没有待拒绝的决策"
         sid = state["snapshot_id"]
+        d = state["decision"] or {}
         state["decision_status"] = "rejected"
         state["updated_at"] = time.time()
     write_decision(sid, "rejected")
+    append_ledger(sid, "rejected", action=d.get("action", ""),
+                  lot=d.get("lot_size", ""), sl=d.get("stop_loss", ""),
+                  tp=d.get("take_profit", ""), confidence=d.get("confidence", ""),
+                  reason=d.get("reason", ""))
     print("[已拒绝] 本次建议不执行")
     return True, "已拒绝"
 
@@ -354,10 +533,15 @@ def watcher_loop():
 
         if text and text.strip():
             data, candles = parse_snapshot(text)
-            sid = data.get("ID")
-            if sid and sid != last_id:
-                last_id = sid
-                on_new_snapshot(data, candles)
+            # 只处理完整写入的快照(EA 末尾写 COMPLETE=1)，避免读到半个文件
+            if data.get("COMPLETE") == "1":
+                sid = data.get("ID")
+                if sid and sid != last_id:
+                    last_id = sid
+                    # 重启后跳过已记录过答案的快照，避免重复询问/重复台账
+                    if ledger_has_answer(sid):
+                        continue
+                    on_new_snapshot(data, candles)
 
         try:
             with open(executed_path, "r", encoding="utf-8", errors="replace") as f:
@@ -370,6 +554,9 @@ def watcher_loop():
                         if state["decision_status"] == "confirmed":
                             state["decision_status"] = "done"
                         state["updated_at"] = time.time()
+                        parts_ex = ex.split("|")
+                        if len(parts_ex) >= 3:
+                            append_ledger(parts_ex[0], parts_ex[1].lower(), action=parts_ex[2])
         except FileNotFoundError:
             pass
         except OSError:
@@ -553,7 +740,7 @@ def console_loop():
 
 
 def main():
-    global snapshot_path, decision_path, executed_path, server_instance
+    global snapshot_path, decision_path, executed_path, ledger_path, server_instance
     cfg = load_config()
 
     files_dir = cfg["files_dir"]
@@ -561,33 +748,47 @@ def main():
     snapshot_path = os.path.join(llm_dir, "snapshot.txt")
     decision_path = os.path.join(llm_dir, "decision.txt")
     executed_path = os.path.join(llm_dir, "executed.txt")
+    ledger_path = os.path.join(llm_dir, "ledger.csv")
 
     if not os.path.isdir(files_dir):
         print(f"[错误] 找不到 MT5 Files 目录: {files_dir}")
         print("请把 MT5_FILES_DIR 环境变量或 bridge_config.json 的 files_dir 改为你机器上的实际路径。")
         sys.exit(1)
     os.makedirs(llm_dir, exist_ok=True)
+    load_ledger_history()
 
     if not cfg["api_key"]:
         print("[警告] 未配置 DEEPSEEK_API_KEY。可 export DEEPSEEK_API_KEY=sk-xxx 或写入 bridge_config.json。")
 
-    skills = load_skills(cfg)
-    if skills:
-        print(f"  已加载技能({len(skills)}个): " + ", ".join(name for name, _ in skills))
+    general = [(n, c) for n, c in load_skills(cfg) if n not in STRATEGY_SKILL_FILES]
+    if general:
+        print(f"  已加载通用技能({len(general)}个): " + ", ".join(name for name, _ in general))
     else:
         print("  技能: 无（可在 skills/ 目录添加 .md 文件）")
+    print("  策略池(" + str(len(STRATEGIES)) + "套): " + ", ".join(v["label"] for v in STRATEGIES.values()))
 
     url = f"http://127.0.0.1:{cfg['port']}"
     print("=" * 60)
     print("MT5 × DeepSeek 人工确认桥接已启动")
     print(f"  快照目录: {llm_dir}")
+    print(f"  决策台账: {ledger_path}")
+    print(f"  默认策略: {STRATEGIES[DEFAULT_STRATEGY_ID]['label']} | 伦敦突破窗口: 北京15:00-16:00(夏令时)/16:00-17:00(冬令时)，自动切换")
     print(f"  确认网页: {url}")
     print("  指令: y=确认 n=拒绝 r=重问 q=退出")
     print("=" * 60)
 
     threading.Thread(target=watcher_loop, daemon=True).start()
 
-    server_instance = http.server.ThreadingHTTPServer(("127.0.0.1", cfg["port"]), BridgeHandler)
+    try:
+        server_instance = http.server.ThreadingHTTPServer(("127.0.0.1", cfg["port"]), BridgeHandler)
+    except OSError as e:
+        print(f"[错误] 启动网页服务失败: 端口 {cfg['port']} 被占用 ({e})")
+        print("可能原因: 已经有一个 bridge.py 实例在运行。")
+        print("解决办法: 1) 结束旧实例后重试; 2) 或修改 bridge_config.json 把 port 改成 8788。")
+        print("查找并结束旧实例:")
+        print(f"  lsof -nP -iTCP:{cfg['port']} -sTCP:LISTEN")
+        print("  kill <上面显示的PID>")
+        sys.exit(1)
     threading.Thread(target=server_instance.serve_forever, daemon=True).start()
 
     if cfg.get("auto_open_browser", True):

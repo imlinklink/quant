@@ -5,5 +5,7 @@
   "port": 8787,
   "files_dir": "/Users/wh1817w/Library/Application Support/net.metaquotes.wine.metatrader5/drive_c/Program Files/MetaTrader 5/MQL5/Files",
   "skills_dir": "",
-  "auto_open_browser": true
+  "auto_open_browser": true,
+  "strategy": "",
+  "default_strategy": ""
 }

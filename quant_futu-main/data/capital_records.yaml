@@ -1,0 +1,141 @@
+capital_records:
+- create_time: '2026-05-27 13:41:58'
+  env: REAL
+  free_capital: 300000.0
+  id: 35
+  record_date: '2026-05-27'
+  total_capital: 300000.0
+  used_capital: 0.0
+- id: 2
+  total_capital: 300000.0
+  used_capital: 0.0
+  free_capital: 300000.0
+  env: REAL
+  record_date: '2026-05-27'
+  create_time: '2026-05-27 13:56:59'
+- id: 3
+  total_capital: 300000.0
+  used_capital: 0.0
+  free_capital: 300000.0
+  env: REAL
+  record_date: '2026-05-27'
+  create_time: '2026-05-27 14:11:59'
+- id: 4
+  total_capital: 300000.0
+  used_capital: 0.0
+  free_capital: 300000.0
+  env: REAL
+  record_date: '2026-05-27'
+  create_time: '2026-05-27 14:26:59'
+- id: 5
+  total_capital: 300000.0
+  used_capital: 0.0
+  free_capital: 300000.0
+  env: REAL
+  record_date: '2026-05-27'
+  create_time: '2026-05-27 14:46:05'
+- id: 6
+  total_capital: 300000.0
+  used_capital: 0.0
+  free_capital: 300000.0
+  env: REAL
+  record_date: '2026-05-27'
+  create_time: '2026-05-27 14:56:26'
+- id: 7
+  total_capital: 300000.0
+  used_capital: 0.0
+  free_capital: 300000.0
+  env: REAL
+  record_date: '2026-05-27'
+  create_time: '2026-05-27 14:56:27'
+- id: 8
+  total_capital: 300000.0
+  used_capital: 0.0
+  free_capital: 300000.0
+  env: REAL
+  record_date: '2026-05-27'
+  create_time: '2026-05-27 15:11:27'
+- id: 9
+  total_capital: 300000.0
+  used_capital: 0.0
+  free_capital: 300000.0
+  env: REAL
+  record_date: '2026-05-28'
+  create_time: '2026-05-28 15:54:49'
+- id: 10
+  total_capital: 300000.0
+  used_capital: 0.0
+  free_capital: 300000.0
+  env: REAL
+  record_date: '2026-05-28'
+  create_time: '2026-05-28 09:30:02'
+- id: 11
+  total_capital: 300000.0
+  used_capital: 0.0
+  free_capital: 300000.0
+  env: REAL
+  record_date: '2026-05-28'
+  create_time: '2026-05-28 09:31:03'
+- id: 12
+  total_capital: 300000.0
+  used_capital: 0.0
+  free_capital: 300000.0
+  env: REAL
+  record_date: '2026-05-28'
+  create_time: '2026-05-28 09:32:03'
+- id: 13
+  total_capital: 300000.0
+  used_capital: 72850.0
+  free_capital: 227150.0
+  env: REAL
+  record_date: '2026-05-29'
+  create_time: '2026-05-29 14:52:48'
+- id: 14
+  total_capital: 300000.0
+  used_capital: 72850.0
+  free_capital: 227150.0
+  env: REAL
+  record_date: '2026-05-30'
+  create_time: '2026-05-30 00:03:06'
+- id: 15
+  total_capital: 300000.0
+  used_capital: 72850.0
+  free_capital: 227150.0
+  env: REAL
+  record_date: '2026-05-31'
+  create_time: '2026-05-31 00:00:00'
+- id: 16
+  total_capital: 300000.0
+  used_capital: 0.0
+  free_capital: 300000.0
+  env: REAL
+  record_date: '2026-06-01'
+  create_time: '2026-06-01 15:52:01'
+- id: 17
+  total_capital: 300000.0
+  used_capital: 137900.0
+  free_capital: 162100.0
+  env: REAL
+  record_date: '2026-06-02'
+  create_time: '2026-06-02 15:58:50'
+- id: 18
+  total_capital: 300000.0
+  used_capital: 148500.0
+  free_capital: 151500.0
+  env: REAL
+  record_date: '2026-06-03'
+  create_time: '2026-06-03 15:59:27'
+- id: 19
+  total_capital: 300000.0
+  used_capital: 151040.0
+  free_capital: 148960.0
+  env: REAL
+  record_date: '2026-06-04'
+  create_time: '2026-06-04 15:50:59'
+- id: 20
+  total_capital: 300000.0
+  used_capital: 151040.0
+  free_capital: 148960.0
+  env: REAL
+  record_date: '2026-06-05'
+  create_time: '2026-06-05 13:56:44'

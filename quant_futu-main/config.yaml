@@ -1,0 +1,327 @@
+# Mutifactor 策略配置文件
+# 支持使用 # 添加注释
+
+# ==================== 市场配置 ====================
+market:
+  # 市场类型:
+  #   - HK: 港股（使用富途API，数据从YAML读取）
+  #   - SH: 沪市A股（使用AkShare拉取数据）
+  #   - SZ: 深市A股（使用AkShare拉取数据）
+  #   - CH: 沪深全市场（SH + SZ，共300只）
+  type: HK
+
+  # 涨跌停板检测（仅A股有效，港股无此限制）
+  price_limit:
+    enabled: true           # 是否启用涨跌停板检测
+    block_buy_on_limit: true   # 涨停时禁止买入
+    block_sell_on_limit: true  # 跌停时禁止卖出
+
+# ==================== 数据库配置 ====================
+database:
+  host: localhost
+  port: 3306
+  user: root
+  password: ''
+  database: quant
+
+# ==================== A股专用配置（market.type = SH/SZ 时生效）====================
+a_share:
+  # 股票池来源:
+  #   - csi1000: 中证1000成分股（约1000只，推荐）
+  #   - csi500: 中证500成分股（约500只）
+  #   - csi300: 沪深300成分股（约300只）
+  #   - all: 所有A股（约5000只，较慢）
+  #   - custom: 自定义列表（使用下面的codes字段）
+  stock_pool_source: csi500
+
+  # 自定义股票列表（当 stock_pool_source = custom 时使用）
+  # stock_codes:
+  #   - SH.600000    # 浦发银行
+  #   - SH.600519    # 贵州茅台
+  #   - SZ.000001    # 平安银行
+
+  # 数据获取限流配置
+  rate_limit:
+    delay_seconds: 3.0      # 请求间隔（秒），避免被AkShare限流
+    max_retries: 3         # 最大重试次数
+
+  # 回测时间范围
+  backtest:
+    start_date: '2025-01-01'
+    end_date: null         # null 表示到最新交易日
+
+# ==================== 港股专用配置（market.type = HK 时生效）====================
+hk:
+  # 富途OpenD配置
+  futu:
+    host: 127.0.0.1
+    port: 11111
+    security_firm: FUTUSECURITIES
+    # 交易密码（REAL模式需要，填写后自动解锁）
+
+# ==================== 基础策略配置 ====================
+strategy:
+  # 初始资金
+  #   - 港股(HK): 港币（如 300000.0）
+  #   - A股(SH/SZ): 人民币（如 1000000.0）
+  initial_capital: 300000.0
+
+  # 回测开始日期 (格式: YYYY-MM-DD)
+  start_date: '2020-01-01'
+
+  # 回测结束日期，null 表示到当前日期
+  end_date: null
+
+# ==================== 风控参数 ====================
+risk:
+  # 止盈止损策略类型:
+  #   - atr_dynamic: ATR动态止盈止损 - 吊顶止盈(3×ATR) + 吊灯止损(2×ATR)，让利润充分奔跑同时锁定部分利润
+  #   - atr_stop_only: ATR纯止损 - 只有吊灯止损(2×ATR)，无止盈，理论上可以无限持有，保守型
+  #   - hybrid_stop: 混合止损 - 亏损时固定止损(8%)保护本金，盈利后切换ATR吊灯止损(2×ATR)追踪，激进型
+  exit_strategy: atr_dynamic
+
+  # ATR参数
+  atr_period: 14  # ATR计算周期
+
+  # ATR止盈止损倍数
+  take_profit_multiplier: 3.0  # atr_dynamic策略: 止盈从最高价回撤 4.0 * ATR
+  stop_loss_multiplier: 2.0    # atr_stop_only策略: 止损从最高价下跌 3.0 * ATR
+  stop_loss_cooldown_days: 3  # 止损卖出后冷却期（天），期间不重买该股
+
+  # 追涨止损保护（追涨入仓 Layer 1 保护）
+  momentum_stop_pct: 0.02    # 固定止损：入场价 × (1 - 此值)，默认2%，即 entry×0.98
+  momentum_trail_mult: 1.5  # 追踪止损：入场后高点 - 此值 × ATR，默认1.5×ATR
+
+  # 吊灯周期（用于计算N日最高价）
+  chandelier_period: 22
+
+  # 渐进式时间退出（持仓越久，止损越紧）
+  time_exit:
+    enabled: true
+    phase1_days: 120       # 第一阶段：缩短chandelier周期（22→10）
+    phase2_days: 250       # 第二阶段：进一步缩短（22→5）+ ATR倍数减半
+    phase3_days: 350       # 第三阶段：强制平仓，无论盈亏
+    phase1_period: 10      # 第一阶段chandelier_period
+    phase2_period: 5       # 第二阶段chandelier_period
+    phase2_multiplier: 1.0 # 第二阶段ATR止损倍数
+    profit_exempt_pct: 0.30  # 浮盈超过此比例时豁免时间退出（让大牛股继续奔跑）
+
+  # RSRS早期豁免：持仓前N天不触发RSRS止损，改用硬止损保护
+  early_hard_stop_pct: 0.08  # 早期硬止损比例（持仓<10天时，亏损8%无条件止损）
+
+  # RSRS预警参数
+  rsrs_warn:
+    early_exempt_days: 10  # 持仓前10天豁免RSRS止损（给动量股喘息空间）
+
+  # 阴跌趋势加速止损（长期亏损+趋势走坏时收紧止损）
+  decline_acceleration:
+    enabled: true
+    min_holding_days: 60   # 最少持仓天数才启用阴跌检测
+    loss_threshold: -0.05  # 浮亏超过5%才触发
+    atr_multiplier_tight: 1.0   # 轻度收紧：MA20<价格时ATR倍数
+    hard_stop_loss_pct: 0.10    # 重度收紧：MA20<MA60时固定止损比例
+
+  # 单只股票最大仓位比例（防止all in）
+  max_single_position_ratio: 0.6  # 单只股票最多50%资金
+
+  # 波动率加权仓位分配
+  volatility_weighted_enabled: true  # 是否启用波动率加权（波动率低的股票分配更多资金）
+  volatility_window: 20  # 波动率计算窗口（天）
+  volatility_min_weight: 0.1  # 最小仓位权重（防止单只股票权重过小）
+
+  # 融资倍数（差一点点钱时自动启用融资买入，1.0=不用融资）
+  margin_multiplier: 1.05  # 允许使用可用资金的5%融资，即最多可花 self.cash × 1.05
+
+# ==================== 动量策略参数 ====================
+momentum:
+  # 动量计算窗口（使用最近N天计算动量得分）
+  momentum_window: 25
+
+  # RSRS计算窗口（计算短期趋势）
+  rsrs_window: 18
+
+  # RSRS长期窗口（计算历史趋势基准）
+  rsrs_long_window: 60
+
+  # RSRS滚动窗口（计算历史斜率均值和标准差）
+  rsrs_rolling_window: 20
+
+  # 强趋势阈值：趋势强度超过此值视为强趋势
+  strong_trend_threshold: 0.05
+
+  # 弱趋势阈值：趋势强度超过此值但低于强趋势，视为弱趋势
+  weak_trend_threshold: 0.01
+
+  # 最小动量得分：低于此值的股票不参与选股
+  min_momentum_score: 0.01  # 调低捕捉早期动量（原0.02）
+
+  # 最小R²拟合度：线性回归拟合度低于此值的股票不参与选股
+  min_r2: 0.5  # 从0.4提高到0.5（过滤波动性大的股票）
+
+  # ========== 动量加速过滤 ==========
+  momentum_accel_min_slope: 0.0  # 斜率>此值才入场，0=正斜率（上涨趋势）
+  momentum_accel_short_window: 5  # 斜率回归窗口（天） 数字小代表短期趋势，数字大代表长期趋势
+
+  # 最大持仓数：同时持有的股票数量
+  max_positions: 3  # 集中仓位，减少交易
+
+  # 行业分散控制
+  max_same_sector: 3                   # 同一行业最多持有2只股票
+
+  # 候选股票池大小（买入时机从候选池中选，时机合适才买，不合适则等下一轮）
+  candidate_pool_size: 3  # 默认 5 只，候选池越大遇到合适买入时机的概率越高
+
+  # 动量计算方法: linear (线性加权) 或 exponential (指数加权)
+  momentum_method: exponential
+
+  # 波动率调整动量
+  volatility_adjustment_enabled: true  # 是否启用波动率调整
+  volatility_window: 20                # 波动率计算窗口
+  high_volatility_threshold: 0.40      # 高波动率阈值 (>40%)
+  low_volatility_threshold: 0.15       # 低波动率阈值 (<15%)
+  high_volatility_penalty: 0.7         # 高波动率惩罚系数 (动量得分乘以0.7)
+
+  # 成交量确认
+  volume_confirmation_enabled: true    # 是否启用成交量确认
+  volume_short_window: 14               # 短期成交量窗口
+  volume_long_window: 20               # 长期成交量窗口
+  min_volume_ratio: 1.8                # 最小成交量放大倍数
+
+  # 换手率过滤（日均换手率低于此值的股票不参与选股，单位：%）
+  min_turnover_rate: 0.0             # 港股活跃票通常0.3%~3%，仙股<0.1%
+
+# ==================== 交易配置 ====================
+trading:
+  # 交易环境: SIMULATE (模拟) 或 REAL (实盘)
+  env: REAL
+
+  # 富途OpenD配置
+  futu:
+    host: 127.0.0.1
+    port: 11111
+    security_firm: FUTUSECURITIES
+    # 交易密码（REAL模式需要，填写后自动解锁）
+
+  # 实盘交易时间配置
+  live_trading:
+    # 持仓检查间隔（秒）
+    position_check_interval: 30
+
+    # 价格缓存有效期（秒）
+    price_cache_ttl: 5
+
+    # 订单确认超时时间（秒）
+    order_timeout: 60
+
+    # 部分成交等待超时时间（秒）
+    partial_timeout: 30
+
+    # 价格跳空检测阈值（超过此比例强制刷新价格）
+    price_gap_threshold: 0.05
+
+    # ==================== 智能休眠配置 ====================
+    # 无持仓无选股时的休眠时间（秒）
+    sleep_no_position_no_selection: 300
+
+    # 持仓已满时的休眠时间（秒）
+    sleep_full_position: 300
+
+    # 正常交易时的休眠时间（秒）
+    sleep_normal: 5
+
+    # ==================== 买入时机策略 ====================
+    buy_timing:
+      # 策略模式: simple (简单定时), smart (智能低吸)
+      mode: smart
+
+      # 简单模式配置 (mode=simple 时生效)
+      simple:
+        buy_time: "13:30"  # 固定买入时间
+
+      # 智能低吸模式配置 (mode=smart 时生效)
+      smart:
+        # 强买窗口（观察期+尾盘期，这些时段内仅≥8分强买信号可买入）
+        strong_buy_only_windows:
+          - "00:00-13:30"    # 观察期
+          - "15:00-00:00"    # 尾盘期（收盘前1小时）
+
+        # K线分析启用时间
+        kline_enable_time: "10:30"
+
+        # 强买阈值（强买窗口内生效）
+        strong_buy_threshold: 8   # K线评分>=8分，观察期/尾盘期也可买
+
+        # 正常买入阈值（强买窗口外生效）
+        normal_buy_threshold: 6   # K线评分>=6分，正常交易时段可买
+
+      # ==================== 日内分析（统一入口）====================
+      # 所有日内K线相关参数集中在此，不再分散在多级
+      analysis:
+        enabled: true               # 是否启用日内K线分析
+        use_hybrid: true           # 混合模式：RSI/布林带用1分钟（快），量/形态用5分钟（稳）
+        bar_type: MIN_5             # K线粒度，目前仅支持MIN_5
+        cache_ttl: 25               # 缓存有效期（秒）
+
+        # ---- 全局评分阈值（所有模式共用，不再重复定义）----
+        min_bars_required: 10       # 最小K线根数才进行分析
+        strong_buy_threshold: 6     # 日内强买入评分阈值
+        watch_threshold: 4          # 观望评分阈值（4-5分观望，<4分不买）
+
+        # ---- 抄底打分参数（bottom-fishing）----
+        # RSI(超卖检测)
+        rsi_period: 14              # RSI计算周期
+        rsi_oversold: 32            # 超卖阈值 → 2分
+        rsi_severe: 28              # 严重超卖阈值 → 3分
+
+        # 布林带(支撑压力检测)
+        bb_period: 20               # 布林带周期
+        bb_std: 2.0                 # 布林带标准差倍数
+        bb_tight_pct: 20            # 紧贴下轨阈值 → 2分
+        bb_low_pct: 30              # 下半部阈值 → 1分
+
+        # 成交量(量价配合)
+        volume_ratio_threshold: 1.5 # 放量阈值：当前量 > 前均量 × 此值
+
+        # ---- 趋势检测（决定走追涨还是抄底分支）----
+        trend_detection:
+          enabled: true             # 是否启用行情双模式切换
+          observe_bars: 60          # 观察前N根1分钟K线（港股约10:30有足够数据）
+
+          # 区间收益率基准 = 昨日收盘价（正确识别高开/低开）
+          uptrend_return_pct: 0.01  # 涨幅>=+1% 视为上涨候选
+          sideways_range_pct: 0.01  # 涨幅在±1%内 视为震荡
+
+          # K线形态指标
+          bull_bar_ratio_uptrend: 0.60    # 阳线占比>=60% 辅助确认上涨
+          bull_bar_ratio_downtrend: 0.40  # 阳线占比<=40% 辅助确认下跌
+
+          # 价格区间位置
+          position_high_pct: 65            # 当前价在区间上半部(>65%)辅助确认上涨
+          position_low_pct: 35             # 当前价在区间下半部(<35%)辅助确认下跌
+
+          # 均线斜率(MA10线性回归)
+          ma_slope_positive: 0.0001        # MA10斜率>此值=向上趋势
+
+        # ---- 追涨打分参数（momentum / breakout）----
+        momentum:
+          # RSI动量（满分3分）：越强越好
+          rsi_strong: 65              # RSI>65 → 3分
+          rsi_moderate: 55            # RSI>55 → 2分
+          rsi_weak: 50                # RSI>50 → 1分
+
+          # 布林带突破（满分2分）：越高越好
+          bb_breakout_pct: 80         # BB位置>80%(突破上轨) → 2分
+          bb_upper_pct: 55            # BB位置>55%(中上部) → 1分
+
+          # 量价配合（满分3分）：必须量价齐升
+          volume_surge_ratio: 1.5     # 放量阈值
+
+          # 风控：防止追高接盘（基准=观察窗口首根K线价格）
+          max_rally_pct: 0.03         # 窗口内已涨超过3%则不追
+
+          # 评分阈值
+          strong_buy_threshold: 6     # 追涨强买阈值
+          watch_threshold: 4          # 追涨观望阈值
+
+  # 实盘止盈止损配置（与回测共享risk配置）
+  # 使用config.yaml中的risk.percentage_stop_loss配置

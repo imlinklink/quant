@@ -1,0 +1,19 @@
+trading_state:
+- env: REAL
+  positions:
+    HK.03690:
+      quantity: 1000
+      cost_price: 52.12
+      highest_price: 80.75
+      synced: true
+    HK.03277:
+      quantity: 1400
+      cost_price: 107.88571428571429
+      highest_price: 108.9
+      order_id: FH1C9F240F58AE8000
+      buy_time: '2026-06-04T13:31:15.381449'
+      entry_mode: bottom_fish
+  used_capital: 151040.0
+  capital: 300000.0
+  last_buy_execution: 1780639004
+  update_time: '2026-06-05 13:56:44'

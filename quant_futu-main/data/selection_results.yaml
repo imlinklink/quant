@@ -1,0 +1,40 @@
+selection_results:
+- id: 1
+  stock_code: null
+  stock_name: null
+  price: 1290.0
+  momentum: null
+  rsrs: null
+  score: null
+  sector: null
+  in_position: false
+  selection_date: '2026-06-05'
+  selection_time: '13:53:02'
+  env: REAL
+  create_time: '2026-06-05 13:53:02'
+- id: 2
+  stock_code: null
+  stock_name: null
+  price: 99.05
+  momentum: null
+  rsrs: null
+  score: null
+  sector: null
+  in_position: true
+  selection_date: '2026-06-05'
+  selection_time: '13:53:02'
+  env: REAL
+  create_time: '2026-06-05 13:53:02'
+- id: 3
+  stock_code: null
+  stock_name: null
+  price: 21.42
+  momentum: null
+  rsrs: null
+  score: null
+  sector: null
+  in_position: false
+  selection_date: '2026-06-05'
+  selection_time: '13:53:02'
+  env: REAL
+  create_time: '2026-06-05 13:53:02'

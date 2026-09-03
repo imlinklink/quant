@@ -32,7 +32,7 @@ input long            InpMagic             = 20260901;          // 魔术数字(
 input ENUM_TRADE_MODE InpTradeMode         = TRADE_MODE_BOTH;   // 交易方向
 input int             InpMaxPositions      = 1;                 // 同品种最大持仓数
 input int             InpDeviationPoints   = 20;                // 最大滑点(点)
-input int             InpMaxSpreadPoints   = 30;                // 最大点差(点, 0=不限)
+input int             InpMaxSpreadPoints   = 60;                // 最大点差(点, 0=不限)
 input int             InpTradeStartHour    = 0;                 // 允许交易开始小时(0=全天)
 input int             InpTradeEndHour      = 0;                 // 允许交易结束小时(0=全天)
 
@@ -401,8 +401,16 @@ void UpdateDayState()
 //+------------------------------------------------------------------+
 void ProcessLLMBridge()
   {
-   if(!InSession() || !SpreadOK())
+   if(!InSession())
       return;
+   if(!SpreadOK())
+     {
+      // 只在每根新K线提示一次，避免刷屏
+      if(IsNewBar())
+         PrintFormat("点差过大(%d > %d), 跳过本K线信号",
+                     (int)SymbolInfoInteger(g_symbol, SYMBOL_SPREAD), InpMaxSpreadPoints);
+      return;
+     }
 
    // 每根新K线写一次行情快照，供桥接服务询问 DeepSeek
    if(IsNewBar())
@@ -421,6 +429,38 @@ void ProcessLLMBridge()
   }
 
 //+------------------------------------------------------------------+
+//| 计算今日亚洲时段(北京时间 07:00-14:59)高低点，供伦敦突破使用        |
+//+------------------------------------------------------------------+
+void BuildAsiaRange(double &hi, double &lo)
+  {
+   hi = 0.0;
+   lo = 0.0;
+   int serverOffset = (int)(TimeCurrent() - TimeGMT());   // 服务器相对UTC偏移(秒)
+   datetime nowBJ = TimeGMT() + 8 * 3600;                  // 当前北京墙钟(数值编码)
+   MqlDateTime bd;
+   TimeToStruct(nowBJ, bd);
+   if(bd.hour < 7 || bd.hour >= 16)
+      return;
+   for(int i = 1; i <= 1440; i++)
+     {
+      datetime t = iTime(g_symbol, PERIOD_M1, i);
+      if(t == 0)
+         break;
+      datetime bj = t - serverOffset + 8 * 3600;           // 转成北京墙钟(数值编码)
+      MqlDateTime d;
+      TimeToStruct(bj, d);
+      if(d.year != bd.year || d.day_of_year != bd.day_of_year)
+         break;
+      if(d.hour < 7 || d.hour >= 15)
+         continue;
+      double h = iHigh(g_symbol, PERIOD_M1, i);
+      double l = iLow(g_symbol, PERIOD_M1, i);
+      if(hi == 0.0 || h > hi) hi = h;
+      if(lo == 0.0 || l < lo) lo = l;
+     }
+  }
+
+//+------------------------------------------------------------------+
 //| 把行情快照写入桥接文件夹                                         |
 //+------------------------------------------------------------------+
 void WriteLLMSnapshot(long signalId)
@@ -430,6 +470,14 @@ void WriteLLMSnapshot(long signalId)
    content += StringFormat("SYMBOL=%s\n", g_symbol);
    content += StringFormat("TIMEFRAME=%s\n", EnumToString((ENUM_TIMEFRAMES)Period()));
    content += StringFormat("SPREAD=%d\n", (int)SymbolInfoInteger(g_symbol, SYMBOL_SPREAD));
+   // ===== 策略池 v1: 时间与关键价位(伦敦突破路由/规则使用) =====
+   content += StringFormat("UTC_EPOCH=%I64d\n", (long)TimeGMT());
+   content += StringFormat("D1_HIGH=%s\n", DoubleToString(iHigh(g_symbol, PERIOD_D1, 1), _Digits));
+   content += StringFormat("D1_LOW=%s\n", DoubleToString(iLow(g_symbol, PERIOD_D1, 1), _Digits));
+   double asiaHigh = 0.0, asiaLow = 0.0;
+   BuildAsiaRange(asiaHigh, asiaLow);
+   content += "ASIA_HIGH=" + DoubleToString(asiaHigh, _Digits) + "\n";
+   content += "ASIA_LOW=" + DoubleToString(asiaLow, _Digits) + "\n";
 
    MqlTick tick;
    if(SymbolInfoTick(g_symbol, tick))
@@ -483,19 +531,18 @@ void WriteLLMSnapshot(long signalId)
    content += "BALANCE=" + DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2) + "\n";
    content += "EQUITY=" + DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY), 2) + "\n";
 
-   // 先写临时文件再改名，避免桥接服务读到半个文件
-   int h = FileOpen(g_llmFolder + "\\snapshot.tmp", FILE_TXT | FILE_READ | FILE_WRITE | FILE_ANSI);
+   // 直接覆盖写 snapshot.txt（FILE_WRITE 打开即截断）
+   // 文件末尾写 COMPLETE=1，桥接服务看到它才认为快照完整
+   content += "COMPLETE=1\n";
+   int h = FileOpen(g_llmFolder + "\\snapshot.txt", FILE_TXT | FILE_WRITE | FILE_ANSI);
    if(h == INVALID_HANDLE)
      {
       PrintFormat("LLM快照写入失败(错误码 %d)，请先启动桥接服务", GetLastError());
       return;
      }
-   FileSeek(h, 0, SEEK_SET);
    FileWriteString(h, content);
    FileFlush(h);
    FileClose(h);
-   if(!FileMove(g_llmFolder + "\\snapshot.tmp", 0, g_llmFolder + "\\snapshot.txt", 0))
-      PrintFormat("快照改名失败(错误码 %d)", GetLastError());
   }
 
 //+------------------------------------------------------------------+
@@ -647,13 +694,7 @@ bool SpreadOK()
   {
    if(InpMaxSpreadPoints <= 0)
       return true;
-   long spread = SymbolInfoInteger(g_symbol, SYMBOL_SPREAD);
-   if(spread > InpMaxSpreadPoints)
-     {
-      PrintFormat("点差过大(%d > %d), 跳过本K线信号", (int)spread, InpMaxSpreadPoints);
-      return false;
-     }
-   return true;
+   return (SymbolInfoInteger(g_symbol, SYMBOL_SPREAD) <= InpMaxSpreadPoints);
   }
 
 bool DirectionAllowed(int signal)

@@ -1,0 +1,232 @@
+trades:
+- id: 57
+  stock_code: HK.01888
+  stock_name: 建滔积层板
+  quantity: 1000
+  price: !!python/object/apply:decimal.Decimal
+  - '43.500'
+  amount: !!python/object/apply:decimal.Decimal
+  - '43500.00'
+  direction: BUY
+  order_id: FH1C818253206E8000
+  trade_time: '2026-05-12 13:08:42'
+  env: REAL
+  create_time: '2026-05-12 13:08:41'
+- id: 58
+  stock_code: HK.00981
+  stock_name: 中芯国际
+  quantity: 500
+  price: !!python/object/apply:decimal.Decimal
+  - '73.650'
+  amount: !!python/object/apply:decimal.Decimal
+  - '36825.00'
+  direction: BUY
+  order_id: FH1C818254791FA000
+  trade_time: '2026-05-12 13:08:42'
+  env: REAL
+  create_time: '2026-05-12 13:08:41'
+- id: 59
+  stock_code: HK.06082
+  stock_name: 壁仞科技
+  quantity: 600
+  price: !!python/object/apply:decimal.Decimal
+  - '53.417'
+  amount: !!python/object/apply:decimal.Decimal
+  - '32050.00'
+  direction: SELL
+  order_id: FH1C82A1D3433F2000
+  trade_time: '2026-05-13 10:04:47'
+  env: REAL
+  create_time: '2026-05-13 10:04:46'
+- id: 60
+  stock_code: HK.06082
+  stock_name: 壁仞科技
+  quantity: 2400
+  price: !!python/object/apply:decimal.Decimal
+  - '49.460'
+  amount: !!python/object/apply:decimal.Decimal
+  - '118704.00'
+  direction: BUY
+  order_id: FH1C855D86BAEE8000
+  trade_time: '2026-05-15 13:01:49'
+  env: REAL
+  create_time: '2026-05-15 13:01:49'
+- id: 61
+  stock_code: HK.00004
+  stock_name: 九龙仓集团
+  quantity: 2000
+  price: !!python/object/apply:decimal.Decimal
+  - '27.360'
+  amount: !!python/object/apply:decimal.Decimal
+  - '54720.00'
+  direction: BUY
+  order_id: FH1C893D186FAE8000
+  trade_time: '2026-05-18 13:14:03'
+  env: REAL
+  create_time: '2026-05-18 13:14:03'
+- id: 62
+  stock_code: HK.00762
+  stock_name: 中国联通
+  quantity: 12000
+  price: !!python/object/apply:decimal.Decimal
+  - '7.890'
+  amount: !!python/object/apply:decimal.Decimal
+  - '94680.00'
+  direction: BUY
+  order_id: FH1C8A9613456E8000
+  trade_time: '2026-05-19 14:21:18'
+  env: REAL
+  create_time: '2026-05-19 14:21:17'
+- id: 63
+  stock_code: HK.00981
+  stock_name: 中芯国际
+  quantity: 1500
+  price: !!python/object/apply:decimal.Decimal
+  - '75.900'
+  amount: !!python/object/apply:decimal.Decimal
+  - '113850.00'
+  direction: BUY
+  order_id: FH1C8D23C09BEE8000
+  trade_time: '2026-05-21 13:57:15'
+  env: REAL
+  create_time: '2026-05-21 13:57:15'
+- id: 64
+  stock_code: HK.00992
+  stock_name: 联想集团
+  quantity: 2000
+  price: !!python/object/apply:decimal.Decimal
+  - '13.340'
+  amount: !!python/object/apply:decimal.Decimal
+  - '26680.00'
+  direction: BUY
+  order_id: FH1C8D28C520FF2000
+  trade_time: '2026-05-21 14:19:11'
+  env: REAL
+  create_time: '2026-05-21 14:19:10'
+- id: 65
+  stock_code: HK.02388
+  stock_name: 中银香港
+  quantity: 1000
+  price: !!python/object/apply:decimal.Decimal
+  - '48.760'
+  amount: !!python/object/apply:decimal.Decimal
+  - '48760.00'
+  direction: BUY
+  order_id: FH1C9389D1D76E8000
+  trade_time: '2026-05-26 13:14:05'
+  env: REAL
+  create_time: '2026-05-26 13:14:04'
+- id: 10
+  stock_code: HK.02388
+  market: ''
+  trade_type: SELL
+  position_side: LONG
+  qty: 1000
+  price: 47.02
+  amount: 47020.0
+  commission: 0
+  stamp_tax: 0
+  strategy: null
+  strategy_instance: null
+  pnl: null
+  pnl_pct: null
+  trade_time: '2026-05-28 09:31:03'
+  env: REAL
+  stock_name: 中银香港
+  order_id: FH1C95E9F43A2E8000
+  create_time: '2026-05-28 09:31:03'
+- id: 11
+  stock_code: HK.03690
+  market: ''
+  trade_type: SELL
+  position_side: LONG
+  qty: 1500
+  price: 75.35
+  amount: 113024.99999999999
+  commission: 0
+  stamp_tax: 0
+  strategy: null
+  strategy_instance: null
+  pnl: null
+  pnl_pct: null
+  trade_time: '2026-05-28 09:32:04'
+  env: REAL
+  stock_name: 美团-W
+  order_id: FH1C95EA2F42648000
+  create_time: '2026-05-28 09:32:04'
+- id: 12
+  stock_code: HK.03690
+  market: ''
+  trade_type: SELL
+  position_side: LONG
+  qty: 200
+  price: 75.2
+  amount: 15040.0
+  commission: 0
+  stamp_tax: 0
+  strategy: null
+  strategy_instance: null
+  pnl: null
+  pnl_pct: null
+  trade_time: '2026-05-28 09:36:22'
+  env: REAL
+  stock_name: 美团-W
+  order_id: FH1C95EB2B9FFF2000
+  create_time: '2026-05-28 09:36:22'
+- id: 13
+  stock_code: HK.02513
+  market: ''
+  trade_type: BUY
+  position_side: LONG
+  qty: 100
+  price: 1379.0
+  amount: 137900.0
+  commission: 0
+  stamp_tax: 0
+  strategy: null
+  strategy_instance: null
+  pnl: null
+  pnl_pct: null
+  trade_time: '2026-06-02 13:52:05'
+  env: REAL
+  stock_name: 智谱
+  order_id: FH1C9C95A5B3A48000
+  create_time: '2026-06-02 13:52:05'
+- id: 14
+  stock_code: HK.02513
+  market: ''
+  trade_type: BUY
+  position_side: LONG
+  qty: 100
+  price: 1485.0
+  amount: 148500.0
+  commission: 0
+  stamp_tax: 0
+  strategy: null
+  strategy_instance: null
+  pnl: null
+  pnl_pct: null
+  trade_time: '2026-06-03 13:40:10'
+  env: REAL
+  stock_name: 智谱
+  order_id: FH1C9DDC82E15FA000
+  create_time: '2026-06-03 13:40:10'
+- id: 15
+  stock_code: HK.03277
+  market: ''
+  trade_type: BUY
+  position_side: LONG
+  qty: 1400
+  price: 107.88571428571429
+  amount: 151040.0
+  commission: 0
+  stamp_tax: 0
+  strategy: null
+  strategy_instance: null
+  pnl: null
+  pnl_pct: null
+  trade_time: '2026-06-04 13:31:15'
+  env: REAL
+  stock_name: 长光辰芯
+  order_id: FH1C9F240F58AE8000
+  create_time: '2026-06-04 13:31:15'
