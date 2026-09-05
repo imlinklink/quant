@@ -365,6 +365,23 @@ class ExitStrategy(ABC):
         prev_vol = df['volume'].tail(window + 5).head(window).mean()
         return recent_vol / prev_vol if prev_vol > 0 else 1.0
 
+    @staticmethod
+    def _reference_today(position: dict):
+        """获取“今天”参考时间：回测环境使用 position['_current_date']，实盘退回 datetime.now()。
+
+        旧逻辑直接 datetime.now() 判断新股（上市≤90天），在回测中会用当前真实日期
+        与历史 listing_date 相减，导致多年前的新股在回测里被错归为“非新股”，
+        新股专用的 vol_ratio_warn_new / RSRS 豁免等分支永远进不了。
+        """
+        from datetime import datetime
+        date_str = position.get('_current_date') if isinstance(position, dict) else None
+        if date_str:
+            try:
+                return datetime.strptime(str(date_str)[:10], '%Y-%m-%d')
+            except (ValueError, TypeError):
+                pass
+        return datetime.now()
+
     def _get_rsrs_and_vol_ratio(self, position: dict, df: pd.DataFrame) -> Tuple[float, float, bool, bool]:
         """
         计算RSRS斜率和量比，返回(斜率, 量比, 是否过热, 是否RSRS预警)
@@ -379,10 +396,11 @@ class ExitStrategy(ABC):
             try:
                 from datetime import datetime
                 listing_dt = datetime.strptime(str(listing_date)[:10], '%Y-%m-%d')
-                today = datetime.now()
+                # 使用回测感知的参考日期，避免回测中新股判断失效
+                today = self._reference_today(position)
                 if (today - listing_dt).days <= 90:
                     is_new_stock = True
-            except:
+            except Exception:
                 pass
         
         # 量比过热阈值
@@ -444,10 +462,11 @@ class ExitStrategy(ABC):
             try:
                 from datetime import datetime
                 listing_dt = datetime.strptime(str(listing_date)[:10], '%Y-%m-%d')
-                today = datetime.now()
+                # 使用回测感知的参考日期，避免回测中历史新股被当作非新股、失去豁免
+                today = self._reference_today(position)
                 if (today - listing_dt).days <= 90:
                     return False, '', 0.0
-            except:
+            except Exception:
                 pass
 
         # 追踪RSRS前值（从持仓position中获取）

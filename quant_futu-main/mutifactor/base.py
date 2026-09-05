@@ -415,8 +415,16 @@ class BaseStrategy(ABC):
 
                 max_affordable = self.cash * self.margin_multiplier
                 if total_cost > max_affordable:
-                    shortfall = total_cost - self.cash
-                    self.logger.warning(f"资金不足,无法买入 {stock_code} (需要:{total_cost:.2f}, 可用:{self.cash:.2f}, 缺口:{shortfall:.2f})")
+                    # 缺口应以“可负担上限”为基准，而非现金：
+                    # 旧逻辑 shortfall = total_cost - self.cash 在杠杆>1 时会高估缺口，
+                    # 日志会误导（实际只需再凑 max_affordable 到 total_cost 之间的差额）。
+                    shortfall = total_cost - max_affordable
+                    self.logger.warning(
+                        f"资金不足,无法买入 {stock_code} "
+                        f"(需要:{total_cost:.2f}, 可负担上限:{max_affordable:.2f}"
+                        f"[现金 {self.cash:.2f} × 杠杆 {self.margin_multiplier:.2f}], "
+                        f"缺口:{shortfall:.2f})"
+                    )
                     continue
 
                 self.cash -= total_cost

@@ -8,6 +8,8 @@ import logging
 
 from mutifactor.base import BaseStrategy
 
+logger = logging.getLogger(__name__)
+
 
 class StrategyFactory:
     """策略工厂 - 用于创建策略实例"""
@@ -154,11 +156,34 @@ class ModelEvaluator:
     @staticmethod
     def find_best_strategy(results_list: List[Dict], strategy_names: List[str],
                            metric: str = 'sharpe_ratio') -> tuple:
-        """找出最优策略"""
+        """找出最优策略
+
+        Returns:
+            (best_name, best_result) ；输入为空时返回 (None, None)，
+            避免旧逻辑在 min/max(range(0)) 上抛 ValueError。
+        """
+        # 防御：空列表 / 名称与结果数量不一致都会导致下游索引越界或归因错误
+        if not results_list:
+            logger.warning("find_best_strategy: results_list 为空，无法挑选最优策略")
+            return None, None
+        if len(results_list) != len(strategy_names):
+            logger.warning(
+                f"find_best_strategy: results_list({len(results_list)}) 与 "
+                f"strategy_names({len(strategy_names)}) 长度不一致，按较短者截断"
+            )
+            n = min(len(results_list), len(strategy_names))
+            if n == 0:
+                return None, None
+            results_list = results_list[:n]
+            strategy_names = strategy_names[:n]
+
         if metric == 'max_drawdown':
+            # 回撤越小越好；缺失值用 +inf 作为“最差”，避免旧逻辑用 -inf
+            # 把缺数据的策略错误地当成“最小回撤”选中。
             best_idx = min(range(len(results_list)),
-                          key=lambda i: results_list[i].get(metric, float('-inf')))
+                          key=lambda i: results_list[i].get(metric, float('inf')))
         else:
+            # 其他指标（sharpe_ratio / total_return 等）越大越好，缺失值用 -inf 作为“最差”
             best_idx = max(range(len(results_list)),
                           key=lambda i: results_list[i].get(metric, float('-inf')))
 
