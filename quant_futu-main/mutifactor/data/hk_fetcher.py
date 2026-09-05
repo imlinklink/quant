@@ -22,8 +22,13 @@ from mutifactor.data.hk_market_rule import HKMarketRule
 
 # 尝试导入futu
 # 明确导入所需的类，避免通配符导入
+# 注意：futu.SecurityType 与 base_fetcher.SecurityType 同名，必须 alias，
+# 否则会静默覆盖 base_fetcher 版本，导致其他依赖 base_fetcher.SecurityType 的代码行为异常。
 try:
-    from futu import OpenQuoteContext, KLType, Market, SecurityType, RET_OK, AuType
+    from futu import (
+        OpenQuoteContext, KLType, Market, RET_OK, AuType,
+        SecurityType as FutuSecurityType,
+    )
     FUTU_AVAILABLE = True
 except ImportError:
     FUTU_AVAILABLE = False
@@ -155,7 +160,14 @@ class RateLimiter:
             if wait_time > 0:
                 logger.debug(f"达到限流限制（{self.max_requests_per_window}次/{self.window_seconds}秒），等待 {wait_time:.1f} 秒")
                 time.sleep(wait_time)
-                self.request_timestamps = []
+            # 只删除已过期的时间戳，保留仍在窗口内的：
+            # 旧逻辑直接清空会让下一轮瞬间重新发送 max_requests_per_window 次请求，
+            # 短暂频率超出官方限制，可能触发 429。
+            now_after_sleep = time.time()
+            self.request_timestamps = [
+                ts for ts in self.request_timestamps
+                if now_after_sleep - ts < self.window_seconds
+            ]
         
         # 检查最小间隔
         time_since_last = current_time - self.last_request_time
@@ -237,7 +249,7 @@ class FutuHKDataFetcher(DataFetcherBase):
             # 测试连接 - 使用获取股票列表API
             ret, data = quote_ctx.get_stock_basicinfo(
                 market=Market.HK,
-                stock_type=SecurityType.STOCK
+                stock_type=FutuSecurityType.STOCK
             )
 
             if ret == RET_OK:
@@ -550,7 +562,7 @@ class FutuHKDataFetcher(DataFetcherBase):
             # 获取股票基本信息
             ret, data = self.quote_ctx.get_stock_basicinfo(
                 market=Market.HK,
-                stock_type=SecurityType.STOCK,
+                stock_type=FutuSecurityType.STOCK,
                 code_list=[stock_code]
             )
             
@@ -594,7 +606,7 @@ class FutuHKDataFetcher(DataFetcherBase):
             # 批量获取股票基本信息（含上市日期）
             ret, data = self.quote_ctx.get_stock_basicinfo(
                 market=Market.HK,
-                stock_type=SecurityType.STOCK,
+                stock_type=FutuSecurityType.STOCK,
                 code_list=stock_codes
             )
             

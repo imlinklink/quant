@@ -517,19 +517,102 @@ class LiveTradingManager(ABC):
     def _is_trading_day(self) -> bool:
         """
         判断今天是否是交易日
-        
+
         策略：
         1. 周末（周六、周日）肯定不是交易日
+        2. 通过 futu 交易日历识别交易所节假日（复活节、中秋、国庆、圣诞等）；
+           旧逻辑只判周末，港股每年 15+ 天假期会误触发交易逻辑，产生大量拒单与重试。
+        3. API 查询失败时降级为仅周末判断，避免因行情不可用而阻塞正常交易。
+        4. 年度交易日集合缓存，同一年只拉一次。
         """
-        from datetime import datetime
-        
         now = datetime.now()
-        
+        today = now.date()
+
         # 1. 周末检查（周六=5, 周日=6）
-        if now.weekday() == 5 or now.weekday() == 6:
+        if now.weekday() >= 5:
             return False
 
-        return True  # 异常时默认认为是交易日，避免阻塞正常交易
+        # 2. 交易所日历（节假日）
+        try:
+            trading_days = self._get_trading_days_set(today.year)
+            if trading_days is None:
+                # 查询失败，降级为仅周末判断
+                return True
+            today_str = today.strftime('%Y-%m-%d')
+            if today_str not in trading_days:
+                logger.info(f"[{self.market_type}] {today_str} 非交易日（交易所节假日）")
+                return False
+            return True
+        except Exception as e:
+            logger.warning(f"[{self.market_type}] 交易日检查异常: {e}，降级为仅周末判断")
+            return True
+
+    def _get_trading_days_set(self, year: int) -> Optional[Set[str]]:
+        """获取指定年份的交易日集合（字符串 YYYY-MM-DD）；查询失败返回 None 以供上游降级。"""
+        if not hasattr(self, '_trading_days_cache'):
+            self._trading_days_cache: Dict[Tuple[str, int], Set[str]] = {}
+        cache_key = (self.market_type, year)
+        if cache_key in self._trading_days_cache:
+            return self._trading_days_cache[cache_key]
+
+        # 优先复用已连接的 quote_ctx，避免新建连接
+        quote_ctx = None
+        if self.price_fetcher is not None and getattr(self.price_fetcher, 'quote_ctx', None):
+            quote_ctx = self.price_fetcher.quote_ctx
+        elif self._shared_fetcher is not None and getattr(self._shared_fetcher, 'quote_ctx', None):
+            quote_ctx = self._shared_fetcher.quote_ctx
+        if quote_ctx is None:
+            return None
+
+        try:
+            from futu import RET_OK
+        except Exception as e:
+            logger.warning(f"[{self.market_type}] futu 导入失败，无法查询交易日历: {e}")
+            return None
+
+        # SDK 接口为 request_trading_days(market=<'HK'/'US' 字符串>, start, end)，
+        # 返回 DataFrame 的列名是 time（部分版本为 time_point/trade_date/date）。
+        market = self.market_type
+        if market not in ('HK', 'US'):
+            return None
+
+        try:
+            ret, data = quote_ctx.request_trading_days(
+                market=market,
+                start=f'{year}-01-01',
+                end=f'{year}-12-31',
+            )
+        except Exception as e:
+            logger.warning(f"[{self.market_type}] 查询 {year} 年交易日异常: {e}")
+            return None
+
+        if ret != RET_OK or data is None or len(data) == 0:
+            logger.warning(f"[{self.market_type}] 查询 {year} 年交易日失败: {data}")
+            return None
+
+        # futu 返回列名可能为 time_point / trade_date / date，兼容处理
+        date_col = None
+        for col in ('time', 'time_point', 'trade_date', 'date'):
+            if col in data.columns:
+                date_col = col
+                break
+        if date_col is None:
+            logger.warning(
+                f"[{self.market_type}] 无法识别交易日列名，columns={list(data.columns)}"
+            )
+            return None
+
+        trading_days: Set[str] = set()
+        for v in data[date_col].tolist():
+            s = str(v)[:10]
+            if s:
+                trading_days.add(s)
+        if not trading_days:
+            return None
+
+        self._trading_days_cache[cache_key] = trading_days
+        logger.info(f"[{self.market_type}] 已加载 {year} 年交易日 {len(trading_days)} 天")
+        return trading_days
 
     def run_position_check_loop(self):
         """运行持仓检查循环（止盈止损）"""
@@ -1992,8 +2075,22 @@ class LiveTradingManager(ABC):
         # 演示持仓可随时平（不连券商）；真实持仓只在交易时段下卖单
         if not pos.get('demo') and not self._sell_market_open():
             return  # 保持 pending/approved，轮询等到可交易时段再执行
-        note = ('用户确认卖出' if not auto else
-                f'超时未确认，自动卖出兜底（{int(item.get("expires_at", 0))}）')
+        if not auto:
+            note = '用户确认卖出'
+        else:
+            # 旧逻辑直接 int(expires_at) 会把 Unix 时间戳当成“超时时长”展示（例如 1767715200），
+            # 对用户毫无意义。改成展示 TTL 秒数 + 到期时刻（本地 HH:MM:SS）。
+            expires_at = float(item.get('expires_at') or 0)
+            created_at = float(item.get('created_at') or 0)
+            ttl_sec = int(round(expires_at - created_at)) if expires_at > created_at > 0 else 0
+            expire_hms = (
+                datetime.fromtimestamp(expires_at).strftime('%H:%M:%S')
+                if expires_at > 0 else '?'
+            )
+            if ttl_sec > 0:
+                note = f'超时未确认（TTL {ttl_sec}s，到期 {expire_hms}），自动卖出兜底'
+            else:
+                note = f'超时未确认（到期 {expire_hms}），自动卖出兜底'
         if item.get('status') == 'pending':
             # 状态机：pending → approved → executing；超时兜底先自动“批准”
             if not self.approval_store.mark(pid, 'approved',

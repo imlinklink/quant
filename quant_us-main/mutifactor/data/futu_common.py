@@ -96,7 +96,14 @@ class RateLimiter:
             if wait_time > 0:
                 logger.debug(f"达到限流限制（{self.max_requests_per_window}次/{self.window_seconds}秒），等待 {wait_time:.1f} 秒")
                 time.sleep(wait_time)
-                self.request_timestamps = []
+            # 只删除已过期的时间戳，保留仍在窗口内的：
+            # 旧逻辑直接清空会让下一轮瞬间重新发送 max_requests_per_window 次请求，
+            # 短暂频率超出官方限制，可能触发 429。
+            now_after_sleep = time.time()
+            self.request_timestamps = [
+                ts for ts in self.request_timestamps
+                if now_after_sleep - ts < self.window_seconds
+            ]
         time_since_last = current_time - self.last_request_time
         if time_since_last < self.min_interval:
             sleep_time = self.min_interval - time_since_last

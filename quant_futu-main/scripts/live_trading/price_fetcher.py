@@ -134,12 +134,21 @@ class PriceFetcher:
                 df = fetcher.fetch_stock_kline(stock_code, start_date, end_date)
                 if df is not None and len(df) > 0:
                     df = df.sort_values('date').reset_index(drop=True)
-                    # 如果有多条数据，返回倒数第二条（上一个交易日收盘价）
+                    # 上一条 K 线才是“昨日收盘”。只有 1 条时需要看它的日期：
+                    # - 若已含今日（盘中/盘后）→ 该条是今日，不能当昨收，返回 None 让上游降级；
+                    # - 若还是昨天（盘前，今日 K 线尚未生成）→ 它正是昨收，应正常返回。
                     if len(df) >= 2:
                         close_price = df['close'].iloc[-2]
-                    else:
+                        return float(close_price) if close_price is not None else None
+                    last_date = str(df['date'].iloc[-1])[:10]
+                    if last_date < end_date:
                         close_price = df['close'].iloc[-1]
-                    return float(close_price) if close_price is not None else None
+                        return float(close_price) if close_price is not None else None
+                    logger.debug(
+                        f"{stock_code} K线只有 1 条且日期为今日({last_date})，"
+                        f"无法确定昨收价，返回 None"
+                    )
+                    return None
                 return None
             finally:
                 fetcher.disconnect()  # 修复：确保关闭连接

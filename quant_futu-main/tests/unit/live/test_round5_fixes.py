@@ -300,6 +300,42 @@ class TestMarketBriefDateNormalize(unittest.TestCase):
         assert brief['buy_frequency'] == 'reduce'
         assert brief['generated_at'] is None
 
+
+# ---------- 8) 限流器窗口到期只删过期时间戳，不整表清空 ----------
+
+class TestRateLimiterWindow(unittest.TestCase):
+    def _check(self, limiter_mod):
+        limiter = limiter_mod.RateLimiter(
+            min_interval=0.0, max_requests_per_window=3, window_seconds=30)
+        # 时间戳 75/85/95（相对假时钟 t0=100 均在 30s 窗口内），
+        # 触发窗口限制：等待 5s 后最早一条(75)过期，其余两条应保留
+        limiter.request_timestamps = [75.0, 85.0, 95.0]
+        limiter.last_request_time = 95.0
+        clock = [100.0]
+        def _fake_time():
+            return clock[0]
+        def _fake_sleep(secs):
+            clock[0] += secs
+        with mock.patch.object(limiter_mod.time, 'time', side_effect=_fake_time):
+            with mock.patch.object(limiter_mod.time, 'sleep', side_effect=_fake_sleep):
+                limiter.wait_if_needed()
+        # 只允许 75 过期；85/95 与本次(105)仍应在列表，绝不能清空后只剩 1 条
+        assert len(limiter.request_timestamps) == 3, limiter.request_timestamps
+        assert 75.0 not in limiter.request_timestamps
+        assert 85.0 in limiter.request_timestamps and 95.0 in limiter.request_timestamps
+
+    def test_hk_rate_limiter_keeps_in_window(self):
+        import mutifactor.data.hk_fetcher as m
+        self._check(m)
+
+    def test_us_rate_limiter_keeps_in_window(self):
+        import importlib.util
+        path = '/Users/wh1817w/Documents/quant/quant_us-main/mutifactor/data/futu_common.py'
+        spec = importlib.util.spec_from_file_location('us_futu_common_test', path)
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        self._check(m)
+
     def test_risk_only_config_still_works(self):
         cfg = {'time_exit': {'phase3_days': 350}, 'early_hard_stop_pct': 0.08}
         s = ExitStrategyFactory.create('atr_dynamic', cfg)

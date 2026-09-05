@@ -67,7 +67,13 @@ class BuyTimingStrategy:
             simple_config = self.buy_timing_config.get('simple', {})
             buy_time_str = simple_config.get('buy_time', '13:30')
             self.buy_hour, self.buy_minute = map(int, buy_time_str.split(':'))
-            logger.info(f"买入策略: 简单模式, 固定时间 {buy_time_str}")
+            # 买入窗口长度（分钟）：旧逻辑写死 60 秒，主循环 sleep 可能长达 300 秒，
+            # 很容易整个窗口都被跳过，导致简单模式当天不买入。
+            # 默认 10 分钟，可通过 config trading.live_trading.buy_timing.simple.window_minutes 调整。
+            self.buy_window_minutes = int(simple_config.get('window_minutes', 10))
+            logger.info(
+                f"买入策略: 简单模式, 固定时间 {buy_time_str}（窗口 {self.buy_window_minutes} 分钟）"
+            )
         else:
             smart_config = self.buy_timing_config.get('smart', {})
 
@@ -165,7 +171,10 @@ class BuyTimingStrategy:
 
         if self.mode == 'simple':
             buy_start = dt_time(self.buy_hour, self.buy_minute)
-            buy_end = dt_time(self.buy_hour, self.buy_minute, 59)
+            # 使用可配置窗口（默认 10 分钟），避免主循环长 sleep 跳过只有 60 秒的旧窗口
+            end_total_minutes = self.buy_hour * 60 + self.buy_minute + self.buy_window_minutes
+            end_hour, end_minute = divmod(min(end_total_minutes, 23 * 60 + 59), 60)
+            buy_end = dt_time(end_hour, end_minute, 59)
             if buy_start <= current_time <= buy_end:
                 return True, "简单模式-定时买入", "simple"
             return False, "未到买入时间", "none"
