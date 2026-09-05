@@ -442,12 +442,20 @@ class FutuTrader:
                 raise OrderError(f"查询持仓失败: {data}")
 
             positions = []
+            # 根据交易市场过滤持仓（环球账户 position_list_query 可能返回多市场持仓）：
+            # 旧逻辑硬编码过滤 US. 开头，导致美股账户下持仓被全部误删。
+            market_prefix_map = {
+                TrdMarket.HK: ('HK.',),
+                TrdMarket.US: ('US.',),
+                TrdMarket.CN: ('SH.', 'SZ.'),
+            }
+            allowed_prefixes = market_prefix_map.get(self.market)
             for _, row in data.iterrows():
-                # 过滤美股持仓
-                if row['code'].startswith('US.'):
+                code = row['code']
+                if allowed_prefixes and not code.startswith(allowed_prefixes):
                     continue
                 positions.append({
-                    'stock_code': row['code'],
+                    'stock_code': code,
                     'quantity': int(row['qty']),
                     'cost_price': float(row['cost_price']),
                     'market_value': float(row['market_val'])
@@ -475,8 +483,10 @@ class FutuTrader:
             if ret != RET_OK:
                 raise OrderError(f"查询账户信息失败: {data}")
 
-            # 港股优先读取 hk_cash，美股优先读取 us_cash，兜底读 cash
-            # SIMULATE 账户可能返回 'N/A'/'--'，按 0 处理
+            # 根据市场选择现金字段（环球账户 hk_cash / us_cash 两列都存在，
+            # 旧逻辑只看列存在性会导致美股账户永远读到港股现金，
+            # 进而使可用资金判断/买入数量计算全错）。
+            # SIMULATE 账户可能返回 'N/A'/'--'，按 0 处理。
             def _f(v):
                 try:
                     return float(v)
@@ -487,11 +497,17 @@ class FutuTrader:
             if row0 is None:
                 return {'cash': 0.0, 'total_assets': 0.0, 'market_value': 0.0}
 
-            if 'hk_cash' in data.columns:
-                cash = _f(row0.get('hk_cash'))
-            elif 'us_cash' in data.columns:
-                cash = _f(row0.get('us_cash'))
-            else:
+            market_cash_key_map = {
+                TrdMarket.HK: 'hk_cash',
+                TrdMarket.US: 'us_cash',
+                TrdMarket.CN: 'cn_cash',
+            }
+            primary_key = market_cash_key_map.get(self.market)
+            cash = None
+            if primary_key and primary_key in data.columns:
+                cash = _f(row0.get(primary_key))
+            if cash is None:
+                # 兜底：未命中市场专属列时退回通用 cash
                 cash = _f(row0.get('cash', 0.0)) if 'cash' in data.columns else 0.0
 
             return {

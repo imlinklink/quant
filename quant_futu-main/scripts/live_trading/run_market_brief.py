@@ -10,7 +10,6 @@
 import argparse
 import logging
 import sys
-from datetime import datetime
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parents[2]
@@ -51,10 +50,10 @@ def main():
         return 1
 
     payload = {
-        'generated_at': datetime.now().isoformat(timespec='seconds'),
-        'date': datetime.now().strftime('%Y-%m-%d'),
-        'used_reports': {'pre': str(pre) if pre else None, 'post': str(post) if post else None},
+        # 先展开 brief（包含 generated_at/date/risk_level/... 以及占位的 used_reports），
+        # 再用真实报告路径覆盖 used_reports，避免被 brief 里的 None 占位覆盖。
         **brief,
+        'used_reports': {'pre': str(pre) if pre else None, 'post': str(post) if post else None},
     }
     path = market_brief.save_brief(payload)
 

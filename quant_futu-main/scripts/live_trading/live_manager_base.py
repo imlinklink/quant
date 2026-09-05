@@ -1734,8 +1734,10 @@ class LiveTradingManager(ABC):
             raise RuntimeError(f'无法获取 {code} 当前价')
         quantity = 100
         # 与真实信号一致：先过 LLM buy_veto（影子模式），让卡片显示真实判定
+        # 注意：_llm_buy_veto 的入参是股票代码字符串列表（与真实买入路径 line 848 保持一致），
+        # 传字典列表会导致 prompt 格式与训练/校验不一致，LLM 输出可能异常。
         try:
-            self._llm_buy_veto([{'code': code, 'price': float(price), 'quantity': quantity}])
+            self._llm_buy_veto([code])
         except Exception as e:
             logger.warning(f"[周末演示] LLM 判定调用异常，卡片将显示无判定: {e}")
         self._queue_buy_proposals(
@@ -2205,7 +2207,17 @@ class LiveTradingManager(ABC):
                 start_date=start_date.strftime('%Y-%m-%d'),
                 end_date=end_date.strftime('%Y-%m-%d')
             )
-            logger.info(f"[{self.market_type}] K线获取完成，返回 {len(stocks_data)} 只")
+            logger.info(f"[{self.market_type}] K线获取完成，返回 {len(stocks_data) if stocks_data else 0} 只")
+
+            # 防御：API 异常/限流时可能返回空字典，不能直接覆盖旧缓存，
+            # 否则 last_kline_update_date 会被更新为今天，后续刷新会被“今日已同步”卡住，
+            # 导致当天选股/止盈止损全部无数据可用。
+            if not stocks_data:
+                logger.warning(
+                    f"[{self.market_type}] K线获取返回空数据，保留原有缓存"
+                    f"（{len(self.kline_cache)} 只），不更新 last_kline_update_date，下一轮会重试"
+                )
+                return
 
             self.kline_cache = stocks_data
             self.last_kline_update_date = current_date

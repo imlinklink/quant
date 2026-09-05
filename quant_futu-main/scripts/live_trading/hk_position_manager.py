@@ -64,6 +64,25 @@ class HKPositionManager(PositionManagerBase):
                 for dp in db_positions:
                     if dp.get('stock_code'):
                         db_by_code.setdefault(dp['stock_code'], dp)
+
+                # 从交易记录反查“策略买入过”的代码：
+                # positions 明细表可能被清理/丢失，但 trades 里有 BUY 记录就说明
+                # 是策略仓而不是手动买入，避免策略资金被永久低估（错判为 manual 不计资金）。
+                strategy_bought_codes = set()
+                try:
+                    storage = getattr(self.state_persistence, 'yaml_storage', None)
+                    if storage is not None:
+                        from mutifactor.infra.yaml_storage import TradingEnv
+                        env_str = str(self.config.get('trading', {}).get('env', 'SIMULATE')).upper()
+                        env_enum = TradingEnv.REAL if env_str == 'REAL' else TradingEnv.SIMULATE
+                        trades = storage.get_trades(env=env_enum) or []
+                        strategy_bought_codes = {
+                            t.get('stock_code') for t in trades
+                            if t.get('stock_code')
+                            and 'BUY' in str(t.get('trade_type', '')).upper()
+                        }
+                except Exception as e:
+                    logger.warning(f"[HK] 读取买入交易记录失败（不影响启动）: {e}")
                 
                 # 用富途的有效持仓覆盖数据库中的持仓
                 self.strategy_positions = {}
@@ -73,8 +92,13 @@ class HKPositionManager(PositionManagerBase):
                 for pos in active_positions:
                     stock_code = pos['stock_code']
                     db_rec = db_by_code.get(stock_code, {})
-                    # 从数据库读 manual 字段；不在 DB 中的视为新手动买入
-                    is_manual = bool(db_rec.get('manual')) if db_rec else True
+                    # 从数据库读 manual 字段；不在 DB 中但交易记录里有系统 BUY → 策略仓；
+                    # 既不在 DB 也没有系统买入记录 → 视为新手动买入
+                    is_manual = (
+                        bool(db_rec.get('manual'))
+                        if db_rec
+                        else stock_code not in strategy_bought_codes
+                    )
                     cost_price = float(pos.get('cost_price') or 0)
                     # 重启后保留历史最高价锚点（>= 成本价），避免吊灯止盈/止损线被重置
                     try:

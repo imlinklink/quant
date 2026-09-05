@@ -100,7 +100,10 @@ class HKMarketRule(MarketRuleBase):
         if self._data_fetcher and hasattr(self._data_fetcher, 'get_lot_size'):
             try:
                 lot_size = self._data_fetcher.get_lot_size(stock_code)
-                return lot_size
+                if lot_size:
+                    return lot_size
+                # data_fetcher 返回 None/0（未知）时继续走默认值，
+                # 不能把 None 透传出去导致 (raw_shares // lot_size) TypeError
             except Exception:
                 pass
 

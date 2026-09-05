@@ -304,9 +304,15 @@ class FutuHKDataFetcher(DataFetcherBase):
             ret, data = self.quote_ctx.get_market_snapshot([stock_code])
 
             if ret == RET_OK and len(data) > 0:
-                lot_size = int(data['lot_size'].iloc[0])
-                logger.debug(f"获取 {stock_code} 每手股数: {lot_size}")
-                return lot_size
+                try:
+                    lot_size = int(float(data['lot_size'].iloc[0]))
+                except (TypeError, ValueError):
+                    lot_size = 0
+                if lot_size > 0:
+                    logger.debug(f"获取 {stock_code} 每手股数: {lot_size}")
+                    return lot_size
+                logger.warning(f"获取 {stock_code} lot_size 字段为空，使用默认100股")
+                return 100
             else:
                 logger.warning(f"获取 {stock_code} 市场快照失败，使用默认100股")
                 return 100

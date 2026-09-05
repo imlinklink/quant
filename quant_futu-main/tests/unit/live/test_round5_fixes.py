@@ -216,6 +216,90 @@ class TestRiskConfigWiring(unittest.TestCase):
         assert s.phase1_days == 120
         assert s.take_profit_multiplier == 3.0
 
+
+# ---------- 6) futu_trader 港美股识别（现金列/持仓过滤按 market） ----------
+
+class _AccCtx:
+    def __init__(self, df):
+        self.df = df
+    def accinfo_query(self, trd_env=None):
+        return 0, self.df
+    def position_list_query(self, trd_env=None):
+        return 0, self.df
+
+
+class TestFutuTraderMarketAware(unittest.TestCase):
+    def _trader(self, market):
+        from futu import TrdEnv
+        t = FutuTrader.__new__(FutuTrader)
+        t._connected = True
+        t.env = TrdEnv.SIMULATE
+        t.market = market
+        t.trade_ctx = None
+        t.quote_ctx = None
+        return t
+
+    def test_account_cash_picks_us_column_for_us_market(self):
+        from futu import TrdMarket
+        df = pd.DataFrame([{
+            'hk_cash': 0.0,
+            'us_cash': 12345.6,
+            'total_assets': 20000.0,
+            'market_val': 7000.0,
+        }])
+        t = self._trader(TrdMarket.US)
+        t.trade_ctx = _AccCtx(df)
+        info = t.get_account_info()
+        assert abs(info['cash'] - 12345.6) < 1e-6, 'US 市场必须读 us_cash，而不是 hk_cash=0'
+
+    def test_account_cash_picks_hk_column_for_hk_market(self):
+        from futu import TrdMarket
+        df = pd.DataFrame([{
+            'hk_cash': 8888.0,
+            'us_cash': 0.0,
+            'total_assets': 10000.0,
+            'market_val': 1000.0,
+        }])
+        t = self._trader(TrdMarket.HK)
+        t.trade_ctx = _AccCtx(df)
+        info = t.get_account_info()
+        assert abs(info['cash'] - 8888.0) < 1e-6
+
+    def test_positions_filtered_by_market(self):
+        from futu import TrdMarket
+        df = pd.DataFrame([
+            {'code': 'US.AAPL', 'qty': 10, 'cost_price': 100.0, 'market_val': 1100.0},
+            {'code': 'HK.00700', 'qty': 100, 'cost_price': 300.0, 'market_val': 31000.0},
+        ])
+        t = self._trader(TrdMarket.US)
+        t.trade_ctx = _AccCtx(df)
+        positions = t.get_positions()
+        codes = {p['stock_code'] for p in positions}
+        assert codes == {'US.AAPL'}
+
+
+# ---------- 7) market_brief 老文件缺 date 归一化 ----------
+
+class TestMarketBriefDateNormalize(unittest.TestCase):
+    def test_legacy_brief_without_date_gets_defaults(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        import scripts.live_trading.market_brief as mb
+        d = tempfile.mkdtemp(prefix='brief_')
+        p = Path(d) / 'latest.json'
+        p.write_text(json.dumps({
+                'risk_level': 'cautious',
+                'buy_frequency': 'reduce',
+                'suggested_position_ratio': 0.3,
+            }), encoding='utf-8')
+        with mock.patch.object(mb, 'BRIEF_PATH', p):
+            brief = mb.load_brief()
+        assert brief['date'] is None  # 老文件没有 date，但其他默认键已补齐
+        assert brief['risk_level'] == 'cautious'
+        assert brief['buy_frequency'] == 'reduce'
+        assert brief['generated_at'] is None
+
     def test_risk_only_config_still_works(self):
         cfg = {'time_exit': {'phase3_days': 350}, 'early_hard_stop_pct': 0.08}
         s = ExitStrategyFactory.create('atr_dynamic', cfg)
