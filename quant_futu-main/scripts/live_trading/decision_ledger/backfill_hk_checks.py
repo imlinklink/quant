@@ -44,7 +44,11 @@ def _fetch_daily(code: str, start: str, end: str, cfg: dict) -> List[Dict]:
     rows = []
     for _, r in data.iterrows():
         try:
-            rows.append({'date': str(r['time_key'])[:10], 'close': float(r['close'])})
+            rows.append({
+                'date': str(r['time_key'])[:10],
+                'close': float(r['close']),
+                'volume': float(r.get('volume') or 0),
+            })
         except Exception:
             continue
     rows.sort(key=lambda x: x['date'])
@@ -58,7 +62,8 @@ def _compute_outcome(check: Dict, rows: List[Dict]) -> Dict:
         return out
     dt = _parse_dt(check.get('ts'))
     day = dt.strftime('%Y-%m-%d') if dt else str(check.get('ts', ''))[:10]
-    future = [r for r in rows if r['date'] > day]
+    # 排除检查日当天与停牌日（volume=0），保证“N 个交易日”口径与 backfill_outcomes 一致
+    future = [r for r in rows if r['date'] > day and float(r.get('volume') or 0) > 0]
     closes = [r['close'] for r in future]
     out['bars_after'] = len(closes)
     for n, idx in ((1, 0), (3, 2), (5, 4)):

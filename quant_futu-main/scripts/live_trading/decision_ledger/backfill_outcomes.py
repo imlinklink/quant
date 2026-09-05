@@ -78,6 +78,10 @@ def _proposal_tasks(events: list, days: int) -> tuple:
     for e in events:
         if e.get('event_type') != 'proposal_created':
             continue
+        if e.get('side') == 'sell':
+            # 卖出提案语义与买入相反（拒绝卖出后上涨=拒绝正确），
+            # 不能混入买入候选回填“之后 N 日收益”
+            continue
         pid = e.get('proposal_id')
         if not pid:
             continue

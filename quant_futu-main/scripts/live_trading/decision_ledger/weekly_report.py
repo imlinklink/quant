@@ -64,7 +64,22 @@ def build_report(events, days):
     total = len(events)
     by_system = Counter(e.get('system') for e in events)
     by_type = Counter(e.get('event_type') for e in events)
-    proposals = [e for e in events if e.get('event_type') == 'proposal_created']
+    # 买入侧统计：排除卖出提案及其人工决定/执行事件（卖出语义与买入相反）。
+    # 旧事件可能缺 side，用 proposal_id 关联推断，保证兼容。
+    _proposal_all = [e for e in events if e.get('event_type') == 'proposal_created']
+    _sell_ids = {
+        e.get('proposal_id') for e in _proposal_all if e.get('side') == 'sell'
+    }
+
+    def _is_sell(e):
+        return (
+            e.get('side') == 'sell'
+            or (e.get('event_type') in ('human_decision', 'execution_status')
+                and e.get('proposal_id') in _sell_ids)
+        )
+
+    buy_events = [e for e in events if not _is_sell(e)]
+    proposals = [e for e in buy_events if e.get('event_type') == 'proposal_created']
 
     ap(f'# 交易评估周报（近 {days:.0f} 天）')
     ap('')
@@ -100,7 +115,7 @@ def build_report(events, days):
     ap('')
 
     ap('## 3. 人工决定')
-    decisions = [e for e in events if e.get('event_type') == 'human_decision']
+    decisions = [e for e in buy_events if e.get('event_type') == 'human_decision']
     if decisions:
         acts = Counter(e.get('action') for e in decisions)
         ap('- ' + ', '.join(f'{k}: {v}' for k, v in acts.items()))
@@ -109,7 +124,7 @@ def build_report(events, days):
     ap('')
 
     ap('## 4. 执行状态')
-    execs = [e for e in events if e.get('event_type') == 'execution_status']
+    execs = [e for e in buy_events if e.get('event_type') == 'execution_status']
     if execs:
         st = Counter(e.get('status') for e in execs)
         ap('- ' + ', '.join(f'{k}: {v}' for k, v in st.items()))
@@ -138,9 +153,9 @@ def build_report(events, days):
 
     ap('## 6. 归因分析（谁的建议在赚钱）')
     # proposal_id -> proposal 事件 / 人工决定
-    props = {e.get('proposal_id'): e for e in events if e.get('event_type') == 'proposal_created'}
+    props = {e.get('proposal_id'): e for e in buy_events if e.get('event_type') == 'proposal_created'}
     decisions = {}
-    for e in events:
+    for e in buy_events:
         if e.get('event_type') == 'human_decision' and e.get('proposal_id'):
             decisions.setdefault(e['proposal_id'], e.get('action'))
 

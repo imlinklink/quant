@@ -188,6 +188,7 @@ class ProposalStore:
                 'proposal_id': item.get('id'),
                 'stock_code': item.get('stock_code'),
                 'market_type': item.get('market_type'),
+                'side': item.get('side', 'buy'),
                 'env': item.get('env'),
                 'price': item.get('price'),
                 'quantity': item.get('quantity'),

@@ -47,6 +47,7 @@ def main():
     if df.empty:
         print('3日后收益尚无样本')
         return
+    df['__all__'] = '__all__'  # 供“整体”分组使用
 
     def stats(g):
         return pd.Series({

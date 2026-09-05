@@ -505,6 +505,9 @@ class PositionManagerBase(ABC):
                 if pos.get('demo'):
                     # 周末演示持仓不参与自动止盈止损（用演示平仓接口手动收尾）
                     continue
+                if pos.get('_selling'):
+                    # 已有卖出在执行（审批线程/强制平仓），本轮跳过避免重复提案/重复下单
+                    continue
                 quantity = pos['quantity']
                 cost_price = pos['cost_price']
                 highest_price = pos['highest_price']
@@ -724,6 +727,13 @@ class PositionManagerBase(ABC):
             if stock_code not in self.strategy_positions:
                 logger.warning(f"[{self.market_type}] 卖出时持仓已不存在: {stock_code}")
                 return
+
+            # 另一笔卖出正在执行中（审批线程/强制平仓/检查循环并发）→ 防重复下单
+            if position_info.get('_selling'):
+                logger.warning(
+                    f"[{self.market_type}] {stock_code} 已有卖出在执行，跳过本次重复卖出"
+                )
+                return
             
             # 标记为正在卖出（防止重复卖出）
             self.strategy_positions[stock_code]['_selling'] = True
@@ -758,7 +768,7 @@ class PositionManagerBase(ABC):
                     self.strategy_positions[stock_code].pop('_selling', None)
             return
 
-        # 阶段3: 在锁内更新持仓状态（快速操作）
+        # 阶段3: 在锁内更新持仓状态（仅内存快速操作）
         with self._position_lock:
             try:
                 # 计算交易费用
@@ -785,9 +795,6 @@ class PositionManagerBase(ABC):
                     # 将净利润加入总资金
                     self.strategy_capital += net_profit
 
-                # 删除持仓记录
-                self.strategy_positions.pop(stock_code, None)
-
                 # 止损卖出 → 加入冷却期（冷却期内不重买）
                 stop_loss_reasons = [
                     'atr_stop_loss', 'decline_stop',
@@ -796,12 +803,16 @@ class PositionManagerBase(ABC):
                 if reason in stop_loss_reasons and not is_manual:
                     self.add_cooldown(stock_code)
 
-                # 保存状态
-                self.save_positions()
-
+                # 删除持仓记录（放最后：前面任何一步失败都不会出现“已 pop 但没保存”）
+                self.strategy_positions.pop(stock_code, None)
             except Exception as e:
+                # 内存更新失败时持仓保持原状（不 pop、不早退），避免“仓已丢但没保存”
                 logger.error(f"[{self.market_type}] 更新持仓状态失败 {stock_code}: {e}", exc_info=True)
                 return
+
+        # 阶段3.5: 锁外持久化。save_positions 内部已吞掉写盘异常并记日志；
+        # 若确实写失败，内存已与券商成交一致，下次同步/重启会以券商持仓自愈。
+        self.save_positions()
 
         # 评估账本：记录平仓结果
         try:
@@ -873,49 +884,73 @@ class PositionManagerBase(ABC):
             # 过滤掉已平仓的股票（quantity=0）
             active_broker_positions = [p for p in broker_positions if p.get('quantity', 0) > 0]
             broker_codes = {p['stock_code'] for p in active_broker_positions}
-            local_codes = set(self.strategy_positions.keys())
 
-            # 找出差异
+            # 锁内先做一次只读快照，计算差异（避免与卖出线程并发修改冲突）
+            with self._position_lock:
+                local_codes = set(self.strategy_positions.keys())
+
             to_remove = local_codes - broker_codes
-            to_add = broker_codes - local_codes
+            # 预取新增持仓的现价放在锁外（网络IO不持锁，避免阻塞卖出/买入线程）
+            to_add = [bp for bp in active_broker_positions if bp['stock_code'] not in local_codes]
+            add_prices = {}
+            for bp in to_add:
+                code = bp['stock_code']
+                try:
+                    add_prices[code] = self.price_fetcher.get_current_price(code, force_refresh=True)
+                except Exception:
+                    add_prices[code] = None
 
-            # 处理已卖出的
-            for code in to_remove:
-                position = self.strategy_positions.pop(code, {})
-                if position.get('demo'):
-                    logger.info(f"[{self.market_type}] [周末演示] 同步清理演示持仓: {code}")
-                    continue
-                qty = position.get('quantity', 0)
-                cost = position.get('cost_price', 0.0)
-                if isinstance(qty, (int, float)) and isinstance(cost, (int, float)):
-                    released = qty * cost
-                    self.strategy_used_capital -= released
-                    if self.strategy_used_capital < 0:
-                        self.strategy_used_capital = 0.0
-                logger.info(f"[{self.market_type}] 同步移除持仓: {code}")
+            with self._position_lock:
+                # 处理已卖出的（锁内重新核对，防止快照过期误删刚买入/刚登记的持仓）
+                for code in list(to_remove):
+                    if code in broker_codes or code not in self.strategy_positions:
+                        continue
+                    position = self.strategy_positions.get(code, {})
+                    if position.get('_selling'):
+                        # 卖出流程正在执行（订单已下/等待成交），由 _execute_exit
+                        # 负责移除持仓与资金回冲，同步跳过避免双重回冲
+                        logger.info(f"[{self.market_type}] 同步跳过卖出执行中的持仓: {code}")
+                        continue
+                    self.strategy_positions.pop(code, None)
+                    if position.get('demo'):
+                        logger.info(f"[{self.market_type}] [周末演示] 同步清理演示持仓: {code}")
+                        continue
+                    if position.get('manual'):
+                        # 手动买入不占策略资金，卖出/移除时无需回冲（与 _execute_exit 语义一致）
+                        logger.info(f"[{self.market_type}] 同步移除手动持仓(不回冲策略资金): {code}")
+                        continue
+                    qty = position.get('quantity', 0)
+                    cost = position.get('cost_price', 0.0)
+                    if isinstance(qty, (int, float)) and isinstance(cost, (int, float)):
+                        released = qty * cost
+                        self.strategy_used_capital -= released
+                        if self.strategy_used_capital < 0:
+                            self.strategy_used_capital = 0.0
+                    logger.info(f"[{self.market_type}] 同步移除持仓: {code}")
 
-            # 处理新增的
-            for code in to_add:
-                for bp in active_broker_positions:
-                    if bp['stock_code'] == code:
-                        current_price = self.price_fetcher.get_current_price(code, force_refresh=True)
-                        cost_price = bp.get('cost_price', 0.0)
-                        # 如果获取不到当前价格，使用成本价作为最高价
-                        if current_price is None or current_price <= 0:
-                            logger.warning(f"[{self.market_type}] 同步持仓时无法获取 {code} 当前价格，使用成本价作为最高价")
-                            highest = cost_price
-                        else:
-                            highest = current_price if current_price > cost_price else cost_price
+                # 处理新增的
+                for bp in to_add:
+                    code = bp['stock_code']
+                    if code in self.strategy_positions:
+                        # 预取价格期间可能已被买入/演示登记，跳过
+                        continue
+                    current_price = add_prices.get(code)
+                    cost_price = bp.get('cost_price', 0.0)
+                    # 如果获取不到当前价格，使用成本价作为最高价
+                    if current_price is None or current_price <= 0:
+                        logger.warning(f"[{self.market_type}] 同步持仓时无法获取 {code} 当前价格，使用成本价作为最高价")
+                        highest = cost_price
+                    else:
+                        highest = current_price if current_price > cost_price else cost_price
 
-                        self.strategy_positions[code] = {
-                            'quantity': bp['quantity'],
-                            'cost_price': bp['cost_price'],
-                            'highest_price': highest,
-                            'synced': True
-                        }
-                        self.strategy_used_capital += bp['quantity'] * bp['cost_price']
-                        logger.info(f"[{self.market_type}] 同步新增持仓: {code}")
-                        break
+                    self.strategy_positions[code] = {
+                        'quantity': bp['quantity'],
+                        'cost_price': bp['cost_price'],
+                        'highest_price': highest,
+                        'synced': True
+                    }
+                    self.strategy_used_capital += bp['quantity'] * bp['cost_price']
+                    logger.info(f"[{self.market_type}] 同步新增持仓: {code}")
 
             self.save_positions()
             return True

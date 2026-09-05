@@ -647,12 +647,13 @@ class BaseStrategy(ABC):
             try:
                 prices = df[['open', 'close']].values
                 last_prices = [p for p in prices if p[0] > 0 or p[1] > 0]
+                current_price = 0.0
                 if last_prices:
                     current_price = last_prices[-1][1]  # close
                     if current_price <= 0:
                         current_price = last_prices[-1][0]  # fallback open
                 direction = position.get('direction', 'long')
-                if direction == 'long':
+                if direction == 'long' and current_price > 0:
                     position_value += position['shares'] * current_price
             except (KeyError, ValueError, TypeError, IndexError):
                 continue
