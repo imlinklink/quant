@@ -381,8 +381,6 @@ class ExitStrategy(ABC):
         rsrs_declining = (rsrs < prev_rsrs and prev_rsrs > self.rsrs_warn_threshold and rsrs > 0)
         rsrs_negative = rsrs <= self.rsrs_exit_threshold
         
-        position['_prev_rsrs'] = rsrs
-        
         return rsrs, vol_ratio, vol_overheated, rsrs_negative or rsrs_declining
 
     def _check_rsrs_exit(self, position: dict, current_price: float,
@@ -533,6 +531,8 @@ class ATRDynamicStrategy(ExitStrategy):
     def _check_atr_take_profit(self, position: dict, current_price: float, atr: float) -> Tuple[bool, str]:
         """检查ATR吊顶止盈"""
         cost_price = position['cost_price']
+        if cost_price is None or cost_price <= 0:
+            return False, None
         highest_price = position.get('highest_price', cost_price)
 
         # 从最高价回撤 ATR × 止盈倍数
@@ -848,6 +848,4 @@ class ExitStrategyFactory:
             logger.debug(f"追加今日K线: high={new_row['high']:.2f}, low={new_row['low']:.2f}, close={current_price:.2f}")
 
         return df
-
-
 

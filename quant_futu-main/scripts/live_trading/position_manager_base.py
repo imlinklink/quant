@@ -522,6 +522,39 @@ class PositionManagerBase(ABC):
                     logger.warning(f"[{self.market_type}] 无法获取 {stock_code} 当前价格，跳过检查")
                     continue
 
+                # 成本价无效（0/None，如转入股、无成本仓）时无法计算盈亏/止盈止损：
+                # 记日志并跳过本只，避免除零导致整轮退出检查中断
+                if cost_price is None or cost_price <= 0:
+                    logger.warning(
+                        f"[{self.market_type}] {stock_code} 成本价无效 "
+                        f"({cost_price})，跳过止盈止损检查（仅监控价格）"
+                    )
+                    if self.live_manager is not None and hasattr(
+                            self.live_manager, 'update_positions_snapshot'):
+                        try:
+                            stock_name = self._get_stock_name(stock_code)
+                            self.live_manager.update_positions_snapshot(stock_code, {
+                                'stock_code': stock_code,
+                                'stock_name': stock_name,
+                                'manual': bool(pos.get('manual')),
+                                'entry_mode': pos.get('entry_mode', 'manual'),
+                                'quantity': int(quantity),
+                                'cost_price': cost_price,
+                                'price': price,
+                                'highest_price': highest_price,
+                                'return_pct': None,
+                                'profit_amount': None,
+                                'atr': None,
+                                'take_profit_price': None,
+                                'stop_loss_price': None,
+                                'should_exit': False,
+                                'reason': '成本价无效，无法计算止盈止损（仅监控）',
+                                'status_text': '⚠️ 成本无效（仅监控）',
+                            })
+                        except Exception:
+                            pass
+                    continue
+
                 # 计算当前盈亏
                 return_pct = (price - cost_price) / cost_price
                 profit_amount = (price - cost_price) * quantity
@@ -639,7 +672,7 @@ class PositionManagerBase(ABC):
                     else:
                         exits_to_execute.append((stock_code, quantity, cost_price, reason))
 
-            except (KeyError, ValueError, TypeError) as e:
+            except (KeyError, ValueError, TypeError, ZeroDivisionError) as e:
                 logger.error(f"[{self.market_type}] 检查持仓失败 - 数据错误 {stock_code}: {e}")
             except Exception as e:
                 logger.error(f"[{self.market_type}] 检查持仓失败 - 未知错误 {stock_code}: {e}", exc_info=True)
@@ -662,7 +695,7 @@ class PositionManagerBase(ABC):
         """检查止盈止损信号"""
         try:
             return self._check_exit_signals_impl(stock_code, quantity, cost_price, price, highest_price, entry_mode)
-        except (KeyError, ValueError, TypeError, IndexError) as e:
+        except (KeyError, ValueError, TypeError, IndexError, ZeroDivisionError) as e:
             logger.error(f"[{self.market_type}] 检查退出信号失败 - 数据错误 {stock_code}: {e}")
             return False, '', 0.0, 0.0, 0.0
         except Exception as e:

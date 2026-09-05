@@ -1875,31 +1875,7 @@ class LiveTradingManager(ABC):
         pnl = pnl_pct if pnl_pct is not None else ((price - cost) / cost if cost > 0 else 0.0)
         ttl = float(self._sell_cfg().get('ttl_seconds', 300))
 
-        # LLM 卖出建议（失败/未启用 → 无判定，仍走人工兜底）
-        llm_info = None
-        if self._sell_cfg().get('llm_enabled', True) and self.llm_advisor is not None \
-                and bool(getattr(self.llm_advisor, 'enabled', False)):
-            try:
-                result = self.llm_advisor.judge_sell(
-                    position_text=(
-                        f'{code} {qty}股，成本 {cost:.3f}，现价约 {price:.3f}，'
-                        f'浮盈 {pnl * 100:+.1f}%'
-                    ),
-                    sell_reason=reason,
-                )
-                if result:
-                    llm_info = {
-                        'model': getattr(self.llm_advisor, 'model', ''),
-                        'mode': 'shadow',
-                        'verdict': result.get('verdict', 'allow'),
-                        'risk_level': result.get('risk_level', 'MEDIUM'),
-                        'confidence': result.get('confidence'),
-                        'reason': result.get('reason', ''),
-                    }
-            except Exception as e:
-                logger.warning(f"[卖出确认] LLM 建议失败，按人工决定: {e}")
-
-        self.approval_store.create(
+        created = self.approval_store.create(
             side='sell',
             stock_code=code,
             stock_name=self._get_stock_name(code) or code,
@@ -1914,13 +1890,51 @@ class LiveTradingManager(ABC):
                 f'【卖出确认】规则触发: {reason}；成本 {cost:.3f}，现价约 {price:.3f}，'
                 f'浮盈 {pnl * 100:+.1f}%；超时 {int(ttl)} 秒未确认将自动执行。'
             ),
-            llm=llm_info,
+            llm=None,
             position_cost=cost,
             pnl_pct=round(pnl, 5),
             expires_at=now + ttl,
         )
+
+        # LLM 卖出建议改为异步后台线程：不阻塞持仓检查热路径；
+        # 判定完成后回填卡片（页面每 2s 刷新可见）
+        llm_enabled = (self._sell_cfg().get('llm_enabled', True)
+                       and self.llm_advisor is not None
+                       and bool(getattr(self.llm_advisor, 'enabled', False)))
+        if llm_enabled and created and created.get('id'):
+            pid = created['id']
+
+            def _ask_llm():
+                try:
+                    result = self.llm_advisor.judge_sell(
+                        position_text=(
+                            f'{code} {qty}股，成本 {cost:.3f}，现价约 {price:.3f}，'
+                            f'浮盈 {pnl * 100:+.1f}%'
+                        ),
+                        sell_reason=reason,
+                    )
+                    if result:
+                        self.approval_store.update_fields(
+                            pid,
+                            llm={
+                                'model': getattr(self.llm_advisor, 'model', ''),
+                                'mode': 'shadow',
+                                'verdict': result.get('verdict', 'allow'),
+                                'risk_level': result.get('risk_level', 'MEDIUM'),
+                                'confidence': result.get('confidence'),
+                                'reason': result.get('reason', ''),
+                            },
+                        )
+                except Exception as e:
+                    logger.warning(f"[卖出确认] LLM 建议失败 {code}: {e}")
+
+            threading.Thread(
+                target=_ask_llm, daemon=True,
+                name=f'{self.market_type}-Sell-LLM-{pid}',
+            ).start()
+
         logger.warning(
-            f"[卖出确认] {code} 推送卖出提案: {reason}（LLM={llm_info is not None}，"
+            f"[卖出确认] {code} 推送卖出提案: {reason}（LLM=异步判定中，"
             f"{int(ttl)}s 超时自动执行）—— 请到确认页点「卖出」或「继续持有」"
         )
         return True
@@ -2060,6 +2074,10 @@ class LiveTradingManager(ABC):
         if not pid or not code:
             return
         if item.get('side', 'buy') != 'buy':
+            return
+        if '周末演示' in str(item.get('trigger_reason', '')):
+            # 演示提案由 HTTP 回调 _dev_execute_approved 处理；
+            # 买入线程不消费，避免周末演示被当成真实单执行
             return
         try:
             if not self.approval_store.mark(pid, 'executing', note='用户已确认，开始下单'):
