@@ -26,6 +26,18 @@ class HKPositionManager(PositionManagerBase):
 
     def _load_positions_from_db(self):
         """从数据库加载港股持仓"""
+        # 恢复止损冷却期（进程重启后仍需遵守冷却期，避免刚止损的票被立即买回）
+        try:
+            saved_state = self.state_persistence.load_state()
+            saved_cooldowns = (saved_state or {}).get('cooldowns') or {}
+            if isinstance(saved_cooldowns, dict):
+                restored = {str(k): str(v) for k, v in saved_cooldowns.items() if v}
+                if restored:
+                    self.recently_stopped = restored
+                    logger.warning(f"[HK] 已恢复 {len(restored)} 条止损冷却期记录")
+        except Exception as e:
+            logger.warning(f"[HK] 恢复冷却期记录失败（不影响启动）: {e}")
+
         # 先从富途同步实际持仓
         try:
             logger.info("[HK] 正在从富途同步实际持仓...")
@@ -43,10 +55,12 @@ class HKPositionManager(PositionManagerBase):
                 if zero_positions:
                     logger.warning(f"[HK] 检测到{len(zero_positions)}只已平仓股票: {[pos['stock_code'] for pos in zero_positions]}")
                 
-                # 获取数据库中标记为手动的持仓（用于区分手动买入）
-                db_positions = self.state_persistence.get_positions()
-                db_manual_codes = {pos['stock_code'] for pos in db_positions if pos.get('manual')} if db_positions else set()
-                db_quant_codes = {pos['stock_code'] for pos in db_positions if not pos.get('manual')} if db_positions else set()
+                # 获取数据库持仓明细（manual / highest_price / buy_time）
+                db_positions = self.state_persistence.get_positions() or []
+                db_by_code = {}
+                for dp in db_positions:
+                    if dp.get('stock_code'):
+                        db_by_code.setdefault(dp['stock_code'], dp)
                 
                 # 用富途的有效持仓覆盖数据库中的持仓
                 self.strategy_positions = {}
@@ -55,19 +69,31 @@ class HKPositionManager(PositionManagerBase):
                 
                 for pos in active_positions:
                     stock_code = pos['stock_code']
+                    db_rec = db_by_code.get(stock_code, {})
                     # 从数据库读 manual 字段；不在 DB 中的视为新手动买入
-                    is_manual = stock_code in db_manual_codes or stock_code not in db_quant_codes
-                    
+                    is_manual = bool(db_rec.get('manual')) if db_rec else True
+                    cost_price = float(pos.get('cost_price') or 0)
+                    # 重启后保留历史最高价锚点（>= 成本价），避免吊灯止盈/止损线被重置
+                    try:
+                        db_highest = float(db_rec.get('highest_price') or 0)
+                    except (TypeError, ValueError):
+                        db_highest = 0.0
+                    highest_price = max(cost_price, db_highest)
+                    # 重启后恢复买入时间（持仓天数 → 时间退出/RSRS 豁免期判定）
+                    buy_time = str(db_rec.get('buy_time') or '')
+
                     self.strategy_positions[stock_code] = {
                         'quantity': pos['quantity'],
-                        'cost_price': pos['cost_price'],
-                        'highest_price': pos['cost_price'],  # 初始化为成本价
-                        'manual': is_manual  # 标记是否手动买入
+                        'cost_price': cost_price,
+                        'highest_price': highest_price,
+                        'manual': is_manual,  # 标记是否手动买入
+                        'buy_time': buy_time,
+                        'buy_date': buy_time[:10] if buy_time else '',
                     }
                     
                     # 手动买入的股票不计入策略资金
                     if not is_manual:
-                        self.strategy_used_capital += pos['quantity'] * pos['cost_price']
+                        self.strategy_used_capital += pos['quantity'] * cost_price
                     else:
                         manual_positions.append(stock_code)
                 
@@ -81,64 +107,66 @@ class HKPositionManager(PositionManagerBase):
                 # 富途返回空列表（未抛异常），同样需要 fallback 到 trading_state
                 logger.info("[HK] 富途返回空持仓，尝试从 trading_state 恢复...")
                 state = self.state_persistence.load_state()
-                if state:
-                    all_positions = state.get('positions', {})
-                    self.strategy_positions = {code: pos for code, pos in all_positions.items()
-                                              if pos.get('quantity', 0) > 0
-                                              and not pos.get('demo')}
-                    self.strategy_used_capital = sum(
-                        pos.get('quantity', 0) * pos.get('cost_price', 0)
-                        for pos in self.strategy_positions.values()
-                    )
-                    invalid_count = len(all_positions) - len(self.strategy_positions)
-                    if invalid_count > 0:
-                        logger.warning(f"[HK] 过滤掉{invalid_count}只无效持仓")
-                    logger.info(f"[HK] 已从 trading_state 恢复持仓: {len(self.strategy_positions)}只, "
-                               f"已用资金: HKD {self.strategy_used_capital:.2f}")
-                else:
-                    self.strategy_positions = {}
-                    self.strategy_used_capital = 0.0
-                    logger.info("[HK] trading_state 无持仓记录")
+                self._restore_from_state(state)
                 
         except Exception as e:
             logger.error(f"[HK] 从富途同步持仓失败: {e}", exc_info=True)
             logger.warning("[HK] 继续使用数据库中的持仓数据")
             # 如果同步失败，回退到 trading_state（并过滤无效持仓）
             state = self.state_persistence.load_state()
-            if state:
-                all_positions = state.get('positions', {})
-                self.strategy_positions = {code: pos for code, pos in all_positions.items()
-                                          if pos.get('quantity', 0) > 0
-                                          and not pos.get('demo')}
-                self.strategy_used_capital = sum(
-                    pos.get('quantity', 0) * pos.get('cost_price', 0)
-                    for pos in self.strategy_positions.values()
-                )
-                invalid_count = len(all_positions) - len(self.strategy_positions)
-                if invalid_count > 0:
-                    logger.warning(f"[HK] 过滤掉{invalid_count}只无效持仓(quantity=0)")
-                logger.info(f"[HK] 已加载数据库持仓: {len(self.strategy_positions)}只, "
-                           f"已用资金: HKD {self.strategy_used_capital:.2f}")
-            else:
-                self.strategy_positions = {}
-                self.strategy_used_capital = 0.0
-                logger.info("[HK] 数据库无持仓记录")
+            self._restore_from_state(state)
+
+    def _restore_from_state(self, state: dict):
+        """从 trading_state 恢复持仓：过滤 demo/无效仓，排除手动仓资金与运行时标记。"""
+        if not state:
+            self.strategy_positions = {}
+            self.strategy_used_capital = 0.0
+            logger.info("[HK] trading_state 无持仓记录")
+            return
+        all_positions = state.get('positions', {}) or {}
+        clean = {}
+        for code, pos in all_positions.items():
+            if not isinstance(pos, dict):
+                continue
+            p = dict(pos)
+            p.pop('_selling', None)  # 运行时标记不应跨重启存活
+            if p.get('quantity', 0) > 0 and not p.get('demo'):
+                clean[code] = p
+        self.strategy_positions = clean
+        # 手动买入不占策略资金（与 Futu 同步加载/卖出路径语义一致）
+        self.strategy_used_capital = sum(
+            pos.get('quantity', 0) * pos.get('cost_price', 0)
+            for pos in clean.values()
+            if not pos.get('manual')
+        )
+        invalid_count = len(all_positions) - len(clean)
+        if invalid_count > 0:
+            logger.warning(f"[HK] 过滤掉{invalid_count}只无效持仓")
+        logger.info(f"[HK] 已从 trading_state 恢复持仓: {len(clean)}只, "
+                    f"策略已用资金: HKD {self.strategy_used_capital:.2f}")
 
     def _save_positions_to_db(self):
         """保存港股持仓到数据库"""
-        # 保存状态（只保存有效持仓，quantity>0）
-        valid_positions = {code: pos for code, pos in self.strategy_positions.items()
-                          if pos.get('quantity', 0) > 0 and not pos.get('demo')}
+        # 保存状态（只保存有效持仓，quantity>0；剔除 _selling 运行时标记）
+        valid_positions = {}
+        for code, pos in self.strategy_positions.items():
+            if pos.get('quantity', 0) > 0 and not pos.get('demo'):
+                p = dict(pos)
+                p.pop('_selling', None)
+                valid_positions[code] = p
+        # 手动买入不占策略资金（与 load / broker-sync / 卖出路径语义一致）
         self.strategy_used_capital = sum(
             pos.get('quantity', 0) * pos.get('cost_price', 0)
             for pos in valid_positions.values()
+            if not pos.get('manual')
         )
         
         self.state_persistence.save_state(
             positions=valid_positions,
             used_capital=self.strategy_used_capital,
             capital=self.strategy_capital,
-            last_buy_execution=int(__import__('time').time())
+            last_buy_execution=int(__import__('time').time()),
+            cooldowns=dict(self.recently_stopped)
         )
         # 保存明细和资金记录
         self._save_positions_detail()
@@ -147,7 +175,12 @@ class HKPositionManager(PositionManagerBase):
     def _save_positions_detail(self):
         """保存持仓明细"""
         # 如果策略持仓为空，跳过写入（避免清空 positions 表）
-        real_positions = {c: p for c, p in self.strategy_positions.items() if not p.get('demo')}
+        real_positions = {}
+        for c, p in self.strategy_positions.items():
+            if not p.get('demo'):
+                p2 = dict(p)
+                p2.pop('_selling', None)
+                real_positions[c] = p2
         if not real_positions:
             logger.info("[HK] 策略持仓为空，跳过写入 positions 表（保留现有手动标记）")
             return
@@ -159,7 +192,8 @@ class HKPositionManager(PositionManagerBase):
                 quantity=pos.get('quantity', 0),
                 cost_price=pos.get('cost_price', 0),
                 highest_price=pos.get('highest_price', 0),
-                manual=pos.get('manual', False)
+                manual=pos.get('manual', False),
+                buy_time=pos.get('buy_time') or ''
             )
 
     def _cleanup_invalid_positions(self):
@@ -303,13 +337,26 @@ class HKPositionManager(PositionManagerBase):
         from mutifactor.strategies.exit_strategy import ExitStrategyFactory
         from datetime import datetime, timedelta
 
-        # 构建持仓信息
-        position = {
-            'stock_code': stock_code,
-            'quantity': quantity,
-            'cost_price': cost_price,
-            'highest_price': highest_price
-        }
+        # 构建持仓信息：优先复用内存中的持久持仓记录。
+        # 关键：buy_date 决定持仓天数（时间退出/RSRS 豁免/止损收紧），
+        # _prev_rsrs 需要跨检查轮保留；若每次重建临时 dict，这些状态全部丢失，
+        # 会导致 RSRS/时间退出在实盘永不生效。
+        live_pos = self.strategy_positions.get(stock_code)
+        if isinstance(live_pos, dict) and live_pos.get('quantity') == quantity:
+            position = live_pos
+            position.setdefault('stock_code', stock_code)
+            position.setdefault('cost_price', cost_price)
+            position['highest_price'] = highest_price
+            if not position.get('buy_date'):
+                position['buy_date'] = position.get('buy_time') or ''
+        else:
+            position = {
+                'stock_code': stock_code,
+                'quantity': quantity,
+                'cost_price': cost_price,
+                'highest_price': highest_price,
+                'buy_date': '',
+            }
 
         # 获取当日高低价
         today_high, today_low = self.price_fetcher.get_today_high_low(stock_code)

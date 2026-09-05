@@ -119,12 +119,15 @@ class IntradayKlineProvider:
         # 获取实时数据
         bars = self._fetch_min5_bars(stock_code)
 
-        # 更新缓存
-        with self._cache_lock:
-            self._cache[stock_code] = {
-                'bars': bars,
-                'timestamp': now
-            }
+        if bars is not None:
+            # 仅缓存成功结果；失败不缓存，下一轮检查会重试
+            with self._cache_lock:
+                self._cache[stock_code] = {
+                    'bars': bars,
+                    'timestamp': now
+                }
+        else:
+            logger.debug(f"获取5分钟K线失败 {stock_code}，不写缓存，下轮重试")
 
         return bars
 
@@ -204,12 +207,15 @@ class IntradayKlineProvider:
         # 获取实时数据
         bars = self._fetch_min1_bars(stock_code)
 
-        # 更新缓存
-        with self._cache_lock:
-            self._cache[cache_key] = {
-                'bars': bars,
-                'timestamp': now
-            }
+        if bars is not None:
+            # 仅缓存成功结果；失败不缓存，下一轮检查会重试
+            with self._cache_lock:
+                self._cache[cache_key] = {
+                    'bars': bars,
+                    'timestamp': now
+                }
+        else:
+            logger.debug(f"获取1分钟K线失败 {stock_code}，不写缓存，下轮重试")
 
         return bars
 

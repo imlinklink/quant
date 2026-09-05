@@ -318,7 +318,7 @@ class YAMLStorage:
                      # state_persistence.py 参数名
                      stock_name: str = None, quantity: int = None,
                      cost_price: float = None, highest_price: float = None,
-                     manual: bool = False):
+                     manual: bool = False, buy_time: str = None):
         """保存持仓记录
 
         支持两种调用方式:
@@ -346,6 +346,7 @@ class YAMLStorage:
                     'avg_price': avg_price,
                     'highest_price': highest_price,
                     'manual': manual,
+                    'buy_time': buy_time or '',
                     'update_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 })
                 self._save_table('positions', data)
@@ -364,6 +365,7 @@ class YAMLStorage:
             'highest_price': highest_price,
             'init_qty': init_qty or qty,
             'init_cost': init_cost or (qty * avg_price if qty and avg_price else 0),
+            'buy_time': buy_time or '',
             'strategy': strategy,
             'strategy_instance': strategy_instance,
             'manual': manual,
@@ -668,7 +670,7 @@ class YAMLStorage:
 
     def save_trading_state(self, positions: Dict, used_capital: float,
                            capital: float, last_buy_execution: int,
-                           env: TradingEnv):
+                           env: TradingEnv, cooldowns: Dict = None):
         """保存交易状态
 
         Args:
@@ -677,6 +679,7 @@ class YAMLStorage:
             capital: 总资金
             last_buy_execution: 最后买入时间戳
             env: 交易环境(REAL/SIMULATE)
+            cooldowns: 止损冷却期记录 {stock_code: stop_date}，进程重启后恢复
         """
         data = self._load_table('trading_state', use_cache=False)
 
@@ -690,6 +693,7 @@ class YAMLStorage:
                     'used_capital': used_capital,
                     'capital': capital,
                     'last_buy_execution': last_buy_execution,
+                    'cooldowns': cooldowns or {},
                     'update_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 }
                 found = True
@@ -703,6 +707,7 @@ class YAMLStorage:
                 'used_capital': used_capital,
                 'capital': capital,
                 'last_buy_execution': last_buy_execution,
+                'cooldowns': cooldowns or {},
                 'create_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                 'update_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }

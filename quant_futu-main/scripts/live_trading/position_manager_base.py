@@ -131,6 +131,7 @@ class PositionManagerBase(ABC):
                 'cost_price': float(price),
                 'highest_price': float(price),
                 'buy_time': datetime.now().isoformat(),
+                'buy_date': datetime.now().strftime('%Y-%m-%d'),
                 'entry_mode': entry_mode or 'momentum',
                 'order_id': 'DEMO_WEEKEND',
                 'demo': True,
@@ -343,6 +344,16 @@ class PositionManagerBase(ABC):
         """获取剩余可用资金"""
         return self.strategy_capital - self.strategy_used_capital
 
+    def snapshot_position_codes(self) -> set:
+        """锁内返回持仓代码集合（并发安全，供其他线程读取）"""
+        with self._position_lock:
+            return set(self.strategy_positions.keys())
+
+    def snapshot_positions(self) -> Dict[str, Dict]:
+        """锁内返回持仓浅拷贝（并发安全，供其他线程读取）"""
+        with self._position_lock:
+            return dict(self.strategy_positions)
+
     def execute_buy(self, stocks_to_buy: List[Dict]):
         """
         执行买入
@@ -437,6 +448,7 @@ class PositionManagerBase(ABC):
                         'highest_price': buy['avg_price'],
                         'order_id': buy['order_id'],
                         'buy_time': datetime.now().isoformat(),
+                        'buy_date': datetime.now().strftime('%Y-%m-%d'),
                         'entry_mode': buy.get('entry_mode', 'bottom_fish'),
                         'proposal_id': buy.get('proposal_id'),
                     }

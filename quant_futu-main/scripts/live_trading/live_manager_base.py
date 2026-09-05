@@ -31,6 +31,32 @@ class TradingState(Enum):
 class LiveTradingManager(ABC):
     """实盘交易管理器基类"""
 
+    def _position_codes(self) -> set:
+        """持仓代码集合（优先锁内快照；兼容无快照方法的测试替身）。"""
+        pm = self.position_manager
+        if pm is None:
+            return set()
+        try:
+            result = pm.snapshot_position_codes()
+            if isinstance(result, set):
+                return result
+        except Exception:
+            pass
+        return set(pm.strategy_positions.keys())
+
+    def _position_items(self) -> dict:
+        """持仓浅拷贝（优先锁内快照；兼容无快照方法的测试替身）。"""
+        pm = self.position_manager
+        if pm is None:
+            return {}
+        try:
+            result = pm.snapshot_positions()
+            if isinstance(result, dict):
+                return result
+        except Exception:
+            pass
+        return dict(pm.strategy_positions.items())
+
     def __init__(self, config: Dict, market_type: str):
         """
         初始化交易管理器
@@ -752,7 +778,7 @@ class LiveTradingManager(ABC):
             self._last_trigger_reason = reason
 
         # 过滤已在持仓中的股票、今日已买入的股票、以及止损冷却期内的股票
-        current_holdings = set(self.position_manager.strategy_positions.keys())
+        current_holdings = self._position_codes()
         today_bought = self._get_today_bought_stocks()
 
         # 清理过期的冷却期记录
@@ -1021,7 +1047,7 @@ class LiveTradingManager(ABC):
             position_count = 0
             if self.position_manager:
                 real_positions = {
-                    c: p for c, p in self.position_manager.strategy_positions.items()
+                    c: p for c, p in self._position_items().items()
                     if not p.get('demo')
                 }
                 position_count = len(real_positions)
@@ -1110,7 +1136,7 @@ class LiveTradingManager(ABC):
             snapshot = self.context_builder.build_candidate_snapshot(
                 selected, stocks_data, current_date
             )
-            holdings = list(self.position_manager.strategy_positions.keys())
+            holdings = list(self._position_codes())
             result = self.llm_advisor.assess_candidates(
                 candidates=selected,
                 context_snapshot=snapshot,
@@ -1459,8 +1485,8 @@ class LiveTradingManager(ABC):
     def prune_positions_snapshot(self):
         """移除已平仓/已不在账户的股票快照。"""
         keep = set()
-        if self.position_manager is not None and hasattr(self.position_manager, 'strategy_positions'):
-            keep = set(self.position_manager.strategy_positions.keys())
+        if self.position_manager is not None:
+            keep = self._position_codes()
         self._positions_snapshot = {
             code: info for code, info in self._positions_snapshot.items() if code in keep
         }
@@ -2121,7 +2147,7 @@ class LiveTradingManager(ABC):
                 )
                 return
 
-            before = set(self.position_manager.strategy_positions.keys())
+            before = self._position_codes()
             self.position_manager.execute_buy([{
                 'code': code,
                 'quantity': quantity,
@@ -2129,7 +2155,7 @@ class LiveTradingManager(ABC):
                 'entry_mode': item.get('entry_mode') or 'bottom_fish',
                 'proposal_id': pid,
             }])
-            after = set(self.position_manager.strategy_positions.keys())
+            after = self._position_codes()
             if code in after and code not in before:
                 self.approval_store.mark(
                     pid, 'executed', note=f'按最新价 {price:.3f} 下单 {quantity} 股'

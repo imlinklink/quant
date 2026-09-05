@@ -53,7 +53,8 @@ class StatePersistence:
             raise
 
     def save_state(self, positions: Dict, used_capital: float, capital: float,
-                   last_buy_execution: int, env: Optional[str] = None):
+                   last_buy_execution: int, env: Optional[str] = None,
+                   cooldowns: Optional[Dict] = None):
         """保存交易状态"""
         if not self._yaml_storage:
             return
@@ -65,6 +66,7 @@ class StatePersistence:
                 used_capital=used_capital,
                 capital=capital,
                 last_buy_execution=last_buy_execution,
+                cooldowns=cooldowns or {},
                 env=trading_env
             )
         except DatabaseError as e:
@@ -113,7 +115,7 @@ class StatePersistence:
 
     def save_position(self, stock_code: str, stock_name: str, quantity: int,
                       cost_price: float, highest_price: float, env: Optional[str] = None,
-                      manual: bool = False):
+                      manual: bool = False, buy_time: str = ''):
         """保存持仓"""
         if not self._yaml_storage:
             return
@@ -122,7 +124,7 @@ class StatePersistence:
             trading_env = self._trading_env.REAL if env == 'REAL' else self._trading_env.SIMULATE
             self._yaml_storage.save_position(stock_code, stock_name, quantity,
                                            cost_price, highest_price, trading_env,
-                                           manual=manual)
+                                           manual=manual, buy_time=buy_time)
         except DatabaseError as e:
             logger.warning(f"保存持仓失败 - 数据库错误: {e}")
         except (TypeError, ValueError) as e:
