@@ -130,7 +130,7 @@ class YAMLStorage:
                         return []
 
                     # YAML格式: {table_name: [row1, row2, ...]}
-                    table_data = data.get(table_name, [])
+                    table_data = data.get(table_name) or []
 
                     # 更新缓存
                     self._cache[table_name] = table_data
@@ -139,8 +139,10 @@ class YAMLStorage:
                     logger.info(f"✅ 已从 {filepath} 加载 {len(table_data)} 条记录")
                     return table_data
             except Exception as e:
-                logger.error(f"❌ 加载YAML文件失败 {filepath}: {e}")
-                return []
+                # 文件损坏/半写入时绝不能返回空表：下一次保存会把整表覆盖成“只有新数据”。
+                # 抛错让调用方 fail-safe，保留原文件等待人工处理。
+                logger.error(f"❌ 加载YAML文件失败 {filepath}: {e}，禁止覆盖写入")
+                raise RuntimeError(f"YAML加载失败({filepath}): {e}") from e
 
     def _save_table(self, table_name: str, data: List[Dict]):
         """保存表数据到YAML文件"""
@@ -148,7 +150,9 @@ class YAMLStorage:
 
         with self._lock:
             try:
-                with open(filepath, 'w', encoding='utf-8') as f:
+                # 原子写：先写同目录临时文件再替换，避免进程中断留下半写入文件
+                tmp_filepath = f"{filepath}.tmp"
+                with open(tmp_filepath, 'w', encoding='utf-8') as f:
                     yaml.dump(
                         {table_name: data},
                         f,
@@ -156,6 +160,7 @@ class YAMLStorage:
                         default_flow_style=False,
                         sort_keys=False
                     )
+                os.replace(tmp_filepath, filepath)
 
                 # 更新缓存
                 self._cache[table_name] = data
@@ -164,6 +169,11 @@ class YAMLStorage:
                 logger.info(f"✅ 已保存 {len(data)} 条记录到 {filepath}")
             except Exception as e:
                 logger.error(f"❌ 保存YAML文件失败 {filepath}: {e}")
+                try:
+                    if os.path.exists(f"{filepath}.tmp"):
+                        os.remove(f"{filepath}.tmp")
+                except OSError:
+                    pass
                 raise
 
     def get_all_stock_codes(self, market: str = None) -> List[str]:
@@ -284,18 +294,23 @@ class YAMLStorage:
         Args:
             stock_code: 股票代码
         """
-        # 先从stock_info获取
-        stock_info = self.get_stock_info(stock_code)
-        if stock_info:
-            return stock_info.get('lot_size', 100)
-
         # A股统一每手100股，直接返回
         if stock_code.startswith('SH.') or stock_code.startswith('SZ.'):
             return 100
 
-        # 如果找不到,从富途API获取(需要调用者自己实现)
-        logger.warning(f"⚠️  未找到股票 {stock_code} 的lot_size,返回默认值100")
-        return 100
+        # 先从stock_info获取（港股未知时返回 None，让调用方走实时接口或跳过，
+        # 不能默认 100——港股一手常为 200/500/2000，默认 100 会下错单）
+        stock_info = self.get_stock_info(stock_code)
+        if stock_info:
+            lot_size = stock_info.get('lot_size')
+            if lot_size:
+                try:
+                    return int(lot_size)
+                except (TypeError, ValueError):
+                    pass
+
+        logger.warning(f"⚠️  未找到港股 {stock_code} 的lot_size（返回 None）")
+        return None
 
     def get_stock_sector(self, stock_code: str) -> str:
         """获取股票行业"""

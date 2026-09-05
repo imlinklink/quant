@@ -1,6 +1,7 @@
 """
 港股实盘交易管理器 - 基于基类实现
 """
+import logging
 from datetime import time as dt_time
 from typing import Dict, Tuple
 
@@ -9,6 +10,8 @@ from mutifactor.data import get_hk_stock_name, FutuHKDataFetcher
 
 from .live_manager_base import LiveTradingManager
 from .hk_position_manager import HKPositionManager
+
+logger = logging.getLogger(__name__)
 
 
 class HKLiveTradingManager(LiveTradingManager):
@@ -72,6 +75,9 @@ class HKLiveTradingManager(LiveTradingManager):
             买入数量，0 表示跳过
         """
         lot_size = self.trader.get_lot_size(stock_code)
+        if not lot_size:
+            logger.warning(f"[HK] 无法获取 {stock_code} 每手股数，跳过该票")
+            return 0
         raw_shares = int(per_stock_capital // current_price)
         quantity = (raw_shares // lot_size) * lot_size
 

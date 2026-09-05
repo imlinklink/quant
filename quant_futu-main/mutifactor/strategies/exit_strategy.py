@@ -66,7 +66,21 @@ class ExitStrategy(ABC):
     """止盈止损策略基类"""
 
     def __init__(self, config: Dict = None):
-        self.config = config or {}
+        raw = config or {}
+        # 兼容两种传法：
+        #  1) 直接传 risk 段（旧调用/测试）：raw = {'time_exit': {...}, ...}
+        #  2) 传整份 config.yaml：raw = {..., 'risk': {'time_exit': {...}, ...}}
+        # 之前只按顶层读取，导致 risk 下的 time_exit/rsrs_warn/early_hard_stop_pct
+        # 等参数全部被忽略，实盘/回测都退回代码默认值。
+        if isinstance(raw.get('risk'), dict):
+            self.config = dict(raw['risk'])
+            # 防御：个别通用键若只配置在顶层也保留
+            for _k in ('atr_period', 'chandelier_period',
+                       'take_profit_multiplier', 'stop_loss_multiplier'):
+                if _k not in self.config and _k in raw:
+                    self.config[_k] = raw[_k]
+        else:
+            self.config = dict(raw)
         self.logger = logging.getLogger(self.__class__.__name__)
         # 通用参数
         self.atr_period = self.config.get('atr_period', DEFAULT_ATR_PERIOD)
@@ -848,4 +862,3 @@ class ExitStrategyFactory:
             logger.debug(f"追加今日K线: high={new_row['high']:.2f}, low={new_row['low']:.2f}, close={current_price:.2f}")
 
         return df
-

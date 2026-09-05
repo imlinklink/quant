@@ -215,6 +215,26 @@ class PositionManagerBase(ABC):
         self.recently_stopped[stock_code] = stop_date
         logger.info(f"[{self.market_type}] 冷却期: {stock_code} 加入冷却期至 {stop_date}，冷却期{self.stop_loss_cooldown_days}天")
 
+    def _should_cooldown(self, reason: str) -> bool:
+        """判断该卖出原因是否属于“止损类/强制平仓”，需要进入冷却期防止立刻买回。
+
+        覆盖：ATR/阴跌/RSRS/早期硬止损、时间退出强制平仓、
+        追涨止损（前缀 追涨止损|...）、K线不足降级路径的 trailing/hard stop，
+        以及被包裹的 新股止损|... / 🚨NO_KLINE_DATA|... 等。
+        不包含吊顶/RSRS 量比止盈。
+        """
+        r = str(reason or '')
+        stop_reason_codes = {
+            'atr_stop_loss', 'decline_stop', 'rsrs_stop',
+            'early_hard_stop', 'time_exit', 'momentum_stop',
+            'trailing_stop', 'hard_stop',
+        }
+        # 卖出确认链路会把原因包装成 “卖出|atr_stop_loss” 之类前缀，逐个 token 匹配
+        if any(t in stop_reason_codes for t in r.split('|')):
+            return True
+        markers = ('追涨止损', '止损', 'trailing_stop', 'hard_stop', 'momentum_stop')
+        return any(m in r for m in markers)
+
     def cleanup_cooldown(self, current_date: str = None):
         """
         清理已过期的冷却期记录
@@ -807,16 +827,26 @@ class PositionManagerBase(ABC):
                     # 将净利润加入总资金
                     self.strategy_capital += net_profit
 
-                # 止损卖出 → 加入冷却期（冷却期内不重买）
-                stop_loss_reasons = [
-                    'atr_stop_loss', 'decline_stop',
-                    'rsrs_stop', 'early_hard_stop'
-                ]
-                if reason in stop_loss_reasons and not is_manual:
-                    self.add_cooldown(stock_code)
+                # 以券商实际成交为准，判断是否整仓已平：
+                # 部分成交时必须保留余量继续监控，不能把本地整仓删掉，
+                # 否则漏监控/漏止损，sync_with_broker 还会把余股当“新仓”加回并重复占用资金。
+                current_pos = self.strategy_positions.get(stock_code, {})
+                current_qty = int(current_pos.get('quantity') or 0) if current_pos else 0
+                remaining_qty = max(0, current_qty - int(dealt_qty or 0))
 
-                # 删除持仓记录（放最后：前面任何一步失败都不会出现“已 pop 但没保存”）
-                self.strategy_positions.pop(stock_code, None)
+                if remaining_qty > 0:
+                    current_pos['quantity'] = remaining_qty
+                    current_pos.pop('_selling', None)
+                    logger.warning(
+                        f"[{self.market_type}] {stock_code} 卖出部分成交 "
+                        f"{dealt_qty}/{quantity}，本地保留余量 {remaining_qty} 股继续监控"
+                    )
+                else:
+                    # 整仓已平：止损类/强制平仓 → 冷却期（防止选股立刻买回）
+                    if self._should_cooldown(reason) and not is_manual:
+                        self.add_cooldown(stock_code)
+                    # 删除持仓记录（放最后：前面任何一步失败都不会出现“已 pop 但没保存”）
+                    self.strategy_positions.pop(stock_code, None)
             except Exception as e:
                 # 内存更新失败时持仓保持原状（不 pop、不早退），避免“仓已丢但没保存”
                 logger.error(f"[{self.market_type}] 更新持仓状态失败 {stock_code}: {e}", exc_info=True)

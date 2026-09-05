@@ -43,7 +43,10 @@ class HKPositionManager(PositionManagerBase):
             logger.info("[HK] 正在从富途同步实际持仓...")
             futu_positions = self.trader.get_positions()
             
-            if futu_positions:
+            if futu_positions is not None:
+                # get_positions 成功返回空列表 = 账户确实无持仓（今天已全部卖出等），
+                # 必须清空本地，不能回退 trading_state 造成“幽灵持仓”；
+                # 只有查询抛异常（None 兜底/降级）才走 trading_state 恢复。
                 logger.info(f"[HK] 富途实际持仓: {len(futu_positions)}只")
                 for pos in futu_positions:
                     logger.info(f"[HK] 富途持仓: {pos['stock_code']} = {pos['quantity']}股, 成本: {pos['cost_price']:.3f}")
@@ -104,8 +107,9 @@ class HKPositionManager(PositionManagerBase):
                            f"策略已用资金: HKD {self.strategy_used_capital:.2f}")
                 
             else:
-                # 富途返回空列表（未抛异常），同样需要 fallback 到 trading_state
-                logger.info("[HK] 富途返回空持仓，尝试从 trading_state 恢复...")
+                # 正常 get_positions 不会返回 None（失败会抛异常）；
+                # 这里仅兜底兼容异常/降级场景
+                logger.info("[HK] 富途持仓查询返回 None，尝试从 trading_state 恢复...")
                 state = self.state_persistence.load_state()
                 self._restore_from_state(state)
                 
@@ -327,6 +331,10 @@ class HKPositionManager(PositionManagerBase):
     def _adjust_quantity_for_capital(self, stock: Dict, scale: float):
         """港股按手数调整数量"""
         lot_size = self.trader.get_lot_size(stock['code'])
+        if not lot_size:
+            logger.warning(f"[HK] 无法获取 {stock['code']} 每手股数，跳过该票买入")
+            stock['quantity'] = 0
+            return
         stock['quantity'] = int(stock['quantity'] * scale // lot_size) * lot_size
 
     def _check_exit_signals_impl(self, stock_code: str, quantity: int,

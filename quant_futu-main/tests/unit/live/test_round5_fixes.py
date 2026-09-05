@@ -1,0 +1,223 @@
+# -*- coding: utf-8 -*-
+"""第五轮审查修复的行为测试：
+1) 部分成交后本地保留余量、整仓才进冷却期
+2) 卖出确认原因(卖出|atr_stop_loss)/追涨止损 进入冷却期，止盈不进
+3) wait_for_confirmation 总超时遇部分成交必须撤剩余单
+4) YAML 损坏时 _load_table 抛错且保存不覆盖原文件
+5) ExitStrategy 能从 config['risk'] 读到 time_exit/early_hard_stop/rsrs 参数
+"""
+import os
+import threading
+import unittest
+from unittest import mock
+
+import pandas as pd
+import pytest
+
+from mutifactor.infra.yaml_storage import YAMLStorage
+from mutifactor.strategies.exit_strategy import ExitStrategyFactory
+from mutifactor.trading.futu_trader import FutuTrader, OrderError
+from mutifactor.trading.exceptions import TimeoutError as FutuTimeoutError
+
+
+# ---------- 1/2) HKPositionManager 卖出余量与冷却期 ----------
+
+class _FakeState:
+    def load_state(self, env=None):
+        return {'positions': {}, 'cooldowns': {}}
+    def get_positions(self, env=None):
+        return []
+    def save_state(self, **kw):
+        pass
+    def save_position(self, **kw):
+        pass
+    def save_capital(self, **kw):
+        pass
+    def clear_positions(self, env=None):
+        pass
+    def save_trade(self, **kw):
+        pass
+
+
+class _FakeFetcher:
+    def get_current_price(self, code, force_refresh=False):
+        return None
+    def get_today_high_low(self, code):
+        return (None, None)
+
+
+class _FakeTrader:
+    def __init__(self, dealt):
+        self.dealt = dealt
+        self.orders = 0
+    def get_positions(self):
+        return []
+    def place_order(self, stock_code, quantity, order_type, side, timeout):
+        self.orders += 1
+        return ('O1', 55.0, self.dealt)
+
+
+def _make_pm(dealt):
+    from scripts.live_trading.hk_position_manager import HKPositionManager
+    pm = HKPositionManager(
+        {'strategy': {'initial_capital': 100000.0}, 'risk': {},
+         'trading': {'env': 'SIMULATE', 'live_trading': {}}},
+        _FakeTrader(dealt), _FakeState(), _FakeFetcher(),
+    )
+    pm._get_stock_name = lambda c: c
+    pm.market_adapter = mock.Mock()
+    pm.market_adapter.calculate_trading_cost.return_value = {
+        'total': 0.0, 'commission': 0.0, 'stamp_duty': 0.0}
+    pm.save_positions = mock.Mock()
+    pm._save_trade_record = mock.Mock()
+    return pm
+
+
+class TestPartialExitAndCooldown(unittest.TestCase):
+    def test_partial_fill_keeps_remaining(self):
+        pm = _make_pm(dealt=300)
+        pm.strategy_positions = {'HK.A': {'quantity': 1000, 'cost_price': 50.0,
+                                          'highest_price': 60.0}}
+        pm.strategy_used_capital = 50000.0
+        pm.strategy_capital = 100000.0
+        pm._execute_exit('HK.A', 1000, 50.0, 'atr_stop_loss')
+        pos = pm.strategy_positions.get('HK.A')
+        assert pos is not None, '部分成交必须保留余量'
+        assert pos['quantity'] == 700
+        assert '_selling' not in pos
+        # 卖出 300 股的成本被释放，余量继续占用
+        assert abs(pm.strategy_used_capital - 35000.0) < 1e-6
+        assert abs(pm.strategy_capital - 101500.0) < 1e-6
+        assert 'HK.A' not in pm.recently_stopped, '仍持有余量，不应进冷却期'
+
+    def test_full_fill_release_and_cooldown_sell_approval_prefix(self):
+        pm = _make_pm(dealt=200)
+        pm.strategy_positions = {'HK.B': {'quantity': 200, 'cost_price': 10.0,
+                                          'highest_price': 12.0}}
+        pm.strategy_used_capital = 2000.0
+        pm.strategy_capital = 100000.0
+        pm._execute_exit('HK.B', 200, 10.0, '卖出|atr_stop_loss')
+        assert 'HK.B' not in pm.strategy_positions
+        assert 'HK.B' in pm.recently_stopped
+
+    def test_momentum_stop_enters_cooldown(self):
+        pm = _make_pm(dealt=100)
+        pm.strategy_positions = {'HK.C': {'quantity': 100, 'cost_price': 10.0,
+                                          'highest_price': 10.0}}
+        pm.strategy_used_capital = 1000.0
+        pm._execute_exit('HK.C', 100, 10.0, '追涨止损|固定9.8(-2%)')
+        assert 'HK.C' in pm.recently_stopped
+
+    def test_take_profit_not_in_cooldown(self):
+        pm = _make_pm(dealt=100)
+        pm.strategy_positions = {'HK.D': {'quantity': 100, 'cost_price': 10.0,
+                                          'highest_price': 20.0}}
+        pm.strategy_used_capital = 1000.0
+        pm.strategy_capital = 100000.0
+        pm._execute_exit('HK.D', 100, 10.0, 'atr_take_profit')
+        assert 'HK.D' not in pm.recently_stopped
+
+
+# ---------- 3) wait_for_confirmation 超时部分成交必须撤单 ----------
+
+class _Ctx:
+    def __init__(self, polls):
+        self.polls = list(polls)
+        self.last = None
+        self.cancel_calls = 0
+    def order_list_query(self, order_id=None, trd_env=None):
+        if self.polls:
+            self.last = self.polls.pop(0)
+        row = self.last
+        df = pd.DataFrame([{
+            'order_status': row[0],
+            'dealt_avg_price': row[1],
+            'dealt_qty': row[2],
+        }])
+        return 0, df
+    def modify_order(self, **kw):
+        self.cancel_calls += 1
+        return 0, pd.DataFrame()
+
+
+class TestWaitConfirmationCancelOnPartial(unittest.TestCase):
+    def _make_trader(self, ctx):
+        from futu import TrdEnv
+        t = FutuTrader.__new__(FutuTrader)
+        t._connected = True
+        t.env = TrdEnv.SIMULATE
+        t.trade_ctx = ctx
+        t.quote_ctx = None
+        return t
+
+    def test_total_timeout_partial_cancels_and_returns_fill(self):
+        from futu import OrderStatus
+        # 持续 FILLED_PART，直到总超时
+        ctx = _Ctx([(OrderStatus.FILLED_PART, 55.0, 300)] * 50)
+        trader = self._make_trader(ctx)
+        with mock.patch('mutifactor.trading.futu_trader.time.sleep'):
+            avg, qty = trader.wait_for_confirmation('O1', timeout=0.5)
+        assert ctx.cancel_calls == 1, '部分成交超时必须撤剩余单'
+        assert qty == 300 and avg == 55.0
+
+    def test_total_timeout_no_fill_cancels_then_raises(self):
+        from futu import OrderStatus
+        ctx = _Ctx([(OrderStatus.SUBMITTED, 0.0, 0)] * 50)
+        trader = self._make_trader(ctx)
+        with mock.patch('mutifactor.trading.futu_trader.time.sleep'):
+            with pytest.raises(FutuTimeoutError):
+                trader.wait_for_confirmation('O2', timeout=0.5)
+        assert ctx.cancel_calls == 1
+
+
+# ---------- 4) YAML 损坏不覆盖 ----------
+
+class TestYamlCorruptionFailSafe(unittest.TestCase):
+    def test_corrupt_load_raises_and_save_does_not_wipe(self, tmp_path=None):
+        import tempfile
+        d = tempfile.mkdtemp(prefix='yaml_corrupt_')
+        f = os.path.join(d, 'positions.yaml')
+        original = 'positions:\n  - stock_code: HK.X\n    qty: 100\n'
+        with open(f, 'w', encoding='utf-8') as fh:
+            fh.write(original)
+        # 制造损坏
+        with open(f, 'w', encoding='utf-8') as fh:
+            fh.write('positions:\n  - {broken\n')
+        storage = YAMLStorage(data_dir=d)
+        with pytest.raises(RuntimeError):
+            storage._load_table('positions', use_cache=False)
+        with pytest.raises(RuntimeError):
+            storage.save_position(stock_code='HK.Y', quantity=10,
+                                  cost_price=5.0, highest_price=5.0,
+                                  stock_name='Y', env=type('E', (), {'value': 'SIMULATE'})())
+        content = open(f, encoding='utf-8').read()
+        assert 'broken' in content, '损坏文件不得被覆盖清空'
+        assert not os.path.exists(f + '.tmp')
+
+
+# ---------- 5) risk 配置接线 ----------
+
+class TestRiskConfigWiring(unittest.TestCase):
+    def test_full_config_risk_section_is_used(self):
+        cfg = {'risk': {
+            'exit_strategy': 'atr_dynamic',
+            'time_exit': {'phase1_days': 120, 'phase2_days': 250,
+                          'phase3_days': 350, 'phase2_multiplier': 1.0},
+            'early_hard_stop_pct': 0.08,
+            'rsrs_warn': {'early_exempt_days': 10},
+            'decline_acceleration': {'enabled': True},
+            'take_profit_multiplier': 3.0,
+            'stop_loss_multiplier': 2.0,
+        }, 'atr_period': 14}
+        s = ExitStrategyFactory.create('atr_dynamic', cfg)
+        assert s.phase3_days == 350
+        assert s.early_hard_stop_pct == 0.08
+        assert s.rsrs_early_exempt_days == 10
+        assert s.phase1_days == 120
+        assert s.take_profit_multiplier == 3.0
+
+    def test_risk_only_config_still_works(self):
+        cfg = {'time_exit': {'phase3_days': 350}, 'early_hard_stop_pct': 0.08}
+        s = ExitStrategyFactory.create('atr_dynamic', cfg)
+        assert s.phase3_days == 350
+        assert s.early_hard_stop_pct == 0.08

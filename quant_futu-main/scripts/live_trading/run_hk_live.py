@@ -270,27 +270,27 @@ def manual_operation(args):
                     print("错误: 买入操作需要指定数量 (-q)")
                     sys.exit(1)
 
-                order_id, avg_price = trader.place_order(
+                order_id, avg_price, dealt_qty = trader.place_order(
                     stock_code=args.stock,
                     quantity=args.quantity,
                     order_type='MARKET',
                     price=args.price
                 )
-                print(f"✅ 买入成功: 订单 {order_id}, 均价 {avg_price}")
+                print(f"✅ 买入成功: 订单 {order_id}, 均价 {avg_price}, 成交 {dealt_qty} 股")
 
             elif args.action in ['sell', 'close']:
                 if not args.quantity:
                     print("错误: 卖出操作需要指定数量 (-q)")
                     sys.exit(1)
 
-                order_id, avg_price = trader.place_order(
+                order_id, avg_price, dealt_qty = trader.place_order(
                     stock_code=args.stock,
                     quantity=args.quantity,
                     order_type='MARKET',
                     side='sell',
                     price=args.price
                 )
-                print(f"✅ 卖出成功: 订单 {order_id}, 均价 {avg_price}")
+                print(f"✅ 卖出成功: 订单 {order_id}, 均价 {avg_price}, 成交 {dealt_qty} 股")
 
     except Exception as e:
         logger.error(f"手动操作失败: {e}")

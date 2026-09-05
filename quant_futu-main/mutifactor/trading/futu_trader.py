@@ -104,7 +104,7 @@ class FutuTrader:
             stock_code: 股票代码 (格式: HK.00700)
 
         Returns:
-            每手股数
+            每手股数；无法获取时返回 None（调用方应跳过该票，不能默认 100）
         """
         # 优先从数据库获取
         try:
@@ -129,17 +129,17 @@ class FutuTrader:
                 logger.info(f"获取 {stock_code} 每手股数: {lot_size}")
                 return lot_size
             else:
-                logger.warning(f"获取 {stock_code} 市场快照失败,使用默认100股")
-                return 100
+                logger.warning(f"获取 {stock_code} 市场快照失败,无法确定每手股数")
+                return None
 
         except (OSError, IOError) as e:
             # 网络错误
-            logger.warning(f"获取 {stock_code} 每手股数网络错误: {e},使用默认100股")
-            return 100
+            logger.warning(f"获取 {stock_code} 每手股数网络错误: {e},无法确定每手股数")
+            return None
         except (KeyError, IndexError, ValueError) as e:
             # 数据解析错误
-            logger.warning(f"获取 {stock_code} 每手股数数据解析错误: {e},使用默认100股")
-            return 100
+            logger.warning(f"获取 {stock_code} 每手股数数据解析错误: {e},无法确定每手股数")
+            return None
         except Exception as e:
             # 未知错误，不应静默处理
             logger.critical(f"获取 {stock_code} 每手股数未知错误: {type(e).__name__}: {e}", exc_info=True)
@@ -251,8 +251,15 @@ class FutuTrader:
                     logger.warning(f"订单 {order_id} 部分成交超时({partial_timeout}秒), 尝试取消剩余订单")
                     try:
                         self.cancel_order(order_id)
-                        logger.info(f"订单 {order_id} 剩余订单已取消, 最终成交均价: {avg_price}, 数量: {dealt_qty}")
-                        return avg_price, dealt_qty
+                        # 撤单成功后回查一次，把撤单前落地的额外成交也计入
+                        final_avg, final_qty = self._requery_after_cancel(
+                            order_id, avg_price, dealt_qty
+                        )
+                        logger.info(
+                            f"订单 {order_id} 剩余订单已取消, "
+                            f"最终成交均价: {final_avg}, 数量: {final_qty}"
+                        )
+                        return final_avg, final_qty
                     except (OSError, IOError) as e:
                         logger.error(f"取消订单网络错误: {e}, 继续等待成交")
                         partial_start_time = time.time()
@@ -279,24 +286,41 @@ class FutuTrader:
             if status == OrderStatus.FILLED_ALL:
                 logger.info(f"订单 {order_id} 最终成交, 均价: {avg_price}, 数量: {dealt_qty}")
                 return avg_price, dealt_qty
-            elif status == OrderStatus.FILLED_PART and avg_price > 0:
-                # 超时时有部分成交，返回部分成交价格
-                logger.warning(f"订单 {order_id} 超时但有部分成交, 均价: {avg_price}, 数量: {dealt_qty}")
-                return avg_price, dealt_qty
-            else:
-                # 尝试取消超时订单
-                logger.warning(f"订单 {order_id} 超时未成交，尝试取消")
-                try:
-                    self.cancel_order(order_id)
-                    logger.info(f"订单 {order_id} 已取消")
-                except (OSError, IOError) as e:
-                    logger.error(f"取消超时订单网络错误: {e}")
-                except OrderError as e:
-                    logger.error(f"取消超时订单失败: {e}")
-                except Exception as e:
-                    logger.error(f"取消超时订单异常: {type(e).__name__}: {e}", exc_info=True)
 
-                raise TimeoutError(f"订单 {order_id} 确认超时", order_id=order_id)
+            # 未完全成交（含 FILLED_PART 部分成交 / 未成交）：剩余订单仍在市场
+            # 可能继续成交（超买/超卖风险），必须先撤单再回查最终成交
+            logger.warning(
+                f"订单 {order_id} 确认超时未完全成交(状态={get_order_status_name(status)}, "
+                f"已成交 {dealt_qty} 股)，尝试取消剩余订单"
+            )
+            try:
+                self.cancel_order(order_id)
+                logger.info(f"订单 {order_id} 剩余订单已取消")
+            except (OSError, IOError) as e:
+                logger.error(f"取消超时订单网络错误: {e}")
+                raise TimeoutError(
+                    f"订单 {order_id} 确认超时且撤单失败(网络错误): {e}", order_id=order_id
+                )
+            except OrderError as e:
+                logger.error(f"取消超时订单失败: {e}")
+                raise TimeoutError(
+                    f"订单 {order_id} 确认超时且撤单失败: {e}", order_id=order_id
+                )
+            except Exception as e:
+                logger.error(f"取消超时订单异常: {type(e).__name__}: {e}", exc_info=True)
+                raise TimeoutError(
+                    f"订单 {order_id} 确认超时且撤单异常: {e}", order_id=order_id
+                )
+
+            final_avg, final_qty = self._requery_after_cancel(
+                order_id, avg_price, dealt_qty
+            )
+            if final_qty and final_qty > 0:
+                logger.warning(
+                    f"订单 {order_id} 撤单后最终成交均价: {final_avg}, 数量: {final_qty}"
+                )
+                return final_avg, final_qty
+            raise TimeoutError(f"订单 {order_id} 确认超时未成交", order_id=order_id)
         except TimeoutError:
             raise
         except OrderError:
@@ -306,6 +330,17 @@ class FutuTrader:
         except Exception as e:
             logger.error(f"订单确认异常: {type(e).__name__}: {e}", exc_info=True)
             raise TimeoutError(f"订单 {order_id} 确认超时: {e}", order_id=order_id)
+
+    def _requery_after_cancel(self, order_id: str,
+                              fallback_avg: float, fallback_qty: int):
+        """撤单后回查一次最终成交（失败则回退撤单前的已知成交）。"""
+        try:
+            _, final_avg, final_qty = self.get_order_status(order_id)
+            if final_qty and final_qty > 0 and final_avg and final_avg > 0:
+                return final_avg, final_qty
+        except Exception:
+            pass
+        return fallback_avg, fallback_qty
 
     def get_order_status(self, order_id: str) -> Tuple[OrderStatus, float, int]:
         """
