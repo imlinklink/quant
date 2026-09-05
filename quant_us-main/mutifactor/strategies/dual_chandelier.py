@@ -361,7 +361,8 @@ class DualChandelierExitStrategy:
         return state
 
     def on_tick(self, stock_code: str, current_price: float,
-                current_atr: float) -> Tuple[bool, str, float]:
+                current_atr: float,
+                keep_on_hit: bool = False) -> Tuple[bool, str, float]:
         if stock_code not in self.positions:
             return False, "NO_POSITION", current_price
 
@@ -380,7 +381,8 @@ class DualChandelierExitStrategy:
                 pnl_pct = (state.entry_price - exit_price) / state.entry_price * 100
             logger.info(f"[{stock_code}][{state.direction}] 退出 {reason}: "
                        f"价格={current_price:.2f}, 退出={exit_price:.2f}, 盈亏={pnl_pct:+.2f}%")
-            del self.positions[stock_code]
+            if not keep_on_hit:
+                del self.positions[stock_code]
 
         return should_exit, reason, exit_price
 

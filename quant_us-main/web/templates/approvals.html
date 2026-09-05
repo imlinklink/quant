@@ -85,7 +85,7 @@ function fmtTs(sec) {
   const d = new Date(sec * 1000);
   return d.toLocaleString('zh-CN', { hour12: false });
 }
-function llmHtml(llm) {
+function llmHtml(llm, side) {
   if (!llm) {
     return '<div class="llm-box"><span class="muted">大模型未启用或本轮无判定（纯规则信号）</span></div>';
   }
@@ -98,7 +98,9 @@ function llmHtml(llm) {
   const cls = (v === 'allow' || v === 'pass') ? 'verdict-allow'
             : (v === 'block' || v === 'veto') ? 'verdict-block' : 'verdict-watch';
   const conf = llm.confidence == null ? '-' : (Number(llm.confidence) * 100).toFixed(0) + '%';
-  const label = {allow:'允许买入', pass:'通过', watch:'观望', delay:'暂缓(轻仓)', block:'建议否决', veto:'建议否决'}[v] || v;
+  const buyLabels = {allow:'允许买入', pass:'通过', watch:'观望', delay:'暂缓(轻仓)', block:'建议否决', veto:'建议否决'};
+  const sellLabels = {allow:'建议卖出', watch:'可分批/观望', delay:'可分批兑现', block:'建议继续持有', veto:'建议继续持有'};
+  const label = (side === 'sell' ? sellLabels : buyLabels)[v] || v;
   const modeText = {shadow:'影子模式', real_veto:'真实否决'}[llm.mode] || llm.mode || '';
   return '<div class="llm-box"><div>大模型判定：<span class="llm-verdict ' + cls + '">' + esc(label) +
          '</span> <span class="muted">(conf ' + conf + ', ' + esc(modeText) + ')</span></div>' +
@@ -110,11 +112,15 @@ function llmHtml(llm) {
 function card(item, now) {
   const id = esc(item.id);
   const left = Math.max(0, (item.expires_at || 0) - now);
+  const isSell = item.side === 'sell';
   const countdown = item.status === 'pending'
-    ? '<span class="countdown">' + Math.ceil(left / 1000) + 's 后自动过期</span>' : '';
+    ? '<span class="countdown">' + Math.ceil(left / 1000) + 's 后自动' +
+      (isSell ? '卖出' : '过期') + '</span>' : '';
   const buttons = item.status === 'pending'
-    ? '<div class="actions"><button class="buy" data-id="' + id + '" data-act="approve">下单</button>' +
-      '<button class="reject" data-id="' + id + '" data-act="reject">拒绝</button></div>' : '';
+    ? '<div class="actions"><button class="buy" data-id="' + id + '" data-act="approve">' +
+      (isSell ? '卖出' : '下单') + '</button>' +
+      '<button class="reject" data-id="' + id + '" data-act="reject">' +
+      (isSell ? '继续持有' : '拒绝') + '</button></div>' : '';
   const kline = item.kline_score != null
     ? '<div>日内评分：<b>' + esc(item.kline_score) + '</b>（' + esc(item.kline_signal || '-') + '）</div>' : '';
   return '<div class="card ' + esc(item.status) + '">' +
@@ -124,6 +130,7 @@ function card(item, now) {
     '<div class="kv"><span>信号价 <b>' + esc(item.price) + '</b></span>' +
     '<span>数量 <b>' + esc(item.quantity) + '</b> 股</span>' +
     '<span>预计金额 <b>$' + esc(item.estimated_cost) + '</b></span>' +
+    '<span>方向 <b>' + (isSell ? '卖出' : '买入') + '</b></span>' +
     '<span>策略线 <b>' + esc(MODE_LABEL[item.entry_mode] || item.entry_mode || '-') + '</b></span>' +
     '<span>信号时间 ' + fmtTs(item.created_at) + '</span>' + countdown + '</div>' +
     (kline ? '<div class="kv">' + kline + '</div>' : '') +
@@ -131,7 +138,7 @@ function card(item, now) {
     '<div class="reason-box">' + esc(item.reason || '无') + '</div>' +
     (item.context ? '<div class="section-title">消息面上下文</div>' +
       '<div class="reason-box" style="white-space:pre-line">' + esc(item.context) + '</div>' : '') +
-    '<div class="section-title">大模型判定</div>' + llmHtml(item.llm) +
+    '<div class="section-title">大模型判定</div>' + llmHtml(item.llm, item.side) +
     (item.note ? '<div class="note">备注：' + esc(item.note) + '</div>' : '') +
     buttons + '</div>';
 }

@@ -531,6 +531,8 @@ class TrendBreakoutMonitor:
             self._approval_reject_date = today
         self.approval_store.expire_old()
         for item in self.approval_store.rejected_items():
+            if item.get('side', 'buy') != 'buy':
+                continue
             if item.get('entry_mode', '') != 'donchian':
                 continue
             if item.get('id') in self._approval_processed_reject_ids:
@@ -540,10 +542,13 @@ class TrendBreakoutMonitor:
             # 只取消本策略线同代码的其它提案
             for other in self.approval_store.get_all():
                 if (other.get('stock_code') == item.get('stock_code')
+                        and other.get('side', 'buy') == 'buy'
                         and other.get('entry_mode', '') == 'donchian'
                         and other['status'] in ('pending', 'approved')):
                     self.approval_store.mark(other['id'], 'expired', note='突破线同代码已被拒绝，取消')
         for item in self.approval_store.approved_items():
+            if item.get('side', 'buy') != 'buy':
+                continue
             if item.get('entry_mode', '') != 'donchian':
                 continue
             self._execute_approved(item)

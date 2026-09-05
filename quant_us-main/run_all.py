@@ -124,7 +124,10 @@ class UnifiedSystem:
 
             # 止盈止损
             from scripts.live_trading.chandelier_exit_manager import ChandelierExitManager
-            self.exit_mgr = ChandelierExitManager(dry_run=self.dry_run)
+            self.exit_mgr = ChandelierExitManager(
+                dry_run=self.dry_run,
+                approval_store=self.approval_store,
+            )
             self.exit_mgr.start()
             logger.info("✅ 止盈止损管理器已启动")
 

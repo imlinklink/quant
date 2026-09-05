@@ -420,6 +420,8 @@ class DipBuyMonitor:
         # 只处理抄底线（entry_mode=dip_buy）的点击结果；
         # 突破线（donchian）提案由 TrendBreakoutMonitor 自己处理，互不误伤。
         for item in self.approval_store.rejected_items():
+            if item.get('side', 'buy') != 'buy':
+                continue
             if item.get('entry_mode', 'dip_buy') != 'dip_buy':
                 continue
             if item.get('id') in self._approval_processed_reject_ids:
@@ -430,6 +432,7 @@ class DipBuyMonitor:
             for other in self.approval_store.get_all():
                 if (
                     other.get('stock_code') == item.get('stock_code')
+                    and other.get('side', 'buy') == 'buy'
                     and other.get('entry_mode', 'dip_buy') == 'dip_buy'
                     and other['status'] in ('pending', 'approved')
                 ):
@@ -437,6 +440,8 @@ class DipBuyMonitor:
 
         # 用户确认 → 执行
         for item in self.approval_store.approved_items():
+            if item.get('side', 'buy') != 'buy':
+                continue
             if item.get('entry_mode', 'dip_buy') != 'dip_buy':
                 continue
             self._execute_approved(item)

@@ -747,10 +747,12 @@ class StopOrderTracker:
     # 价格最小变动精度（避免微小波动频繁改单）
     PRICE_EPSILON = 0.01
 
-    def __init__(self, pool, live_cfg, dry_run=False):
+    def __init__(self, pool, live_cfg, dry_run=False,
+                 disable_auto_orders=False):
         self.pool = pool
         self.live_cfg = live_cfg
         self.dry_run = dry_run
+        self.disable_auto_orders = disable_auto_orders
         self._lock = threading.RLock()
         self._orders: Dict[str, Dict] = {}
         self._stopped = False
@@ -870,6 +872,11 @@ class StopOrderTracker:
         返回：(stop_changed, profit_changed, info_dict)
         """
         from futu import OrderType, TrdSide
+
+        if self.disable_auto_orders:
+            # 卖出人工确认启用：不挂/不改券商自动止损止盈单，
+            # 触发一律改由进程内“卖出提案 → LLM + 人工 → 超时兜底”接管。
+            return False, False, {}
 
         with self._lock:
             tracked = self._orders.get(code)
@@ -1052,7 +1059,7 @@ class StopOrderTracker:
 # 主管理器（优化优雅退出）
 # ==============================================================================
 class ChandelierExitManager:
-    def __init__(self, dry_run=False, config=None):
+    def __init__(self, dry_run=False, config=None, approval_store=None):
         if config is None:
             config = yaml.safe_load(open(CONFIG_PATH, 'r', encoding='utf-8'))
 
@@ -1064,6 +1071,33 @@ class ChandelierExitManager:
         self.ignore_hk = self.live_cfg.get("ignore_hk_stocks", True)
 
         logger.info(f"✅ 港股过滤开关: {'开启(忽略港股)' if self.ignore_hk else '关闭(监控港股)'}")
+
+        # ===== 卖出人工确认（LLM + 人工 + 超时自动执行兜底）=====
+        self.approval_store = approval_store
+        self.sell_cfg = (
+            (config.get('trading') or {})
+            .get('live_trading', {})
+            .get('sell_approval', {})
+        ) or {}
+        self.sell_approval_enabled_flag = bool(
+            self.sell_cfg.get('enabled', True)
+        ) and self.approval_store is not None
+        self.llm_advisor = None
+        if self.sell_approval_enabled_flag and self.sell_cfg.get('llm_enabled', True):
+            try:
+                from mutifactor.llm import LLMAdvisor
+                self.llm_advisor = LLMAdvisor(config.get('llm', {}))
+            except Exception as e:
+                logger.warning(f"[卖出确认] LLM 初始化失败: {e}")
+        if self.sell_approval_enabled_flag:
+            logger.warning(
+                "[卖出确认] 已开启：所有卖出（含止损）需 LLM+人工确认，"
+                f"{int(float(self.sell_cfg.get('ttl_seconds', 300)))}s 未确认自动执行；"
+                "不再挂券商自动止损单"
+            )
+        self.sell_poll_thread = None
+        self._sell_processed_reject_ids = set()
+        self._sell_reject_until: Dict[str, float] = {}
 
         self.pool = FutuConnectionPool(
             host=self.futu_cfg.get("host", "127.0.0.1"),
@@ -1088,7 +1122,10 @@ class ChandelierExitManager:
         })
 
         self.ticker.set_callback(self._on_tick)
-        self.stop_tracker = StopOrderTracker(self.pool, self.live_cfg, dry_run=self.dry_run)
+        self.stop_tracker = StopOrderTracker(
+            self.pool, self.live_cfg, dry_run=self.dry_run,
+            disable_auto_orders=self.sell_approval_enabled_flag,
+        )
 
         self._executor = None
         self._running = False
@@ -1119,10 +1156,16 @@ class ChandelierExitManager:
         if code in self.position_mgr.strategy.positions:
             saved_state = self.position_mgr.strategy.positions[code]
 
-        hit, reason, exit_price = self.position_mgr.strategy.on_tick(code, price, atr)
+        hit, reason, exit_price = self.position_mgr.strategy.on_tick(
+            code, price, atr,
+            keep_on_hit=self.sell_approval_enabled_flag,
+        )
         if hit:
             logger.debug(f"[触发平仓] {code} | {reason} @ {exit_price:.2f}")
-            if self._close_position(code, exit_price):
+            if self.sell_approval_enabled_flag:
+                # 卖出人工确认：不直接平仓，先生成卖出提案（状态保留继续跟踪）
+                self._request_exit(code, exit_price, reason)
+            elif self._close_position(code, exit_price):
                 logger.debug(f"[平仓确认] {code} 策略状态已清理")
             else:
                 logger.warning(f"[平仓失败] {code} 恢复策略状态")
@@ -1346,10 +1389,16 @@ class ChandelierExitManager:
                     price = self.ticker.get_price(code)
                     if not atr or not price:
                         continue
-                    hit, reason, exit_price = self.position_mgr.strategy.on_tick(code, price, atr)
+                    hit, reason, exit_price = self.position_mgr.strategy.on_tick(
+                        code, price, atr,
+                        keep_on_hit=self.sell_approval_enabled_flag,
+                    )
                     if hit:
                         logger.warning(f"[兜底检查] {code} | {reason} @ {exit_price:.2f}")
-                        self._close_position(code, exit_price)
+                        if self.sell_approval_enabled_flag:
+                            self._request_exit(code, exit_price, reason)
+                        else:
+                            self._close_position(code, exit_price)
 
             except Exception as e:
                 logger.error(f"线程异常: {e}", exc_info=True)
@@ -1367,6 +1416,16 @@ class ChandelierExitManager:
         codes = self.position_mgr.all_codes()
         self.ticker.start(codes)
         logger.info("✅ 监控已启动")
+        if self.sell_approval_enabled_flag:
+            self.sell_poll_thread = threading.Thread(
+                target=self._run_sell_poll_loop, daemon=True,
+                name='US-Sell-Approval-Poll',
+            )
+            self.sell_poll_thread.start()
+            logger.info(
+                "[卖出确认] 轮询线程已启动（LLM+人工，"
+                f"{int(float(self.sell_cfg.get('ttl_seconds', 300)))}s 超时自动卖出）"
+            )
 
     def stop(self):
         if not self._running:
@@ -1382,8 +1441,180 @@ class ChandelierExitManager:
             self._executor.shutdown(wait=True)
         if self._position_thread:
             self._position_thread.join(timeout=10)
+        if self.sell_poll_thread:
+            self.sell_poll_thread.join(timeout=10)
         self.pool.close()
         logger.info("🎉 已安全退出")
+
+    # ==================== 卖出人工确认（LLM + 人工 + 超时自动执行兜底） ====================
+
+    def _sell_active_for(self, code: str) -> bool:
+        if self.approval_store is None:
+            return False
+        return any(
+            it.get('side') == 'sell'
+            and it.get('stock_code') == code
+            and it.get('status') in ('pending', 'approved', 'executing')
+            for it in self.approval_store.get_all()
+        )
+
+    def _position_qty_cost(self, code: str):
+        rec = REGISTRY.get(code) if REGISTRY else None
+        if rec and float(rec.get('qty') or 0) > 0:
+            return float(rec['qty']), float(rec.get('entry_price') or 0)
+        if not self.dry_run:
+            try:
+                from futu import RET_OK, TrdEnv
+                env_str = self.live_cfg.get('trd_env', 'SIMULATE')
+                trd_env = TrdEnv.SIMULATE if env_str == 'SIMULATE' else TrdEnv.REAL
+                with self.pool.get_trade_ctx() as ctx:
+                    ret, data = ctx.position_list_query(trd_env=trd_env, code=code)
+                if ret == RET_OK and data is not None and len(data) > 0:
+                    r = data.iloc[0]
+                    qty = float(r['can_sell_qty']) if r['position_side'] == 'LONG' else float(r['can_buy_qty'])
+                    return max(qty, 0.0), float(r.get('average_cost', 0) or 0)
+            except Exception:
+                pass
+        return 0.0, 0.0
+
+    def _request_exit(self, code: str, exit_price: float, reason: str) -> bool:
+        """卖出候选 → 生成卖出确认提案；确认/超时兜底后才会真正平仓。"""
+        if not self.sell_approval_enabled_flag or self.approval_store is None:
+            return self._close_position(code, exit_price)
+        now = time.time()
+        reject_min = float(self.sell_cfg.get('reject_cooldown_minutes', 30))
+        if code in self._sell_reject_until and now < self._sell_reject_until[code]:
+            return False
+        if self._sell_active_for(code):
+            return False
+        qty, cost = self._position_qty_cost(code)
+        if qty <= 0:
+            return False
+        price = self.ticker.get_price(code) or exit_price
+        if not price or price <= 0:
+            return False
+        ttl = float(self.sell_cfg.get('ttl_seconds', 300))
+        env = 'DRY-RUN' if self.dry_run else str(self.live_cfg.get('trd_env', 'SIMULATE'))
+        pnl = ((price - cost) / cost) if cost and cost > 0 else 0.0
+        mode = 'manual'
+        try:
+            mode = str((self.position_mgr._positions.get(code) or {}).get('mode', 'manual'))
+        except Exception:
+            pass
+        created = self.approval_store.create(
+            side='sell',
+            stock_code=code,
+            stock_name=code,
+            market_type='US',
+            env=env,
+            price=round(price, 4),
+            quantity=int(qty),
+            estimated_cost=round(price * qty, 2),
+            entry_mode=mode,
+            trigger_reason=f'卖出|{reason}',
+            reason=(
+                f'【卖出确认】规则触发: {reason}；成本 {cost:.3f}，现价约 {price:.3f}，'
+                f'浮盈 {pnl * 100:+.1f}%；超时 {int(ttl)} 秒未确认将自动执行。'
+            ),
+            llm=None,
+            position_cost=cost,
+            pnl_pct=round(pnl, 5),
+            expires_at=now + ttl,
+        )
+        if self.llm_advisor is not None and created and created.get('id'):
+            pid = created['id']
+
+            def _ask_llm():
+                try:
+                    result = self.llm_advisor.judge_sell(
+                        position_text=(
+                            f'{code} {int(qty)}股，成本 {cost:.3f}，现价约 {price:.3f}，'
+                            f'浮盈 {pnl * 100:+.1f}%'
+                        ),
+                        sell_reason=reason,
+                    )
+                    if result and self.approval_store is not None:
+                        self.approval_store.update_fields(
+                            pid,
+                            llm={
+                                'model': getattr(self.llm_advisor, 'model', ''),
+                                'mode': 'shadow',
+                                'verdict': result.get('verdict', 'allow'),
+                                'risk_level': result.get('risk_level', 'MEDIUM'),
+                                'confidence': result.get('confidence'),
+                                'reason': result.get('reason', ''),
+                            },
+                        )
+                except Exception as e:
+                    logger.warning(f"[卖出确认] LLM 建议失败 {code}: {e}")
+
+            threading.Thread(target=_ask_llm, daemon=True,
+                             name=f'US-Sell-LLM-{pid}').start()
+        logger.warning(
+            f"[卖出确认] {code} 推送卖出提案: {reason}（LLM=异步判定中，"
+            f"{int(ttl)}s 超时自动执行）—— 请到确认页点「卖出」或「继续持有」"
+        )
+        return True
+
+    def _execute_sell_proposal(self, pid: str, auto: bool = False):
+        if self.approval_store is None:
+            return
+        item = self.approval_store.get(pid)
+        if not item or item.get('side') != 'sell':
+            return
+        if item.get('status') not in ('pending', 'approved'):
+            return
+        code = item.get('stock_code')
+        note = '用户确认卖出' if not auto else '超时未确认，自动卖出兜底'
+        if item.get('status') == 'pending':
+            if not self.approval_store.mark(pid, 'approved',
+                                            note='超时未确认，自动批准后执行卖出'):
+                return
+        if not self.approval_store.mark(pid, 'executing', note=note):
+            return
+        exit_price = float(item.get('price') or 0)
+        ok = self._close_position(code, exit_price)
+        if ok:
+            try:
+                self.position_mgr.strategy.on_exit(code)
+                self.position_mgr._positions.pop(code, None)
+            except Exception:
+                pass
+        self.approval_store.mark(
+            pid, 'executed' if ok else 'failed',
+            note=note + ('（执行成功）' if ok else '（执行失败，持仓仍存在）'),
+        )
+
+    def _run_sell_poll_loop(self):
+        interval = float(self.sell_cfg.get('poll_interval_sec', 10))
+        while not self._stop_event.is_set():
+            try:
+                if self.approval_store is not None:
+                    now = time.time()
+                    for item in self.approval_store.rejected_items():
+                        if item.get('side') != 'sell':
+                            continue
+                        if item.get('id') in self._sell_processed_reject_ids:
+                            continue
+                        self._sell_processed_reject_ids.add(item.get('id', ''))
+                        reject_min = float(self.sell_cfg.get('reject_cooldown_minutes', 30))
+                        self._sell_reject_until[item.get('stock_code', '')] = \
+                            now + reject_min * 60
+                        logger.info(
+                            f"[卖出确认] {item.get('stock_code')} 你选择继续持有，"
+                            f"{reject_min:.0f}分钟内不再弹卖出"
+                        )
+                    for item in self.approval_store.approved_items():
+                        if item.get('side') == 'sell':
+                            self._execute_sell_proposal(item['id'], auto=False)
+                    for item in self.approval_store.get_all():
+                        if (item.get('side') == 'sell'
+                                and item.get('status') == 'pending'
+                                and now > float(item.get('expires_at') or 0)):
+                            self._execute_sell_proposal(item['id'], auto=True)
+            except Exception as e:
+                logger.error(f"[卖出确认] 轮询异常: {e}", exc_info=True)
+            time.sleep(interval)
 
     def _close_position(self, code: str, exit_price: float = 0.0) -> bool:
         trd_env_str = self.live_cfg.get('trd_env', 'SIMULATE')

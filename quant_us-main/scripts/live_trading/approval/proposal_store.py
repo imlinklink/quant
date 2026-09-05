@@ -88,13 +88,28 @@ class ProposalStore:
                 self._record_ledger('execution_status', self.get(proposal_id), {'status': status, 'note': note})
         return ok
 
+    def update_fields(self, proposal_id: str, **fields) -> bool:
+        """线程安全地补写展示字段（如异步 LLM 判定回填）。终态/不存在返回 False。"""
+        with self._lock:
+            item = self._items.get(proposal_id)
+            if not item or item['status'] not in ('pending', 'approved'):
+                return False
+            item.update(fields)
+            item['updated_at'] = time.time()
+        return True
+
     def expire_old(self, now: Optional[float] = None) -> int:
-        """把超过 TTL 仍未操作的提案标记为 expired。"""
+        """把超过 TTL 仍未操作的“买入提案”标记为 expired；
+        卖出提案超时由卖出确认轮询自动执行（兜底）。"""
         now = time.time() if now is None else now
         expired = 0
-        for pid in list(self._items.keys()):
+        with self._lock:
+            pids = list(self._items.keys())
+        for pid in pids:
             item = self.get(pid)
             if not item:
+                continue
+            if item.get('side') == 'sell':
                 continue
             if item['status'] in ('pending', 'approved') and now > item.get('expires_at', now):
                 if self._transition(pid, 'expired', '超时未确认，自动过期'):
