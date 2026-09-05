@@ -113,6 +113,94 @@ class PositionManagerBase(ABC):
             logger.warning(f"[{self.market_type}] 冷却期日期解析错误 {stock_code}: {stop_date_str}, {e}")
             return False
 
+    # ==================== 周末演示模式（只进内存，不碰券商/持久化） ====================
+
+    def demo_open_position(self, stock_code: str, quantity: int, price: float,
+                           entry_mode: str = 'momentum') -> bool:
+        """周末演示：登记一笔“演示持仓”（demo=True）。
+        只写入 strategy_positions 与监控快照，不保存 trading_state/positions 表，
+        避免污染周一恢复状态；正常检查与券商同步会自动跳过/清理演示仓。
+        """
+        if not stock_code or quantity <= 0 or price <= 0:
+            return False
+        with self._position_lock:
+            if stock_code in self.strategy_positions:
+                return False
+            self.strategy_positions[stock_code] = {
+                'quantity': int(quantity),
+                'cost_price': float(price),
+                'highest_price': float(price),
+                'buy_time': datetime.now().isoformat(),
+                'entry_mode': entry_mode or 'momentum',
+                'order_id': 'DEMO_WEEKEND',
+                'demo': True,
+            }
+        logger.warning(
+            f"[{self.market_type}] [周末演示] 登记演示持仓: {stock_code} x {quantity} "
+            f"@{price:.3f}（不写券商、不落恢复状态）"
+        )
+        if self.live_manager is not None and hasattr(self.live_manager, 'update_positions_snapshot'):
+            try:
+                stock_name = self._get_stock_name(stock_code)
+                self.live_manager.update_positions_snapshot(stock_code, {
+                    'stock_code': stock_code,
+                    'stock_name': stock_name,
+                    'manual': False,
+                    'entry_mode': entry_mode or 'momentum',
+                    'quantity': int(quantity),
+                    'cost_price': float(price),
+                    'price': float(price),
+                    'highest_price': float(price),
+                    'return_pct': 0.0,
+                    'profit_amount': 0.0,
+                    'atr': 0.0,
+                    'take_profit_price': None,
+                    'stop_loss_price': None,
+                    'should_exit': False,
+                    'reason': '周末演示持仓（未连接券商，仅本地模拟）',
+                    'status_text': '📝 演示持仓（观察中）',
+                    'demo': True,
+                })
+            except Exception as e:
+                logger.warning(f"[{self.market_type}] 演示持仓快照推送失败: {e}")
+        return True
+
+    def demo_close_position(self, stock_code: str, exit_price: float) -> bool:
+        """周末演示：按演示价平掉一笔演示持仓，记录账本（dry_run），不落恢复状态。"""
+        with self._position_lock:
+            pos = self.strategy_positions.get(stock_code)
+            if not pos or not pos.get('demo'):
+                return False
+            quantity = int(pos.get('quantity', 0))
+            cost_price = float(pos.get('cost_price', 0))
+            entry_mode = pos.get('entry_mode', 'momentum')
+            self.strategy_positions.pop(stock_code, None)
+        exit_price = float(exit_price)
+        pnl_pct = (exit_price - cost_price) / cost_price if cost_price > 0 else 0.0
+        logger.warning(
+            f"[{self.market_type}] [周末演示] 平仓 {stock_code} x {quantity} "
+            f"@{exit_price:.3f}，模拟盈亏 {pnl_pct * 100:+.2f}%"
+        )
+        try:
+            self._ledger_record(
+                'position_closed',
+                stock_code=stock_code,
+                order_id='DEMO_WEEKEND',
+                quantity=quantity,
+                cost_price=cost_price,
+                exit_price=exit_price,
+                pnl_pct=pnl_pct,
+                reason='weekend_demo_exit',
+                entry_mode=entry_mode,
+                dry_run=True,
+                note='周末演示：未连接券商',
+            )
+        except Exception:
+            pass
+        if self.live_manager is not None and hasattr(self.live_manager, 'prune_positions_snapshot'):
+            self.live_manager.prune_positions_snapshot()
+        return True
+
     def add_cooldown(self, stock_code: str, stop_date: str = None):
         """
         添加股票到冷却期
@@ -220,6 +308,15 @@ class PositionManagerBase(ABC):
         """
         pass
 
+    def _ledger_record(self, event_type: str, **fields):
+        """写入评估账本（写失败不影响交易）。"""
+        try:
+            from scripts.live_trading.decision_ledger import ledger
+            env = str(self.config.get('trading', {}).get('env', 'SIMULATE'))
+            ledger.record(event_type, env=env, market_type=self.market_type, **fields)
+        except Exception:
+            pass
+
     def _get_cached_kline_data(self, stock_code: str):
         """获取缓存的K线数据"""
         if self.live_manager and hasattr(self.live_manager, 'get_cached_kline_data'):
@@ -302,12 +399,24 @@ class PositionManagerBase(ABC):
                     'order_id': order_id,
                     'quantity': dealt_qty,
                     'cost': actual_cost,
-                    'avg_price': avg_price
+                    'avg_price': avg_price,
+                    'entry_mode': stock.get('entry_mode', 'bottom_fish'),
+                    'proposal_id': stock.get('proposal_id'),
                 })
 
                 currency = 'HKD' if self.market_type == 'HK' else 'USD'
                 logger.info(f"[{self.market_type}] 买入成功: {order_id}, {stock['code']} x {dealt_qty}股, "
                            f"均价 {currency} {avg_price:.2f}")
+                self._ledger_record(
+                    'position_opened',
+                    stock_code=stock['code'],
+                    order_id=order_id,
+                    quantity=dealt_qty,
+                    cost_price=avg_price,
+                    entry_mode=stock.get('entry_mode', 'bottom_fish'),
+                    proposal_id=stock.get('proposal_id'),
+                    dry_run=False,
+                )
 
             except (ValueError, TypeError, KeyError) as e:
                 logger.error(f"[{self.market_type}] 买入失败 - 数据错误 {stock['code']}: {e}")
@@ -328,7 +437,8 @@ class PositionManagerBase(ABC):
                         'highest_price': buy['avg_price'],
                         'order_id': buy['order_id'],
                         'buy_time': datetime.now().isoformat(),
-                        'entry_mode': buy.get('entry_mode', 'bottom_fish')
+                        'entry_mode': buy.get('entry_mode', 'bottom_fish'),
+                        'proposal_id': buy.get('proposal_id'),
                     }
                     self.strategy_used_capital += buy['cost']
 
@@ -392,6 +502,9 @@ class PositionManagerBase(ABC):
 
         for stock_code, pos in positions_snapshot:
             try:
+                if pos.get('demo'):
+                    # 周末演示持仓不参与自动止盈止损（用演示平仓接口手动收尾）
+                    continue
                 quantity = pos['quantity']
                 cost_price = pos['cost_price']
                 highest_price = pos['highest_price']
@@ -426,11 +539,35 @@ class PositionManagerBase(ABC):
                     stock_code, quantity, cost_price, price, highest_price, entry_mode
                 )
 
+                # 港股评估闭环：每次止盈止损/卖出决策检查都记账（失败不影响交易）
+                if (self.live_manager is not None
+                        and hasattr(self.live_manager, 'record_exit_check')):
+                    try:
+                        self.live_manager.record_exit_check(
+                            stock_code=stock_code,
+                            price=price,
+                            return_pct=return_pct,
+                            should_exit=bool(should_exit),
+                            reason=str(reason or ''),
+                            atr=atr,
+                            take_profit_price=take_profit_price,
+                            stop_loss_price=stop_loss_price,
+                            entry_mode=entry_mode,
+                            quantity=quantity,
+                            cost_price=cost_price,
+                        )
+                    except Exception:
+                        pass
+
                 # 记录持仓状态 - 现价和盈亏带颜色（突出显示经常变动的数据）
                 is_manual = pos.get('manual', False)
                 status = "🔴 触发退出" if should_exit else "🟢 观察中"
                 if is_manual:
                     status = "📝 手动|" + status
+                if should_exit and (self.live_manager is not None
+                                    and hasattr(self.live_manager, 'sell_approval_enabled')
+                                    and self.live_manager.sell_approval_enabled()):
+                    status = "🔴 触发卖出（等待确认）" + (("📝手动|") if is_manual else "")
                 profit_color = ColorConstants.PROFIT_NEGATIVE if return_pct < 0 else ColorConstants.PROFIT_POSITIVE
                 
                 # 构建基础日志信息
@@ -481,7 +618,26 @@ class PositionManagerBase(ABC):
                     })
 
                 if should_exit:
-                    exits_to_execute.append((stock_code, quantity, cost_price, reason))
+                    # 卖出人工确认开启时：先推确认页（LLM+用户），不再直接执行
+                    if (self.live_manager is not None
+                            and hasattr(self.live_manager, 'sell_approval_enabled')
+                            and self.live_manager.sell_approval_enabled()):
+                        try:
+                            self.live_manager.queue_sell_proposal(
+                                stock_code, reason, quantity=quantity,
+                                pnl_pct=return_pct,
+                                position_info={'price': price},
+                            )
+                        except Exception as e:
+                            logger.error(
+                                f"[{self.market_type}] 推送卖出确认失败，"
+                                f"仍按自动退出处理 {stock_code}: {e}"
+                            )
+                            exits_to_execute.append(
+                                (stock_code, quantity, cost_price, reason)
+                            )
+                    else:
+                        exits_to_execute.append((stock_code, quantity, cost_price, reason))
 
             except (KeyError, ValueError, TypeError) as e:
                 logger.error(f"[{self.market_type}] 检查持仓失败 - 数据错误 {stock_code}: {e}")
@@ -527,6 +683,9 @@ class PositionManagerBase(ABC):
         with self._position_lock:
             position_info = self.strategy_positions.get(stock_code, {})
             is_manual = position_info.get('manual', False)
+            entry_mode = position_info.get('entry_mode')
+            proposal_id = position_info.get('proposal_id')
+            buy_time = position_info.get('buy_time')
             
             # 检查持仓是否还存在
             if stock_code not in self.strategy_positions:
@@ -611,6 +770,35 @@ class PositionManagerBase(ABC):
                 logger.error(f"[{self.market_type}] 更新持仓状态失败 {stock_code}: {e}", exc_info=True)
                 return
 
+        # 评估账本：记录平仓结果
+        try:
+            holding_days = 0
+            if buy_time:
+                try:
+                    buy_dt = datetime.fromisoformat(str(buy_time))
+                    holding_days = max(0, (datetime.now() - buy_dt).days)
+                except Exception:
+                    pass
+            pnl_pct = net_profit / actual_cost_amount if actual_cost_amount > 0 else 0.0
+            self._ledger_record(
+                'position_closed',
+                stock_code=stock_code,
+                order_id=order_id,
+                quantity=dealt_qty,
+                cost_price=cost_price,
+                exit_price=avg_price,
+                gross_profit=gross_profit,
+                net_profit=net_profit,
+                pnl_pct=pnl_pct,
+                reason=reason,
+                entry_mode=entry_mode,
+                proposal_id=proposal_id,
+                holding_days=holding_days,
+                dry_run=False,
+            )
+        except Exception as e:
+            logger.debug(f"[{self.market_type}] 账本平仓记录失败: {e}")
+
         # 阶段4: 在锁外保存交易记录和日志（数据库操作）
         try:
             self._save_trade_record(
@@ -661,6 +849,9 @@ class PositionManagerBase(ABC):
             # 处理已卖出的
             for code in to_remove:
                 position = self.strategy_positions.pop(code, {})
+                if position.get('demo'):
+                    logger.info(f"[{self.market_type}] [周末演示] 同步清理演示持仓: {code}")
+                    continue
                 qty = position.get('quantity', 0)
                 cost = position.get('cost_price', 0.0)
                 if isinstance(qty, (int, float)) and isinstance(cost, (int, float)):

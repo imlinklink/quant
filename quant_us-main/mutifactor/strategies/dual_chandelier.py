@@ -322,20 +322,32 @@ class DualChandelierExitStrategy:
                f"★ATR模式≥{self.atr_threshold_pct*100:.0f}%({self.atr_trailing_mult}x)"))
 
     def on_entry(self, stock_code: str, entry_price: float,
-                 current_atr: float, direction: str = 'long') -> PositionExitState:
+                 current_atr: float, direction: str = 'long',
+                 exit_params: Optional[Dict] = None) -> PositionExitState:
+        """
+        建仓并生成出场状态。
+        exit_params: 可选，按单笔持仓覆盖出场参数（如按策略线区分），
+                     传 None 则用策略自身 config 默认。
+        """
         if stock_code in self.positions:
             del self.positions[stock_code]
+
+        params = {
+            'fixed_stop_pct': self.fixed_stop_pct,
+            'breakeven_pct': self.breakeven_pct,
+            'trailing_activate_pct': self.trailing_activate_pct,
+            'trailing_pullback_pct': self.trailing_pullback_pct,
+            'atr_threshold_pct': self.atr_threshold_pct,
+            'atr_trailing_mult': self.atr_trailing_mult,
+            'trailing_enabled': self.trailing_enabled,
+        }
+        if isinstance(exit_params, dict):
+            params.update({k: v for k, v in exit_params.items() if k in params and v is not None})
 
         state = PositionExitState(
             entry_price=entry_price,
             direction=direction,
-            fixed_stop_pct=self.fixed_stop_pct,
-            breakeven_pct=self.breakeven_pct,
-            trailing_activate_pct=self.trailing_activate_pct,
-            trailing_pullback_pct=self.trailing_pullback_pct,
-            atr_threshold_pct=self.atr_threshold_pct,
-            atr_trailing_mult=self.atr_trailing_mult,
-            trailing_enabled=self.trailing_enabled,
+            **params,
         )
         self.positions[stock_code] = state
 

@@ -18,7 +18,10 @@ class IntradayAnalyzer:
     """
     def __init__(self, config: Optional[Dict] = None):
         # 读 dip_buy 段（canonical ATR 自适应评分）
-        dip_cfg = (config or {}).get('dip_buy', {})
+        dip_cfg = (config or {}).get('dip_buy')
+        if not isinstance(dip_cfg, dict):
+            # 兼容直接传入 dip_buy 段本身或旧 buy_timing 段
+            dip_cfg = config or {}
         self.strong_buy_threshold = dip_cfg.get('buy_threshold', dip_cfg.get('strong_buy_threshold', 13))
         self.watch_threshold       = dip_cfg.get('watch_threshold', 2)
 

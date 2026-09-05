@@ -111,3 +111,41 @@ def current_us_watch() -> List[str]:
 def current_hk_watch() -> List[str]:
     cfg = yaml.safe_load(HK_CONFIG.read_text(encoding='utf-8')) or {}
     return list(_yaml_list(cfg, ['hk', 'watch_list']))
+
+
+def validate_futu_symbol(code: str) -> tuple:
+    """
+    加入观察池前校验富途是否识别该代码（有行情）。
+
+    Returns:
+        (ok: bool, message: str)
+    """
+    c = str(code or '').strip().upper()
+    try:
+        import yaml as _yaml
+        from datetime import date, timedelta
+        from futu import OpenQuoteContext, KLType, RET_OK
+
+        if c.startswith('US.'):
+            cfg = _yaml.safe_load(US_CONFIG.read_text(encoding='utf-8')) or {}
+            futu_cfg = cfg.get('futu') or {}
+        elif c.startswith('HK.'):
+            cfg = _yaml.safe_load(HK_CONFIG.read_text(encoding='utf-8')) or {}
+            futu_cfg = (cfg.get('hk') or {}).get('futu') or {}
+        else:
+            return False, '代码需以 US. 或 HK. 开头'
+
+        host = str(futu_cfg.get('host', '127.0.0.1'))
+        port = int(futu_cfg.get('port', 11111))
+        start = (date.today() - timedelta(days=10)).strftime('%Y-%m-%d')
+        end = date.today().strftime('%Y-%m-%d')
+        with OpenQuoteContext(host=host, port=port) as ctx:
+            ret, data, _ = ctx.request_history_kline(
+                code=c, start=start, end=end,
+                ktype=KLType.K_DAY, max_count=5,
+            )
+        if ret == RET_OK and data is not None and len(data) > 0:
+            return True, ''
+        return False, f'富途不识别该代码或无行情: {c}'
+    except Exception as e:
+        return False, f'校验失败（OpenD 未运行?）: {e}'

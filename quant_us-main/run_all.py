@@ -1,6 +1,6 @@
 """
 美股交易系统统一入口
-同时启动：Web服务(8899) + 抄底监控 + 止盈止损
+同时启动：Web服务(8899) + 抄底监控 + 唐奇安突破监控(可选) + 止盈止损
 
 用法：
     python run_all.py --dry-run     # 模拟模式
@@ -8,8 +8,11 @@
     python run_all.py --web-only    # 仅Web（调参用）
 
 人工确认模式（config.yaml -> trading.live_trading.human_approval.enabled: true）：
-    买入信号只推送到 http://127.0.0.1:8899/approvals，
+    抄底/突破信号只推送到 http://127.0.0.1:8899/approvals，
     页面显示规则理由 + 大模型判定，点「下单」才真正执行。
+
+第二条策略线（config.yaml -> trend_breakout.enabled: true）：
+    唐奇安（海龟）日线突破，与抄底互补；同样只走确认页，人工点单才执行。
 """
 import sys
 import os
@@ -137,11 +140,33 @@ class UnifiedSystem:
             self.dip_monitor.start()
             logger.info(f"✅ 抄底监控器已启动 ({', '.join(watch_list) or '无'})")
 
+            # 唐奇安突破（第二条买入策略线，可选）
+            tb_cfg = self.config.get("trend_breakout", {})
+            if tb_cfg.get("enabled", False):
+                from scripts.live_trading.trend_breakout_monitor import TrendBreakoutMonitor
+                tb_codes = list(tb_cfg.get("watch_list") or watch_list)
+                self.trend_monitor = TrendBreakoutMonitor(
+                    tb_codes,
+                    self.config,
+                    dry_run=self.dry_run,
+                    approval_store=self.approval_store,
+                )
+                self.trend_monitor.start()
+                logger.info(
+                    f"✅ 唐奇安突破监控器已启动 "
+                    f"(N={tb_cfg.get('entry_n', 55)}, "
+                    f"放量{tb_cfg.get('volume_ratio', 0) or '关'}×, "
+                    f"{', '.join(tb_codes) or '无'})"
+                )
+
             # 把 LLM 实际可用状态同步到 Web（便于页面显示徽标）
             try:
                 from web import app as webapp
                 webapp.approval_llm_enabled = bool(getattr(self.dip_monitor, 'llm_enabled', False))
                 webapp.dip_monitor_ref = self.dip_monitor
+                webapp.exit_manager_ref = self.exit_mgr
+                if hasattr(self, "trend_monitor"):
+                    webapp.trend_monitor_ref = self.trend_monitor
             except Exception:
                 pass
 
@@ -170,6 +195,8 @@ class UnifiedSystem:
         if not self.web_only:
             if hasattr(self, "dip_monitor"):
                 self.dip_monitor.stop()
+            if hasattr(self, "trend_monitor"):
+                self.trend_monitor.stop()
             if hasattr(self, "exit_mgr"):
                 self.exit_mgr.stop()
         logger.info("✅ 系统已停止")

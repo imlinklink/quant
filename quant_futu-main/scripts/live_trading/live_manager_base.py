@@ -45,7 +45,9 @@ class LiveTradingManager(ABC):
         self.connection_state = ConnectionState.DISCONNECTED
 
         # 初始化各模块
-        self.state_persistence = StatePersistence()
+        # 状态持久化必须用配置的交易环境，避免 SIMULATE 误写 REAL 命名空间
+        _env_str = str((config.get('trading') or {}).get('env', 'SIMULATE'))
+        self.state_persistence = StatePersistence(env=_env_str)
 
         futu_config = config.get('trading', {}).get('futu', {})
         self.price_fetcher = PriceFetcher(
@@ -113,6 +115,9 @@ class LiveTradingManager(ABC):
         self.approval_cfg = {}
         self._approval_rejected_codes: Set[str] = set()
         self._approval_processed_reject_ids: Set[str] = set()
+        self.sell_approval_thread = None
+        self._sell_processed_reject_ids: Set[str] = set()
+        self._sell_reject_until: Dict[str, float] = {}
         self._positions_snapshot: Dict[str, Dict] = {}
         self._init_human_approval()
 
@@ -712,6 +717,22 @@ class LiveTradingManager(ABC):
         self._last_buy_veto_result = None
         cached_stocks = self.cached_selected_stocks.copy() if self.cached_selected_stocks else []
 
+        # 盘前市场状态闸门：LLM 说 avoid 时今天不执行新买入
+        try:
+            from scripts.live_trading import market_brief as mb
+            brief = mb.load_brief()
+            if not mb.buy_allowed(brief):
+                key = brief.get('date') or datetime.now().strftime('%Y-%m-%d')
+                if getattr(self, '_brief_avoid_date', None) != key:
+                    self._brief_avoid_date = key
+                    logger.warning(
+                        f"[市场状态] 今日档位={brief.get('risk_level')} "
+                        f"buy_frequency=avoid，暂停买入: {brief.get('risk_note', '')}"
+                    )
+                return
+        except Exception:
+            pass
+
         should_buy, reason, entry_mode = self.buy_timing.should_buy_now(
             cached_stocks,
             self.price_fetcher
@@ -806,6 +827,25 @@ class LiveTradingManager(ABC):
         # 计算买入数量和资金
         strategy_remaining = self.position_manager.get_remaining_capital()
         max_ratio = float(self.config.get('risk', {}).get('max_single_position_ratio', 0.5))
+        # 盘前市场状态简报：若给出当日建议单票仓位比例，则夹在硬边界内生效
+        try:
+            from scripts.live_trading import market_brief as mb
+            brief = mb.load_brief()
+            today = datetime.now().strftime('%Y-%m-%d')
+            if brief.get('date') == today and brief.get('suggested_position_ratio'):
+                suggested = float(brief['suggested_position_ratio'])
+                effective = max(0.05, min(max_ratio, suggested))
+                if abs(effective - max_ratio) > 1e-9:
+                    key = (brief.get('date'), 'ratio')
+                    if getattr(self, '_brief_ratio_logged', None) != key:
+                        self._brief_ratio_logged = key
+                        logger.warning(
+                            f"[市场状态] 采用 LLM 建议单票仓位 {effective:.2f}"
+                            f"（配置上限 {max_ratio:.2f}）"
+                        )
+                    max_ratio = effective
+        except Exception:
+            pass
         if not stocks_to_buy:
             logger.warning("[买入计算] stocks_to_buy为空，跳过买入")
             return
@@ -923,7 +963,20 @@ class LiveTradingManager(ABC):
         self.position_check_thread.start()
         logger.info(f"{self.market_type}持仓检查线程已启动")
 
-        logger.info(f"{self.market_type}交易已启动（买入+持仓检查双线程）")
+        # 启动卖出确认轮询（所有卖出含止损 → LLM+人工，超时自动执行兜底）
+        if self.sell_approval_enabled():
+            self.sell_approval_thread = threading.Thread(
+                target=self.run_sell_approval_loop,
+                name=f"{self.market_type}-Sell-Approval-Thread",
+            )
+            self.sell_approval_thread.daemon = True
+            self.sell_approval_thread.start()
+            logger.info(
+                f"{self.market_type}卖出确认线程已启动（LLM+人工，"
+                f"{int(float(self._sell_cfg().get('ttl_seconds', 300)))}s 超时自动卖出）"
+            )
+
+        logger.info(f"{self.market_type}交易已启动（买入+持仓检查+卖出确认）")
         self.state = TradingState.RUNNING
 
         return True
@@ -956,10 +1009,23 @@ class LiveTradingManager(ABC):
             else:
                 logger.info(f"{self.market_type}持仓检查线程已正常退出")
 
+        # 等待卖出确认轮询线程结束
+        if self.sell_approval_thread and self.sell_approval_thread.is_alive():
+            logger.info(f"等待{self.market_type}卖出确认线程结束（最多30秒）...")
+            self.sell_approval_thread.join(timeout=30)
+            if self.sell_approval_thread.is_alive():
+                logger.warning(f"{self.market_type}卖出确认线程超时未结束")
+
         # 检查并保存最终状态
         try:
-            if self.position_manager and self.position_manager.strategy_positions:
-                position_count = len(self.position_manager.strategy_positions)
+            position_count = 0
+            if self.position_manager:
+                real_positions = {
+                    c: p for c, p in self.position_manager.strategy_positions.items()
+                    if not p.get('demo')
+                }
+                position_count = len(real_positions)
+            if position_count > 0:
                 logger.warning(f"⚠️  退出时仍有 {position_count} 只持仓未平")
                 self.position_manager.save_positions()
         except Exception as e:
@@ -1358,6 +1424,11 @@ class LiveTradingManager(ABC):
             self.approval_server.start()
             # 持仓监控页数据源：由持仓检查循环持续更新的快照
             self.approval_server.positions_provider = self._positions_api_payload
+            # 周末演示模式钩子（仅 SIMULATE；真实提案会被内部守卫拒绝）
+            self.approval_server.on_approved = self._dev_execute_approved
+            self.approval_server.on_demo_proposal = self._dev_simulate_proposal
+            self.approval_server.on_demo_exit = self._dev_demo_exit
+            self.approval_server.on_demo_sell = self._dev_simulate_sell
             logger.warning(
                 f"[人工确认] 已启用：买入前必须在页面点「下单」才会执行。"
                 f"打开 http://{host}:{self.approval_server.bound_port} "
@@ -1454,7 +1525,34 @@ class LiveTradingManager(ABC):
                 continue
 
             kline = (kline_details_by_code or {}).get(code)
+            # 信息层：富途资讯/公告上下文（失败降级为空，不阻塞）
+            context_text = ''
+            try:
+                from scripts.live_trading import signal_context
+                parts = []
+                news_text = signal_context.get_futu_news_text(code)
+                if news_text:
+                    parts.append(news_text)
+                cap_text = signal_context.get_capital_flow_text(code)
+                if cap_text:
+                    parts.append(cap_text)
+                opt_text = signal_context.get_option_oi_text(code)
+                if opt_text:
+                    parts.append(opt_text)
+                context_text = '\n'.join(parts)
+            except Exception as e:
+                logger.debug(f"[人工确认] 富途消息面拉取失败 {code}: {e}")
+            # 轻量版影子字段：结构化资金流/期权标签（只展示，不改分不拦截）
+            shadow_suffix = ''
+            if self._shadow_labels_enabled():
+                shadow_suffix = self._build_shadow_suffix(code)
+            proposal_reason = self._build_proposal_reason(
+                code, item, trigger_reason, entry_mode, kline
+            )
+            if shadow_suffix:
+                proposal_reason += f"；{shadow_suffix}"
             self.approval_store.create(
+                side='buy',
                 stock_code=code,
                 stock_name=self._get_stock_name(code) or code,
                 market_type=self.market_type,
@@ -1467,9 +1565,8 @@ class LiveTradingManager(ABC):
                 trigger_reason=str(trigger_reason),
                 kline_score=(kline or {}).get('score'),
                 kline_signal=(kline or {}).get('signal'),
-                reason=self._build_proposal_reason(
-                    code, item, trigger_reason, entry_mode, kline
-                ),
+                reason=proposal_reason,
+                context=context_text,
                 llm=llm_info,
             )
             queued += 1
@@ -1483,6 +1580,86 @@ class LiveTradingManager(ABC):
                 f"[人工确认] {queued} 笔买入信号等待人工确认，"
                 f"请打开页面点击「下单」（http://127.0.0.1:{url_port}）"
             )
+
+    def _shadow_labels_enabled(self) -> bool:
+        """轻量版影子字段开关：仅港股生效，配置 trading.live_trading.shadow_signals。"""
+        try:
+            cfg = (self.config.get('trading', {})
+                   .get('live_trading', {})
+                   .get('shadow_signals', {}))
+            return self.market_type == 'HK' and bool(cfg.get('enabled', True))
+        except Exception:
+            return False
+
+    def _build_shadow_suffix(self, code: str) -> str:
+        """
+        拉一次资金流/期权摘要，生成两行结构化标签追加到提案理由。
+        数据缺失/失败返回空串（不阻塞提案）；不参与评分与拦截。
+        """
+        try:
+            from scripts.live_trading import signal_context as sc
+        except Exception:
+            return ''
+        parts = []
+
+        # ---- 资金流：主力=超大单+大单 ----
+        try:
+            cap = sc.fetch_capital_flow_summary(code) or {}
+            super_f = float(cap['super']) if cap.get('super') is not None else None
+            big_f = float(cap['big']) if cap.get('big') is not None else None
+            total_f = float(cap['in_flow']) if cap.get('in_flow') is not None else None
+            main = None
+            if super_f is not None or big_f is not None:
+                main = (super_f or 0.0) + (big_f or 0.0)
+            if main is not None:
+                share = None
+                if total_f not in (None, 0):
+                    share = main / abs(total_f)
+                if main > 0:
+                    label = '主力净流入' if share is None or share < 0.3 else '主力强净流入'
+                elif main < 0:
+                    label = '主力净流出' if share is None or share > -0.3 else '主力强净流出'
+                else:
+                    label = '主力中性'
+                parts.append(f"资金流: {label}（净{main:+,.0f}）")
+        except Exception:
+            pass
+
+        # ---- 期权：近月ATM抽样 IV / put-call OI ----
+        try:
+            opt = sc.fetch_option_summary(code) or {}
+            legs = opt.get('legs') or []
+            ivs = []
+            call_oi = 0.0
+            put_oi = 0.0
+            for leg in legs:
+                iv = leg.get('iv')
+                if isinstance(iv, (int, float)) and iv > 0:
+                    ivs.append(float(iv))
+                oi = leg.get('open_interest')
+                oi_f = float(oi) if isinstance(oi, (int, float)) else 0.0
+                if leg.get('kind') == 'CALL':
+                    call_oi += oi_f
+                elif leg.get('kind') == 'PUT':
+                    put_oi += oi_f
+            avg_iv = float(sum(ivs) / len(ivs)) if ivs else None
+            put_call = (put_oi / call_oi) if call_oi and call_oi > 0 else None
+            if avg_iv is not None:
+                if avg_iv >= 0.80:
+                    label = 'IV极端'
+                elif avg_iv >= 0.50:
+                    label = 'IV偏高'
+                else:
+                    label = 'IV正常'
+                if put_call is not None and put_call >= 1.5:
+                    label += '+PUT压力'
+                iv_txt = f"，IV≈{avg_iv * 100:.0f}%" if avg_iv is not None else ''
+                pc_txt = f"，P/C OI={put_call:.2f}" if put_call is not None else ''
+                parts.append(f"期权: {label}{iv_txt}{pc_txt}")
+        except Exception:
+            pass
+
+        return '；'.join(parts)
 
     def _build_proposal_reason(
         self,
@@ -1505,6 +1682,340 @@ class LiveTradingManager(ABC):
         parts.append(f"信号价 {item['price']}，约 {item['quantity']} 股")
         return "；".join(parts)
 
+    # ==================== 周末演示模式（生成提案→点单→登记→模拟平仓） ====================
+
+    def _demo_env_ok(self) -> bool:
+        """演示钩子只允许港股 SIMULATE；REAL 环境一律拒绝，防止绕过真实下单。"""
+        try:
+            return (
+                self.market_type == 'HK'
+                and self.approval_env == 'SIMULATE'
+                and self.approval_store is not None
+                and self.position_manager is not None
+            )
+        except Exception:
+            return False
+
+    def _dev_simulate_proposal(self, code: str) -> Dict:
+        """周末演示：用当前价生成一条带【周末演示】标记的提案（含资金流影子字段）。"""
+        if not self._demo_env_ok():
+            raise RuntimeError('演示模式仅港股 SIMULATE 可用')
+        code = str(code or '').strip().upper()
+        if not code.startswith('HK.'):
+            raise ValueError('code 需为 HK.xxxxx')
+        price = self.price_fetcher.get_current_price(code, force_refresh=True)
+        if not price or price <= 0:
+            raise RuntimeError(f'无法获取 {code} 当前价')
+        quantity = 100
+        # 与真实信号一致：先过 LLM buy_veto（影子模式），让卡片显示真实判定
+        try:
+            self._llm_buy_veto([{'code': code, 'price': float(price), 'quantity': quantity}])
+        except Exception as e:
+            logger.warning(f"[周末演示] LLM 判定调用异常，卡片将显示无判定: {e}")
+        self._queue_buy_proposals(
+            [{'code': code, 'quantity': quantity, 'price': float(price)}],
+            trigger_reason='【周末演示】模拟信号',
+            entry_mode='momentum',
+            per_stock_capital=float(price) * quantity,
+            kline_details_by_code={
+                code: {
+                    'score': 8,
+                    'signal': 'buy',
+                    'details': '演示：K线评分达标（非真实信号，仅供轨迹演示）',
+                }
+            },
+        )
+        for item in self.approval_store.get_all():
+            if (item.get('stock_code') == code
+                    and item.get('status') == 'pending'
+                    and '周末演示' in str(item.get('trigger_reason', ''))):
+                return item
+        raise RuntimeError('演示提案生成失败')
+
+    def _dev_execute_approved(self, pid: str):
+        """周末演示：点「下单」后直接登记演示持仓（不连券商、不写恢复状态）。
+        只处理带【周末演示】标记的提案；真实提案保持 approved 由买入线程正常执行。
+        """
+        if not self._demo_env_ok():
+            return
+        item = self.approval_store.get(pid) if self.approval_store else None
+        if not item or item.get('status') != 'approved':
+            return
+        if '周末演示' not in str(item.get('trigger_reason', '')):
+            return  # 真实提案：保持 approved，交给正常买入线程
+        if not self.approval_store.mark(pid, 'executing',
+                                        note='周末演示：用户已确认，登记演示持仓'):
+            return
+        code = item.get('stock_code')
+        qty = int(item.get('quantity') or 0)
+        price = float(item.get('price') or 0)
+        if qty <= 0 or price <= 0:
+            self.approval_store.mark(pid, 'failed', note='演示数据异常')
+            return
+        if code in self.position_manager.strategy_positions:
+            self.approval_store.mark(pid, 'skipped', note='已有持仓（含演示），跳过')
+            return
+        ok = self.position_manager.demo_open_position(
+            code, qty, price, item.get('entry_mode') or 'momentum'
+        )
+        if ok:
+            self.approval_store.mark(
+                pid, 'executed',
+                note=f'周末演示模拟成交 @ {price:.3f}（未连接券商）',
+            )
+        else:
+            self.approval_store.mark(pid, 'failed', note='演示持仓登记失败')
+
+    def _dev_demo_exit(self, code: str, exit_price: float) -> bool:
+        """周末演示：按指定价格模拟平掉一笔演示持仓。"""
+        if not self._demo_env_ok():
+            return False
+        pos = self.position_manager.strategy_positions.get(code)
+        if not pos or not pos.get('demo'):
+            return False
+        price = exit_price if exit_price and exit_price > 0 \
+            else self.price_fetcher.get_current_price(code, force_refresh=True)
+        if not price or price <= 0:
+            return False
+        return self.position_manager.demo_close_position(code, float(price))
+
+    def _dev_simulate_sell(self, code: str, reason: str = '模拟止盈触发（演示）',
+                           pnl_pct: float = None) -> Dict:
+        """周末演示：对演示持仓生成卖出确认提案（LLM+人工+超时兜底）。"""
+        if not self._demo_env_ok():
+            raise RuntimeError('演示模式仅港股 SIMULATE 可用')
+        pos = self.position_manager.strategy_positions.get(code)
+        if not pos or not pos.get('demo'):
+            raise ValueError('仅演示持仓可触发演示卖出')
+        ok = self.queue_sell_proposal(
+            code, f'模拟演示（非真实盈亏）: {str(reason or "模拟止盈触发")}',
+            quantity=int(pos.get('quantity', 0)),
+            pnl_pct=pnl_pct,
+        )
+        if not ok:
+            raise RuntimeError('卖出提案生成失败（可能已有待确认卖出或处于拒绝冷却期）')
+        for item in self.approval_store.get_all():
+            if (item.get('side') == 'sell' and item.get('stock_code') == code
+                    and item.get('status') == 'pending'):
+                return item
+        raise RuntimeError('卖出提案未找到')
+
+    # ==================== 卖出人工确认（所有卖出含止损 → LLM + 用户，超时兜底） ====================
+
+    def record_exit_check(self, **fields):
+        """港股评估闭环：持仓检查每次决策写入 hk_checks.jsonl（失败不影响交易）。"""
+        try:
+            eval_cfg = (self.config.get('trading', {})
+                        .get('live_trading', {})
+                        .get('evaluation', {}))
+            if not eval_cfg.get('log_checks', True):
+                return
+            from scripts.live_trading.decision_ledger import scan_ledger
+            scan_ledger.record_check(
+                kind='exit_check',
+                market_type=self.market_type,
+                env=str((self.config.get('trading') or {}).get('env', 'SIMULATE')),
+                **fields,
+            )
+        except Exception:
+            pass
+
+    def _sell_cfg(self) -> Dict:
+        try:
+            return (self.config.get('trading', {})
+                    .get('live_trading', {})
+                    .get('sell_approval', {})) or {}
+        except Exception:
+            return {}
+
+    def sell_approval_enabled(self) -> bool:
+        try:
+            return (
+                bool(self._sell_cfg().get('enabled', True))
+                and self.approval_store is not None
+                and self.position_manager is not None
+            )
+        except Exception:
+            return False
+
+    def _sell_active_for(self, code: str) -> bool:
+        if self.approval_store is None:
+            return False
+        return any(
+            it.get('side') == 'sell'
+            and it.get('stock_code') == code
+            and it.get('status') in ('pending', 'approved', 'executing')
+            for it in self.approval_store.get_all()
+        )
+
+    def queue_sell_proposal(self, code: str, reason: str, quantity: int = None,
+                            pnl_pct: float = None,
+                            position_info: Dict = None) -> bool:
+        """卖出候选 → 生成卖出确认提案（含 LLM 建议），不再直接下单。"""
+        if not self.sell_approval_enabled():
+            return False
+        now = time.time()
+        reject_min = float(self._sell_cfg().get('reject_cooldown_minutes', 30))
+        if code in self._sell_reject_until and now < self._sell_reject_until[code]:
+            return False
+        if self._sell_active_for(code):
+            return False
+        pos = self.position_manager.strategy_positions.get(code)
+        if not pos or int(pos.get('quantity', 0)) <= 0:
+            return False
+        qty = int(quantity or pos.get('quantity', 0))
+        if qty <= 0:
+            return False
+        cost = float(pos.get('cost_price', 0))
+        price = self.price_fetcher.get_current_price(code, force_refresh=True)
+        if not price or price <= 0:
+            price = float((position_info or {}).get('price') or 0)
+        if price <= 0:
+            return False
+        pnl = pnl_pct if pnl_pct is not None else ((price - cost) / cost if cost > 0 else 0.0)
+        ttl = float(self._sell_cfg().get('ttl_seconds', 300))
+
+        # LLM 卖出建议（失败/未启用 → 无判定，仍走人工兜底）
+        llm_info = None
+        if self._sell_cfg().get('llm_enabled', True) and self.llm_advisor is not None \
+                and bool(getattr(self.llm_advisor, 'enabled', False)):
+            try:
+                result = self.llm_advisor.judge_sell(
+                    position_text=(
+                        f'{code} {qty}股，成本 {cost:.3f}，现价约 {price:.3f}，'
+                        f'浮盈 {pnl * 100:+.1f}%'
+                    ),
+                    sell_reason=reason,
+                )
+                if result:
+                    llm_info = {
+                        'model': getattr(self.llm_advisor, 'model', ''),
+                        'mode': 'shadow',
+                        'verdict': result.get('verdict', 'allow'),
+                        'risk_level': result.get('risk_level', 'MEDIUM'),
+                        'confidence': result.get('confidence'),
+                        'reason': result.get('reason', ''),
+                    }
+            except Exception as e:
+                logger.warning(f"[卖出确认] LLM 建议失败，按人工决定: {e}")
+
+        self.approval_store.create(
+            side='sell',
+            stock_code=code,
+            stock_name=self._get_stock_name(code) or code,
+            market_type=self.market_type,
+            env=self.approval_env,
+            price=round(price, 3),
+            quantity=qty,
+            estimated_cost=round(price * qty, 2),
+            entry_mode=str(pos.get('entry_mode') or 'manual'),
+            trigger_reason=f'卖出|{reason}',
+            reason=(
+                f'【卖出确认】规则触发: {reason}；成本 {cost:.3f}，现价约 {price:.3f}，'
+                f'浮盈 {pnl * 100:+.1f}%；超时 {int(ttl)} 秒未确认将自动执行。'
+            ),
+            llm=llm_info,
+            position_cost=cost,
+            pnl_pct=round(pnl, 5),
+            expires_at=now + ttl,
+        )
+        logger.warning(
+            f"[卖出确认] {code} 推送卖出提案: {reason}（LLM={llm_info is not None}，"
+            f"{int(ttl)}s 超时自动执行）—— 请到确认页点「卖出」或「继续持有」"
+        )
+        return True
+
+    def _sell_market_open(self) -> bool:
+        """是否能在当前时刻下真实卖单（周末/休市/非交易时段不开真单）。"""
+        if not self._is_trading_day():
+            return False
+        start, end = self._get_trading_time_window()
+        now = datetime.now().time()
+        return start <= now < end
+
+    def _execute_sell_proposal(self, pid: str, auto: bool = False):
+        """执行卖出提案（用户点「卖出」或超时自动兜底）。"""
+        if self.approval_store is None:
+            return
+        item = self.approval_store.get(pid)
+        if not item or item.get('side') != 'sell':
+            return
+        if item.get('status') not in ('pending', 'approved'):
+            return
+        code = item.get('stock_code')
+        pos = self.position_manager.strategy_positions.get(code)
+        if not pos or int(pos.get('quantity', 0)) <= 0:
+            self.approval_store.mark(pid, 'skipped', note='持仓已不存在，跳过')
+            return
+        # 演示持仓可随时平（不连券商）；真实持仓只在交易时段下卖单
+        if not pos.get('demo') and not self._sell_market_open():
+            return  # 保持 pending/approved，轮询等到可交易时段再执行
+        note = ('用户确认卖出' if not auto else
+                f'超时未确认，自动卖出兜底（{int(item.get("expires_at", 0))}）')
+        if item.get('status') == 'pending':
+            # 状态机：pending → approved → executing；超时兜底先自动“批准”
+            if not self.approval_store.mark(pid, 'approved',
+                                            note='超时未确认，自动批准后执行卖出'):
+                return
+        if not self.approval_store.mark(pid, 'executing', note=note):
+            return
+        qty = min(int(item.get('quantity') or 0), int(pos.get('quantity', 0)))
+        cost = float(pos.get('cost_price') or 0)
+        reason = str(item.get('trigger_reason') or 'sell_approval')
+        try:
+            if pos.get('demo'):
+                price = self.price_fetcher.get_current_price(code, force_refresh=True) \
+                    or float(item.get('price') or 0)
+                ok = self.position_manager.demo_close_position(code, price)
+            else:
+                self.position_manager._execute_exit(code, qty, cost, reason)
+                ok = code not in self.position_manager.strategy_positions
+            self.approval_store.mark(
+                pid, 'executed' if ok else 'failed',
+                note=note + ('（执行成功）' if ok else '（执行失败，持仓仍存在）'),
+            )
+        except Exception as e:
+            logger.error(f"[卖出确认] 执行异常 {code}: {e}", exc_info=True)
+            try:
+                self.approval_store.mark(pid, 'failed', note=f'异常: {e}')
+            except Exception:
+                pass
+
+    def _process_sell_approvals(self):
+        """卖出确认轮询：处理拒绝冷却 / 点单执行 / 超时自动兜底。"""
+        if self.approval_store is None:
+            return
+        now = time.time()
+        for item in self.approval_store.rejected_items():
+            if item.get('side') != 'sell':
+                continue
+            if item.get('id') in self._sell_processed_reject_ids:
+                continue
+            self._sell_processed_reject_ids.add(item.get('id', ''))
+            code = item.get('stock_code')
+            reject_min = float(self._sell_cfg().get('reject_cooldown_minutes', 30))
+            self._sell_reject_until[code] = now + reject_min * 60
+            logger.info(f"[卖出确认] {code} 你选择继续持有，{reject_min:.0f}分钟内不再弹卖出")
+        for item in self.approval_store.approved_items():
+            if item.get('side') == 'sell':
+                self._execute_sell_proposal(item['id'], auto=False)
+        for item in self.approval_store.get_all():
+            if (item.get('side') == 'sell'
+                    and item.get('status') == 'pending'
+                    and now > float(item.get('expires_at') or 0)):
+                self._execute_sell_proposal(item['id'], auto=True)
+
+    def run_sell_approval_loop(self):
+        interval = float(self._sell_cfg().get('poll_interval_sec', 10))
+        logger.info(f"[卖出确认] 轮询线程启动（每 {interval:.0f}s）")
+        while not self.stop_event.is_set():
+            try:
+                self._process_sell_approvals()
+            except Exception as e:
+                logger.error(f"[卖出确认] 轮询异常: {e}", exc_info=True)
+            time.sleep(interval)
+        logger.info("[卖出确认] 轮询线程已停止")
+
     def _process_approval_actions(self):
         """
         处理确认页上的点击结果（由买入线程每轮调用）：
@@ -1515,6 +2026,8 @@ class LiveTradingManager(ABC):
             return
 
         for item in self.approval_store.rejected_items():
+            if item.get('side', 'buy') != 'buy':
+                continue
             if item.get('id') in self._approval_processed_reject_ids:
                 continue
             self._approval_processed_reject_ids.add(item.get('id', ''))
@@ -1523,6 +2036,7 @@ class LiveTradingManager(ABC):
             for other in self.approval_store.get_all():
                 if (
                     other.get('stock_code') == item.get('stock_code')
+                    and other.get('side', 'buy') == 'buy'
                     and other['status'] in ('pending', 'approved')
                 ):
                     self.approval_store.mark(
@@ -1530,6 +2044,8 @@ class LiveTradingManager(ABC):
                     )
 
         for item in self.approval_store.approved_items():
+            if item.get('side', 'buy') != 'buy':
+                continue
             self._execute_approved_proposal(item)
 
     def _execute_approved_proposal(self, item: Dict):
@@ -1542,6 +2058,8 @@ class LiveTradingManager(ABC):
         pid = item.get('id')
         code = item.get('stock_code')
         if not pid or not code:
+            return
+        if item.get('side', 'buy') != 'buy':
             return
         try:
             if not self.approval_store.mark(pid, 'executing', note='用户已确认，开始下单'):
@@ -1591,6 +2109,7 @@ class LiveTradingManager(ABC):
                 'quantity': quantity,
                 'price': price,
                 'entry_mode': item.get('entry_mode') or 'bottom_fish',
+                'proposal_id': pid,
             }])
             after = set(self.position_manager.strategy_positions.keys())
             if code in after and code not in before:

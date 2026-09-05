@@ -18,7 +18,7 @@ import argparse
 import threading
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 import yaml
 import pandas as pd
 
@@ -26,6 +26,32 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fil
 sys.path.insert(0, BASE_DIR)
 
 logger = logging.getLogger(__name__)
+
+
+def _us_ledger(event_type: str, **fields):
+    """写入美股评估账本（写失败不影响交易）。"""
+    try:
+        from scripts.live_trading.decision_ledger import ledger
+        ledger.record(event_type, market_type='US', **fields)
+    except Exception:
+        pass
+
+
+def _parse_earnings_date(date_str) -> Optional[datetime]:
+    """解析 Yahoo earningsDate 的 fmt 字符串，失败返回 None。"""
+    if not date_str:
+        return None
+    text = str(date_str).strip()
+    for fmt in ('%Y-%m-%d', '%Y-%m-%d %H:%M', '%Y-%m-%dT%H:%M:%S',
+                '%b %d, %Y', '%B %d, %Y', '%m/%d/%Y', '%m/%d/%y'):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
 
 
 class DipBuyMonitor:
@@ -62,10 +88,56 @@ class DipBuyMonitor:
         # 冷却期（避免同一只股票频繁买入）
         self.cooldown_minutes = dip_cfg.get('cooldown_minutes', 30)
         self.last_buy_time: Dict[str, datetime] = {}
+
+        # ===== P0 抄底加强：规则层保护（均可由 config.yaml 关闭） =====
+        self.one_position_per_code = bool(dip_cfg.get('one_position_per_code', True))
+
+        sess = dip_cfg.get('session_filter', {})
+        self.session_filter_enabled = bool(sess.get('enabled', True))
+        self.session_allow = {
+            'pre_market': bool(sess.get('allow_pre_market', False)),
+            'regular': bool(sess.get('allow_regular', True)),
+            'after_hours': bool(sess.get('allow_after_hours', True)),
+            'overnight': bool(sess.get('allow_overnight', False)),
+        }
+
+        tg = dip_cfg.get('daily_trend_gate', {})
+        self.daily_trend_gate_enabled = bool(tg.get('enabled', True))
+        self.daily_ma = int(tg.get('daily_ma', 20))
+        self.trend_block_below_ma = bool(tg.get('block_below_ma', True))
+        self.trend_require_ma_slope_up = bool(tg.get('require_ma_slope_up', False))
+
+        eg = dip_cfg.get('earnings_gate', {})
+        self.earnings_gate_enabled = bool(eg.get('enabled', True))
+        self.earnings_skip_days = int(eg.get('skip_days_before', 2))
+
+        # ===== P1 抄底加强：信号质量闸（均可由 config.yaml 关闭） =====
+        rg = dip_cfg.get('reversal_gate', {})
+        self.reversal_gate_enabled = bool(rg.get('enabled', True))
+        rrg = dip_cfg.get('rr_gate', {})
+        self.rr_gate_enabled = bool(rrg.get('enabled', True))
+        self.rr_min = float(rrg.get('min_rr', 1.5))
+        htf = dip_cfg.get('higher_tf_filter', {})
+        self.higher_tf_enabled = bool(htf.get('enabled', True))
+        self.higher_tf_cache_seconds = int(htf.get('cache_seconds', 300))
+
+        sh = dip_cfg.get('shadow_signals', {})
+        self.shadow_signals_enabled = bool(sh.get('enabled', True))
+
+        # ===== P2 评估闭环：扫描流水（组件分/闸门/outcome） =====
+        ev = dip_cfg.get('evaluation', {})
+        self.eval_log_min_score = int(ev.get('log_min_score', 4))
         
         # 状态
         self._running = False
         self._stop_event = threading.Event()
+        self._positions_cache: Optional[Set[str]] = None
+        self._positions_cache_ts: float = 0.0
+        self._sim_held_codes: Set[str] = set()
+        self._trend_gate_cache: Dict[str, Dict] = {}
+        self._env_cache: Dict[str, Dict] = {}
+        self._session_block_label: Optional[str] = None
+        self._session_block_date: Optional[str] = None
 
         # ===== 人工确认（Human-in-the-loop）=====
         # 启用后：抄底信号只推送到确认页，用户点「下单」才真正执行
@@ -123,7 +195,8 @@ class DipBuyMonitor:
             self.llm_advisor = None
             self.llm_enabled = False
 
-    def _ask_llm_verdict(self, code: str, price: float) -> Optional[Dict]:
+    def _ask_llm_verdict(self, code: str, price: float,
+                         context_text: str = '') -> Optional[Dict]:
         """获取大模型对本笔买入的市场风险判定（失败返回 None，不阻塞）"""
         if self.llm_advisor is None or not self.llm_enabled:
             return None
@@ -143,7 +216,10 @@ class DipBuyMonitor:
                 buy_list=[code],
                 holdings=[],
                 cash=float(self.position_size_usd),
-                market_context=f'US 个股 {code}，当前时段 {session}，信号价 ${price:.2f}',
+                market_context=(
+                    f'US 个股 {code}，当前时段 {session}，信号价 ${price:.2f}\n'
+                    f'{context_text}'
+                ),
             )
             if not result:
                 return {
@@ -169,7 +245,36 @@ class DipBuyMonitor:
                 'mode': self.llm_mode_label,
             }
 
-    def _queue_approval(self, code: str, price: float, result: Dict) -> bool:
+    def _effective_position_size_usd(self) -> float:
+        """
+        应用盘前市场状态简报的建议单票仓位比例。
+
+        美股没有组合资金模型，这里按"配置 5000 对应基准比例 0.2"缩放，
+        缩放范围限制在 0.5x ~ 1.0x，即防御时减半、绝不超过配置基准。
+        """
+        try:
+            from scripts.live_trading import market_brief as mb
+            brief = mb.load_brief()
+            ratio = brief.get('suggested_position_ratio')
+            if not ratio:
+                return float(self.position_size_usd)
+            ratio = float(ratio)
+            scale = max(0.5, min(1.0, ratio / 0.2))
+            if abs(scale - 1.0) > 1e-9:
+                key = (brief.get('date'), 'us_size')
+                if getattr(self, '_brief_size_logged', None) != key:
+                    self._brief_size_logged = key
+                    logger.warning(
+                        f"[市场状态] 建议仓位比例 {ratio:.2f} -> "
+                        f"单票规模 {self.position_size_usd:.0f} x {scale:.2f} = "
+                        f"{self.position_size_usd * scale:.0f} USD"
+                    )
+            return float(self.position_size_usd) * scale
+        except Exception:
+            return float(self.position_size_usd)
+
+    def _queue_approval(self, code: str, price: float, result: Dict,
+                        signal_ctx: Optional[Dict] = None) -> bool:
         """把抄底信号推送到确认页（不自动下单）"""
         if self.approval_store is None:
             return False
@@ -188,7 +293,8 @@ class DipBuyMonitor:
             return False
 
         score = int(result.get('score', 0))
-        qty = int(self.position_size_usd / price) if price > 0 else 0
+        size_usd = self._effective_position_size_usd()
+        qty = int(size_usd / price) if price > 0 else 0
         if qty <= 0:
             logger.warning(f"[人工确认] {code} 数量计算为0，无法推送")
             return False
@@ -197,7 +303,34 @@ class DipBuyMonitor:
         reason = f"抄底信号触发: 评分 {score} ≥ 阈值 {self.buy_threshold}（{result.get('signal', '-')}）"
         if details:
             reason += f"；{details}"
-        reason += f"；单票仓位 ${self.position_size_usd:.0f}，信号价约 {qty} 股"
+        env_text = str(result.get('higher_tf_detail') or '').strip()
+        if env_text:
+            reason += f"；60m环境: {env_text}"
+        rr_val = result.get('rr')
+        if rr_val is not None:
+            reason += f"；盈亏比≈{float(rr_val):.2f}"
+        fq = result.get('flow_quality') or {}
+        if fq.get('label') and fq['label'] != 'no_data':
+            net_txt = f"（净{float(fq['main_net']):+,.0f}）" if fq.get('main_net') is not None else ''
+            reason += f"；资金流: {fq['label']}{net_txt}"
+        op = result.get('option_pressure') or {}
+        if op.get('label') and op['label'] != 'no_data':
+            iv_txt = f"，IV≈{float(op['avg_iv']) * 100:.0f}%" if op.get('avg_iv') is not None else ''
+            pc_txt = f"，P/C OI={float(op['put_call_oi']):.2f}" if op.get('put_call_oi') is not None else ''
+            reason += f"；期权: {op['label']}{iv_txt}{pc_txt}"
+        reason += f"；单票仓位 ${size_usd:.0f}，信号价约 {qty} 股"
+
+        # 信息层：打包消息面上下文（新闻 + 下次财报），失败降级为空；
+        # 财报闸已拉过 signal_ctx 时直接复用，避免同一信号重复请求 Yahoo
+        context_text = ''
+        try:
+            from scripts.live_trading import signal_context
+            if signal_ctx is not None:
+                context_text = signal_context.format_context(code, signal_ctx)
+            else:
+                context_text = signal_context.get_context_text(code)
+        except Exception as e:
+            logger.debug(f"消息面上下文失败 {code}: {e}")
 
         self.approval_store.create(
             stock_code=code,
@@ -207,13 +340,14 @@ class DipBuyMonitor:
             price=price,
             quantity=qty,
             estimated_cost=round(price * qty, 2),
-            per_stock_capital=float(self.position_size_usd),
+            per_stock_capital=float(size_usd),
             entry_mode='dip_buy',
             trigger_reason='抄底评分 ≥ 阈值',
             kline_score=score,
             kline_signal=result.get('signal'),
             reason=reason,
-            llm=self._ask_llm_verdict(code, price),
+            context=context_text,
+            llm=self._ask_llm_verdict(code, price, context_text=context_text),
         )
         logger.warning(
             f"[人工确认] {code} 推送待确认: 评分={score}/{self.buy_threshold} "
@@ -235,6 +369,10 @@ class DipBuyMonitor:
             if self._get_position_count() >= self.max_positions:
                 self.approval_store.mark(pid, 'skipped', note='持仓已满，跳过')
                 return
+            # 复检：单代码一仓
+            if self.one_position_per_code and self._has_position(code):
+                self.approval_store.mark(pid, 'skipped', note='已持有该代码（单代码一仓），跳过')
+                return
 
             # 复检：最新价格与漂移保护
             price = self._get_current_price(code)
@@ -253,7 +391,7 @@ class DipBuyMonitor:
                     return
 
             score = int(item.get('kline_score') or 0)
-            ok = self._execute_buy(code, price, score)
+            ok = self._execute_buy(code, price, score, proposal_id=pid)
             if ok:
                 self.approval_store.mark(
                     pid, 'executed', note=f'按最新价 ${price:.2f} 下单'
@@ -279,21 +417,28 @@ class DipBuyMonitor:
 
         self.approval_store.expire_old()
 
-        # 用户拒绝 → 当日不再推送同一只；同股票其它提案一并取消
+        # 只处理抄底线（entry_mode=dip_buy）的点击结果；
+        # 突破线（donchian）提案由 TrendBreakoutMonitor 自己处理，互不误伤。
         for item in self.approval_store.rejected_items():
+            if item.get('entry_mode', 'dip_buy') != 'dip_buy':
+                continue
             if item.get('id') in self._approval_processed_reject_ids:
                 continue
             self._approval_processed_reject_ids.add(item.get('id', ''))
             self._approval_rejected_codes.add(item.get('stock_code', ''))
+            # 同股票其它提案一并取消（仅限抄底线，不动突破线提案）
             for other in self.approval_store.get_all():
                 if (
                     other.get('stock_code') == item.get('stock_code')
+                    and other.get('entry_mode', 'dip_buy') == 'dip_buy'
                     and other['status'] in ('pending', 'approved')
                 ):
                     self.approval_store.mark(other['id'], 'expired', note='同一股票已被拒绝，取消')
 
         # 用户确认 → 执行
         for item in self.approval_store.approved_items():
+            if item.get('entry_mode', 'dip_buy') != 'dip_buy':
+                continue
             self._execute_approved(item)
         
     def _setup(self):
@@ -313,9 +458,10 @@ class DipBuyMonitor:
             market='US'
         )
         
-        # 分析器
-        buy_timing_cfg = self.config.get('trading', {}).get('live_trading', {}).get('buy_timing', {})
-        self.analyzer = IntradayAnalyzer(buy_timing_cfg)
+        # 分析器（canonical 评分读取 dip_buy 段的 buy_threshold；
+        # 修复此前误传 buy_timing 段导致阈值落到默认 13 的错配）
+        dip_cfg = self.config.get('dip_buy', {})
+        self.analyzer = IntradayAnalyzer({'dip_buy': dip_cfg})
         
         logger.info(f"✅ 初始化完成: 监控 {len(self.watch_codes)} 只股票")
         
@@ -346,11 +492,12 @@ class DipBuyMonitor:
             )
             
             if ret == RET_OK and data is not None and len(data) > 0:
-                # 使用滚动窗口：最近 N 根 K 线（不限当天，夜盘刚开时也能评分）
-                data = data.sort_values('time_key').tail(self.min_bars * 2)  # 取足够多的数据
+                # 使用滚动窗口：最多取 60 根（真底背离需要 41+ 根），
+                # 不足 min_bars 时视为数据不够（夜盘刚开时也兼容）
+                data = data.sort_values('time_key').tail(max(self.min_bars, 60))
                 if len(data) >= self.min_bars:
                     logger.info(f"  📊 {code} 最近{len(data)}根K线（含盘前盘后夜盘）")
-                    return data.tail(self.min_bars)  # 返回最近 min_bars 根
+                    return data.tail(max(self.min_bars, 60))
                 else:
                     logger.info(f"  📊 {code} K线不足({len(data)}根，需≥{self.min_bars}根)")
                     return None
@@ -417,13 +564,293 @@ class DipBuyMonitor:
             return True
         elapsed = (datetime.now() - self.last_buy_time[code]).total_seconds() / 60
         return elapsed >= self.cooldown_minutes
+
+    # ==================== P0 抄底加强：时段 / 日线 / 财报 / 持仓闸 ====================
+
+    def _session_label(self, et_now) -> str:
+        t = et_now.hour * 60 + et_now.minute
+        PRE_MARKET_START, PRE_MARKET_END = 4 * 60, 9 * 60 + 30
+        REGULAR_END, AFTER_HOURS_END = 16 * 60, 20 * 60
+        if t < PRE_MARKET_START or t >= AFTER_HOURS_END:
+            label = 'overnight'
+        elif t < PRE_MARKET_END:
+            label = 'pre_market'
+        elif t < REGULAR_END:
+            label = 'regular'
+        else:
+            label = 'after_hours'
+        return label
+
+    def _session_allowed(self, et_now) -> bool:
+        """时段白名单：默认只允许盘中+盘后（config dip_buy.session_filter）。"""
+        if not self.session_filter_enabled:
+            return True
+        label = self._session_label(et_now)
+        allowed = self.session_allow.get(label, True)
+        if not allowed:
+            today = et_now.strftime('%Y-%m-%d')
+            if self._session_block_label != label or self._session_block_date != today:
+                self._session_block_label = label
+                self._session_block_date = today
+                logger.info(f"⏭️  时段过滤: 当前为 {label}（美东），已关闭抄底")
+        return allowed
+
+    def _fetch_daily_tail(self, code: str) -> Optional[pd.DataFrame]:
+        """拉日K（前复权，约400天），计算日线MA供趋势门使用。"""
+        from futu import KLType, RET_OK
+        et_now = datetime.now().astimezone(ZoneInfo("America/New_York"))
+        start = (et_now - timedelta(days=400)).strftime('%Y-%m-%d')
+        end = et_now.strftime('%Y-%m-%d')
+        try:
+            with self.pool.get_quote_ctx() as ctx:
+                ret, data, _ = ctx.request_history_kline(
+                    code=code, start=start, end=end,
+                    ktype=KLType.K_DAY, autype='qfq',
+                )
+            if ret != RET_OK or data is None or len(data) == 0:
+                return None
+            df = pd.DataFrame({
+                'date': pd.to_datetime(data['time_key']).dt.normalize(),
+                'close': data['close'].astype(float),
+            })
+            df = df.sort_values('date').drop_duplicates(subset=['date']).reset_index(drop=True)
+            ma_col = f'ma{self.daily_ma}'
+            df[ma_col] = df['close'].rolling(self.daily_ma).mean()
+            df['ma_slope_ref'] = df[ma_col].shift(10)
+            return df
+        except Exception as e:
+            logger.warning(f"日线门数据获取失败 {code}: {e}")
+            return None
+
+    def _daily_trend_gate(self, code: str) -> Tuple[bool, Optional[str]]:
+        """
+        P0-1 日线趋势门：最近一根已收盘日K 收盘低于日线MA 时禁止抄底。
+        结果按（代码 × 美东日期）缓存，每个交易日只拉一次日K。
+        返回 (allowed, reason)。
+        """
+        if not self.daily_trend_gate_enabled:
+            return True, None
+        et_now = datetime.now().astimezone(ZoneInfo("America/New_York"))
+        et_date = et_now.strftime('%Y-%m-%d')
+        cached = self._trend_gate_cache.get(code)
+        if cached and cached.get('date') == et_date:
+            return bool(cached.get('allowed')), cached.get('reason')
+
+        # 数据拿不到时保守放行（只靠其他闸门），并避免每轮重试
+        allowed, reason = True, None
+        df = self._fetch_daily_tail(code)
+        if df is not None and len(df) >= max(self.daily_ma + 30, 60):
+            completed = df[df['date'] < pd.Timestamp(et_now.date())]
+            if len(completed) >= 30:
+                row = completed.iloc[-1]
+                ma_col = f'ma{self.daily_ma}'
+                ma_val = row.get(ma_col)
+                close = float(row['close'])
+                if ma_val is not None and pd.notna(ma_val):
+                    ma_val = float(ma_val)
+                    sig_date = row['date'].date()
+                    if self.trend_block_below_ma and close < ma_val:
+                        allowed = False
+                        reason = (f"日线门: {sig_date} 收盘 ${close:.2f} < "
+                                  f"MA{self.daily_ma} ${ma_val:.2f}")
+                    elif self.trend_require_ma_slope_up:
+                        slope_ref = row.get('ma_slope_ref')
+                        if slope_ref is not None and pd.notna(slope_ref) and \
+                                float(ma_val) <= float(slope_ref):
+                            allowed = False
+                            reason = (f"日线门: MA{self.daily_ma} ${ma_val:.2f} 走平/下行 "
+                                      f"(10根前 ${float(slope_ref):.2f})")
+                        elif not self.trend_block_below_ma and close < ma_val:
+                            reason = (f"⚠️ 日线门(仅提示): {sig_date} 收盘低于 "
+                                      f"MA{self.daily_ma}（block_below_ma=false）")
+                    elif not self.trend_block_below_ma and close < ma_val:
+                        reason = (f"⚠️ 日线门(仅提示): {sig_date} 收盘低于 "
+                                  f"MA{self.daily_ma}（block_below_ma=false）")
+        elif df is not None:
+            reason = f"日线数据不足({len(df)}根，需≥{max(self.daily_ma + 30, 60)})，放行"
+        else:
+            reason = "日线数据获取失败，放行（依赖其余闸门）"
+        self._trend_gate_cache[code] = {
+            'date': et_date, 'allowed': allowed, 'reason': reason,
+        }
+        return allowed, reason
+
+    def _get_60m_env(self, code: str) -> Tuple[int, str]:
+        """
+        P1-2 60分钟环境（缓存 cache_seconds 秒，只在评分达标后调用）：
+        返回 (env_score, 展示文本)。-2=60m强下行（禁止），-1/0/1 仅提示。
+        """
+        from futu import KLType, RET_OK
+        from mutifactor.utils.intraday_scoring import score_higher_tf_env
+        now = time.time()
+        cache = self._env_cache.get(code)
+        if cache and now - cache.get('ts', 0) < self.higher_tf_cache_seconds:
+            return int(cache.get('env', 0)), str(cache.get('detail', '60m环境中性'))
+        et_now = datetime.now().astimezone(ZoneInfo("America/New_York"))
+        start = (et_now - timedelta(days=14)).strftime('%Y-%m-%d')
+        end = et_now.strftime('%Y-%m-%d')
+        env_score, text = 0, '60m环境中性'
+        try:
+            with self.pool.get_quote_ctx() as ctx:
+                ret, data, _ = ctx.request_history_kline(
+                    code=code, start=start, end=end,
+                    ktype=KLType.K_60M, autype='qfq', extended_time=True,
+                )
+            if ret == RET_OK and data is not None and len(data) > 0:
+                df = pd.DataFrame({
+                    'date': pd.to_datetime(data['time_key']),
+                    'open': data['open'].astype(float),
+                    'high': data['high'].astype(float),
+                    'low': data['low'].astype(float),
+                    'close': data['close'].astype(float),
+                    'volume': data['volume'].astype(float),
+                }).sort_values('date').reset_index(drop=True)
+                env_score, detail = score_higher_tf_env(df)
+                text = str(detail.get('detail', text))
+            else:
+                text = '60m数据获取失败'
+        except Exception as e:
+            logger.warning(f"60m环境获取失败 {code}: {e}")
+            text = '60m数据获取失败'
+        self._env_cache[code] = {'ts': time.time(), 'env': env_score, 'detail': text}
+        return env_score, text
+
+    def _earnings_blackout(self, earnings) -> Tuple[bool, Optional[str]]:
+        """
+        P0-2 财报窗口闸：下次财报在 skip_days 个自然日内 → 禁止抄底提案。
+        财报日期解析失败/缺失时视为未知，放行（依赖其他闸门）。
+        """
+        if not self.earnings_gate_enabled or not earnings:
+            return False, None
+        dt = _parse_earnings_date(earnings.get('date'))
+        if dt is None:
+            return False, None
+        et_today = datetime.now().astimezone(ZoneInfo("America/New_York")).date()
+        delta = (dt.date() - et_today).days
+        if 0 <= delta <= self.earnings_skip_days:
+            return True, (f"财报窗口: 下次财报 {dt.date()}（还有 {delta} 天），"
+                          f"前 {self.earnings_skip_days} 天不抄底")
+        return False, None
+
+    # ==================== 资金流/期权影子字段（不改分、不拦截） ====================
+
+    def _apply_shadow_fields(self, result: Dict, signal_ctx: Optional[Dict]):
+        """
+        从 signal_context 已拉取的数据里提取两个结构化影子字段：
+          result['flow_quality']   资金流：主力(超大+大单)净流入/流出方向
+          result['option_pressure']期权：近月ATM 平均IV + put/call OI 压力
+        仅用于确认页展示与 dip_scans 归因，不参与评分与拦截。
+        """
+        ctx = signal_ctx or {}
+        cap = ctx.get('capital') or {}
+        opt = ctx.get('options') or {}
+
+        # ---- 资金流 ----
+        try:
+            super_v = cap.get('super')
+            big_v = cap.get('big')
+            total_v = cap.get('in_flow')
+            super_f = float(super_v) if super_v is not None else None
+            big_f = float(big_v) if big_v is not None else None
+            total_f = float(total_v) if total_v is not None else None
+            main = None
+            if super_f is not None or big_f is not None:
+                main = (super_f or 0.0) + (big_f or 0.0)
+        except (TypeError, ValueError):
+            main = None
+            total_f = None
+        if main is None:
+            flow = {'label': 'no_data', 'main_net': None}
+        else:
+            share = None
+            if total_f not in (None, 0):
+                share = main / abs(total_f)
+            if main > 0:
+                label = '主力净流入' if share is None or share < 0.3 else '主力强净流入'
+            elif main < 0:
+                label = '主力净流出' if share is None or share > -0.3 else '主力强净流出'
+            else:
+                label = '主力中性'
+            flow = {'label': label, 'main_net': round(main, 0)}
+        result['flow_quality'] = flow
+
+        # ---- 期权近月 ATM 抽样 ----
+        legs = opt.get('legs') or []
+        ivs = []
+        call_oi = 0.0
+        put_oi = 0.0
+        for leg in legs:
+            iv = leg.get('iv')
+            if isinstance(iv, (int, float)) and iv > 0:
+                ivs.append(float(iv))
+            oi = leg.get('open_interest')
+            oi_f = float(oi) if isinstance(oi, (int, float)) else 0.0
+            if leg.get('kind') == 'CALL':
+                call_oi += oi_f
+            elif leg.get('kind') == 'PUT':
+                put_oi += oi_f
+        avg_iv = float(sum(ivs) / len(ivs)) if ivs else None
+        put_call = (put_oi / call_oi) if call_oi and call_oi > 0 else None
+        if avg_iv is None:
+            label = 'no_data'
+        elif avg_iv >= 0.80:
+            label = 'IV极端'
+        elif avg_iv >= 0.50:
+            label = 'IV偏高'
+        else:
+            label = 'IV正常'
+        if put_call is not None and put_call >= 1.5:
+            label += '+PUT压力' if label != 'no_data' else 'PUT压力'
+        result['option_pressure'] = {
+            'label': label,
+            'avg_iv': round(avg_iv, 4) if avg_iv is not None else None,
+            'put_call_oi': round(put_call, 2) if put_call is not None else None,
+            'expiry': opt.get('expiry'),
+        }
+
+    def _refresh_position_cache(self, force: bool = False):
+        """每20秒只查一次券商持仓（整表），供 总数/单代码 检查共用。"""
+        if self.dry_run:
+            return
+        now = time.time()
+        if not force and self._positions_cache is not None and now - self._positions_cache_ts < 20:
+            return
+        from futu import RET_OK, TrdEnv
+        try:
+            trd_env_str = self.config.get('live_manager', {}).get('trd_env', 'SIMULATE')
+            trd_env = TrdEnv.SIMULATE if trd_env_str == 'SIMULATE' else TrdEnv.REAL
+            with self.pool.get_trade_ctx() as ctx:
+                ret, data = ctx.position_list_query(trd_env=trd_env)
+            if ret != RET_OK:
+                logger.error(f"持仓查询失败，错误码: {ret}")
+                return
+            held = set()
+            if data is not None and len(data) > 0:
+                held = {str(r['code']) for r in data.to_dict('records') if float(r.get('qty') or 0) != 0}
+            self._positions_cache = held
+            self._positions_cache_ts = time.time()
+        except Exception as e:
+            logger.warning(f"持仓查询异常: {e}")
+            self._positions_cache_ts = time.time()  # 避免每30s重试打爆
+
+    def _has_position(self, code: str) -> bool:
+        """是否已持有该代码（dry-run 用共享模拟持仓登记簿）。"""
+        if self.dry_run:
+            try:
+                from scripts.live_trading.position_registry import REGISTRY
+                return REGISTRY.get(code) is not None
+            except Exception:
+                return code in self._sim_held_codes
+        self._refresh_position_cache()
+        return bool(self._positions_cache) and code in self._positions_cache
     
-    def _execute_buy(self, code: str, price: float, score: int) -> bool:
+    def _execute_buy(self, code: str, price: float, score: int,
+                     proposal_id: Optional[str] = None) -> bool:
         """执行买入"""
         from futu import RET_OK, OrderType, TimeInForce, TrdSide, TrdEnv
         
         # 计算买入数量（根据单只仓位和当前价格）
-        qty = int(self.position_size_usd / price)
+        qty = int(self._effective_position_size_usd() / price)
         
         # 美股最小下单量为1股
         if qty <= 0:
@@ -436,6 +863,16 @@ class DipBuyMonitor:
         if self.dry_run:
             logger.info(f"  [DRY-RUN] 模拟买入 {code} x {qty}股 @ ${price:.2f}")
             self.last_buy_time[code] = datetime.now()
+            try:
+                from scripts.live_trading.position_registry import REGISTRY
+                REGISTRY.open(code, 'dip_buy', qty, price)
+            except Exception:
+                pass
+            _us_ledger(
+                'position_opened',
+                stock_code=code, quantity=qty, cost_price=price, score=score,
+                proposal_id=proposal_id, dry_run=True, env='DRY-RUN',
+            )
             return True
         
         # 实盘买入
@@ -455,6 +892,18 @@ class DipBuyMonitor:
                 if ret == RET_OK:
                     logger.info(f"✅ 买入成功: {code} x {qty} @ ${price:.2f}")
                     self.last_buy_time[code] = datetime.now()
+                    try:
+                        from scripts.live_trading.position_registry import REGISTRY
+                        REGISTRY.open(code, 'dip_buy', qty, price)
+                    except Exception:
+                        pass
+                    self._positions_cache = None  # 强制下轮刷新持仓
+                    _us_ledger(
+                        'position_opened',
+                        stock_code=code, quantity=qty, cost_price=price, score=score,
+                        proposal_id=proposal_id, dry_run=False,
+                        env=str(self.config.get('live_manager', {}).get('trd_env', 'SIMULATE')),
+                    )
                     return True
                 else:
                     logger.error(f"❌ 买入失败: {order}")
@@ -464,41 +913,119 @@ class DipBuyMonitor:
             return False
     
     def _get_position_count(self) -> int:
-        """查询当前持仓数（实盘用 position_list_query，dry-run 返回 0）"""
+        """持仓总数：dry-run 统计共享模拟登记簿；实盘用缓存的券商持仓。"""
         if self.dry_run:
-            return 0
-        from futu import RET_OK, TrdEnv
+            try:
+                from scripts.live_trading.position_registry import REGISTRY
+                return REGISTRY.count()
+            except Exception:
+                return len(self._sim_held_codes)
+        self._refresh_position_cache()
+        return len(self._positions_cache or set())
+
+    def _log_scan(self, code: str, price: float, et_now, result: Dict,
+                  outcome: str = '', env_score=None):
+        """
+        P2 评估闭环：把一次“评分检查”记入 dip_scans.jsonl。
+        只记评分 ≥ eval_log_min_score 的检查（低于的忽略，控制文件量）；
+        outcome 记录最终去向：below_threshold / blocked_* / passed。
+        """
+        score = float(result.get('score') or 0)
+        if self.eval_log_min_score > 0 and score < self.eval_log_min_score:
+            return None
         try:
-            trd_env_str = self.config.get('live_manager', {}).get('trd_env', 'SIMULATE')
-            trd_env = TrdEnv.SIMULATE if trd_env_str == 'SIMULATE' else TrdEnv.REAL
-            with self.pool.get_trade_ctx() as ctx:
-                ret, data = ctx.position_list_query(trd_env=trd_env)
-                if ret != RET_OK:
-                    logger.error(f"持仓查询失败，错误码: {ret}")
-                    return 0
-                # 只统计数量 > 0 的持仓
-                return int((data['qty'] != 0).sum()) if data is not None and len(data) > 0 else 0
-        except Exception as e:
-            logger.warning(f"持仓查询异常: {e}")
-            return 0
+            from scripts.live_trading.decision_ledger import scan_ledger
+            trend_cache = self._trend_gate_cache.get(code, {})
+            fq = result.get('flow_quality') or {}
+            op = result.get('option_pressure') or {}
+            return scan_ledger.record_scan(
+                market_type='US',
+                env=self._env_label(),
+                stock_code=code,
+                et_time=et_now.isoformat(),
+                session=self._session_label(et_now),
+                price=price,
+                bars_count=result.get('bars_count'),
+                score=score,
+                raw_score=result.get('raw_score'),
+                signal=result.get('signal'),
+                buy_threshold=self.buy_threshold,
+                rsi_score=result.get('rsi_score'),
+                bb_score=result.get('bb_score'),
+                bb_position=result.get('bb_position'),
+                volume_score=result.get('volume_score'),
+                divergence_score=result.get('volume_divergence_score'),
+                drawdown_score=result.get('drawdown_score'),
+                atr_pct=result.get('atr_pct'),
+                dd_atr=result.get('dd_atr'),
+                trend_adj=result.get('trend_adj'),
+                trend_name=(result.get('trend') or {}).get('trend'),
+                reversal_ok=bool((result.get('reversal') or {}).get('ok')),
+                rr=result.get('rr'),
+                htf_env_score=env_score,
+                flow_label=fq.get('label'),
+                flow_main_net=fq.get('main_net'),
+                option_label=op.get('label'),
+                avg_iv=op.get('avg_iv'),
+                put_call_oi=op.get('put_call_oi'),
+                option_expiry=op.get('expiry'),
+                daily_gate_reason=trend_cache.get('reason'),
+                outcome=outcome,
+            )
+        except Exception:
+            return None
 
     def _check_one(self, code: str):
         """检查单只股票"""
         try:
+            # 盘前市场状态闸门：LLM 说 avoid 时今天不产生新买入信号
+            try:
+                from scripts.live_trading import market_brief as mb
+                brief = mb.load_brief()
+                if not mb.buy_allowed(brief):
+                    key = brief.get('date') or datetime.now().strftime('%Y-%m-%d')
+                    if getattr(self, '_brief_avoid_date', None) != key:
+                        self._brief_avoid_date = key
+                        logger.warning(
+                            f"[市场状态] 今日档位={brief.get('risk_level')} "
+                            f"buy_frequency=avoid，暂停产生买入信号: {brief.get('risk_note', '')}"
+                        )
+                    return
+            except Exception:
+                pass
+
             # 计算美东时间（用于日志显示时段）
             et_now = datetime.now().astimezone(ZoneInfo("America/New_York"))
-            
+
+            # 0. 时段过滤：默认禁夜盘/盘前，只在盘中+盘后抄底
+            if not self._session_allowed(et_now):
+                return
+
+            # 0.5 P0-1 日线趋势门：最近已收盘日K 低于日线MA → 禁抄（防接飞刀）
+            trend_ok, trend_reason = self._daily_trend_gate(code)
+            if not trend_ok:
+                logger.info(f"⏭️  {code} {trend_reason}，跳过抄底")
+                return
+            if trend_reason and self._trend_gate_cache.get(code, {}).get('logged') != trend_reason:
+                self._trend_gate_cache[code]['logged'] = trend_reason
+                logger.warning(f"  {code} {trend_reason}")
+
             # 1. 检查冷却期
             if not self._check_cooldown(code):
                 logger.info(f"⏭️  {code} 在冷却期内，跳过")
                 return
-            
-            # 1.5 检查最大持仓数（避免无限加仓）
+
+            # 1.5 检查最大持仓数（避免无限加仓，整表缓存每20秒刷新一次）
             pos_count = self._get_position_count()
             if pos_count >= self.max_positions:
                 logger.info(f"⏭️  持仓已满({pos_count}/{self.max_positions})，跳过买入")
                 return
-            
+
+            # 1.6 P0 单代码一仓：已持有该代码时不再重复抄底
+            if self.one_position_per_code and self._has_position(code):
+                logger.info(f"⏭️  {code} 已持有（单代码一仓），跳过重复抄底")
+                return
+
             # 2. 拉K线
             bars = self._get_kline_5m(code)
             if bars is None or len(bars) < self.min_bars:
@@ -518,13 +1045,72 @@ class DipBuyMonitor:
             
             # 5. 判断是否买入（美股只一档阈值）
             if result['score'] >= self.buy_threshold:
+                env_score = None
+                # 5.1 P1-1 反转确认硬门：超卖分够了还不够，要看到止跌/反弹迹象
+                if self.reversal_gate_enabled:
+                    rev = result.get('reversal') or {}
+                    if not rev.get('ok'):
+                        self._log_scan(code, price, et_now, result,
+                                       outcome='blocked_reversal')
+                        logger.info(
+                            f"⏭️  {code} 评分达标但无反转确认"
+                            f"（{rev.get('detail', '无反转确认')}），继续观察"
+                        )
+                        return
+
+                # 5.2 P1-2 60分钟环境：60m 强下行禁抄；其余状态展示在提案里
+                if self.higher_tf_enabled:
+                    env_score, env_text = self._get_60m_env(code)
+                    result['higher_tf_detail'] = env_text
+                    if env_score <= -2:
+                        self._log_scan(code, price, et_now, result,
+                                       outcome='blocked_60m', env_score=env_score)
+                        logger.info(f"⏭️  {code} {env_text}，跳过抄底")
+                        return
+
+                # 5.3 P1-4 盈亏比门槛：目标(布林中轨)到入场 vs 风险(止损/2ATR)
+                if self.rr_gate_enabled:
+                    rr_val = float(result.get('rr') or 0)
+                    if rr_val < self.rr_min:
+                        self._log_scan(code, price, et_now, result,
+                                       outcome='blocked_rr', env_score=env_score)
+                        logger.info(
+                            f"⏭️  {code} 盈亏比 {rr_val:.2f} < {self.rr_min}，"
+                            f"反弹空间不够，跳过"
+                        )
+                        return
+
+                # 5.4 财报窗口闸 + 资金流/期权影子字段：
+                #     只在评分达标后拉一次消息面（避免每轮请求），一次拉取两处复用
+                signal_ctx = None
+                need_ctx = self.earnings_gate_enabled or self.shadow_signals_enabled
+                if need_ctx:
+                    try:
+                        from scripts.live_trading import signal_context as sc
+                        signal_ctx = sc.fetch_signal_context(code) or {}
+                    except Exception:
+                        signal_ctx = {}
+                    if self.earnings_gate_enabled:
+                        blocked, earn_reason = self._earnings_blackout(signal_ctx.get('earnings'))
+                        if blocked:
+                            self._log_scan(code, price, et_now, result,
+                                           outcome='blocked_earnings', env_score=env_score)
+                            logger.info(f"⏭️  {code} {earn_reason}，跳过抄底")
+                            return
+                    if self.shadow_signals_enabled:
+                        self._apply_shadow_fields(result, signal_ctx)
                 if self.approval_enabled:
                     # 人工确认模式：只推送，不自动下单
-                    self._queue_approval(code, price, result)
+                    acted = self._queue_approval(code, price, result, signal_ctx=signal_ctx)
                 else:
-                    self._execute_buy(code, price, result['score'])
-                logger.info(f"  📊 {code} {result['details']}")
+                    acted = self._execute_buy(code, price, result['score'])
+                self._log_scan(code, price, et_now, result,
+                               outcome='passed' if acted else 'queue_skipped',
+                               env_score=env_score)
+                logger.info(f"  📊 {code} {result.get('details', '')}")
             else:
+                self._log_scan(code, price, et_now, result,
+                               outcome='below_threshold')
                 logger.info(f"  ℹ️  {code} 评分={result['score']} 未达阈值({self.buy_threshold})")
         
         except Exception as e:

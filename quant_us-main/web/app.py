@@ -7,6 +7,7 @@ quant_us Web 服务
 import os
 import sys
 import logging
+import time
 import yaml
 from typing import Tuple
 from datetime import datetime, timedelta
@@ -91,6 +92,8 @@ approval_enabled = False
 approval_env = 'DRY-RUN'
 approval_llm_enabled = False
 dip_monitor_ref = None
+trend_monitor_ref = None
+exit_manager_ref = None
 
 # ─── 配置加载 ──────────────────────────────────────────────────────
 APP_CONFIG = {
@@ -488,6 +491,17 @@ def api_approvals():
     })
 
 
+@app.route('/api/market-brief')
+def api_market_brief():
+    from scripts.live_trading import market_brief
+    brief = market_brief.load_brief()
+    return jsonify({
+        'ok': True,
+        'brief': brief,
+        'server_time': datetime.now().timestamp(),
+    })
+
+
 @app.route('/api/approvals/<proposal_id>/<action>', methods=['POST'])
 def api_approval_action(proposal_id: str, action: str):
     """用户点击「下单 / 拒绝」"""
@@ -519,6 +533,97 @@ def api_approval_action(proposal_id: str, action: str):
 
     item = approval_store.get(proposal_id)
     return jsonify({'ok': True, 'status': item['status'] if item else action})
+
+
+# ─── 临时开发接口：模拟提案（仅 DRY-RUN + 本机）────────────────────────
+
+@app.route('/api/dev/simulate-proposal', methods=['POST'])
+def api_dev_simulate_proposal():
+    """生成一条待确认的“模拟提案”，用于演示 人工点单→登记簿→吊灯出场 全流程。
+    仅允许本机访问且 approval_env=DRY-RUN（防止误在真实环境产生提案）。
+    """
+    global approval_store, approval_env, dip_monitor_ref, trend_monitor_ref
+    if request.remote_addr not in ('127.0.0.1', '::1'):
+        return jsonify({'ok': False, 'error': '仅允许本机调用'}), 403
+    if approval_store is None:
+        return jsonify({'ok': False, 'error': '人工确认未启用'}), 400
+    if approval_env != 'DRY-RUN':
+        return jsonify({'ok': False, 'error': '仅 DRY-RUN 环境允许创建模拟提案'}), 403
+
+    body = request.get_json(silent=True) or {}
+    code = str(body.get('code', '')).strip().upper()
+    mode = str(body.get('mode', 'dip_buy')).strip().lower()
+    if not code.startswith('US.') or not code[3:]:
+        return jsonify({'ok': False, 'error': 'code 需为 US.XXXX'}), 400
+    if mode not in ('dip_buy', 'donchian'):
+        return jsonify({'ok': False, 'error': 'mode 需为 dip_buy 或 donchian'}), 400
+
+    # 价格：可用接口传值，否则取当前真实行情价（保证点单时漂移复检能过）
+    price = None
+    try:
+        price = float(body.get('price') or 0)
+    except (TypeError, ValueError):
+        price = None
+    if not price or price <= 0:
+        for ref in (dip_monitor_ref, trend_monitor_ref):
+            if ref is not None:
+                try:
+                    p = ref._get_current_price(code)
+                except Exception:
+                    p = None
+                if p and p > 0:
+                    price = float(p)
+                    break
+    if not price or price <= 0:
+        return jsonify({'ok': False, 'error': '无法获取当前价格，请显式传 price'}), 502
+
+    qty = int(5000 / price)
+    if qty <= 0:
+        return jsonify({'ok': False, 'error': '价格过高，数量为0'}), 400
+
+    item = approval_store.create(
+        stock_code=code,
+        stock_name=f'{code}（模拟）',
+        market_type='US',
+        env='DRY-RUN',
+        price=round(price, 4),
+        quantity=qty,
+        estimated_cost=round(price * qty, 2),
+        per_stock_capital=5000.0,
+        entry_mode=mode,
+        trigger_reason='模拟测试',
+        kline_signal='sim_test',
+        reason=(f"【模拟测试】{mode} 策略线待确认提案 @ ${price:.2f} x {qty}股。"
+                "点「下单」将走完整 DRY-RUN：登记持仓簿 → ChandelierExitManager 接管 → 模拟挂单/平仓。"),
+        llm=None,
+        expires_at=time.time() + 30 * 60,
+    )
+    return jsonify({'ok': True, 'item': item})
+
+
+@app.route('/api/dev/simulate-price', methods=['POST'])
+def api_dev_simulate_price():
+    """开发/周末演示用：给出场管理器的价格订阅器注入模拟价格。
+    仅 DRY-RUN + 本机；设 price<=0 表示清除强制价。
+    """
+    global exit_manager_ref, approval_env
+    if request.remote_addr not in ('127.0.0.1', '::1'):
+        return jsonify({'ok': False, 'error': '仅允许本机调用'}), 403
+    if approval_env != 'DRY-RUN':
+        return jsonify({'ok': False, 'error': '仅 DRY-RUN 环境允许'}), 403
+    body = request.get_json(silent=True) or {}
+    code = str(body.get('code', '')).strip().upper()
+    try:
+        price = float(body.get('price') or 0)
+    except (TypeError, ValueError):
+        price = 0.0
+    if not code:
+        return jsonify({'ok': False, 'error': '缺少 code'}), 400
+    em = exit_manager_ref
+    if em is None or not hasattr(em, 'ticker'):
+        return jsonify({'ok': False, 'error': '出场管理器未注入'}), 400
+    em.ticker.force_price(code, price)
+    return jsonify({'ok': True, 'code': code, 'price': price})
 
 
 # ─── LLM 选股建议页（宏观日报 → 候选 → 一键加入观察池）────────────
@@ -554,6 +659,9 @@ def api_suggestion_action(suggestion_id: str, action: str):
         return jsonify({'ok': False, 'error': '建议不存在（先运行生成器）'}), 404
 
     if action == 'add':
+        valid, vmsg = watchlist.validate_futu_symbol(item.get('code', ''))
+        if not valid:
+            return jsonify({'ok': False, 'error': vmsg}), 400
         added = False
         if item.get('market') == 'US':
             added = watchlist.add_us_watch(item.get('code', ''))

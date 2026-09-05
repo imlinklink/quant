@@ -84,7 +84,8 @@ class HKPositionManager(PositionManagerBase):
                 if state:
                     all_positions = state.get('positions', {})
                     self.strategy_positions = {code: pos for code, pos in all_positions.items()
-                                              if pos.get('quantity', 0) > 0}
+                                              if pos.get('quantity', 0) > 0
+                                              and not pos.get('demo')}
                     self.strategy_used_capital = sum(
                         pos.get('quantity', 0) * pos.get('cost_price', 0)
                         for pos in self.strategy_positions.values()
@@ -107,7 +108,8 @@ class HKPositionManager(PositionManagerBase):
             if state:
                 all_positions = state.get('positions', {})
                 self.strategy_positions = {code: pos for code, pos in all_positions.items()
-                                          if pos.get('quantity', 0) > 0}
+                                          if pos.get('quantity', 0) > 0
+                                          and not pos.get('demo')}
                 self.strategy_used_capital = sum(
                     pos.get('quantity', 0) * pos.get('cost_price', 0)
                     for pos in self.strategy_positions.values()
@@ -125,8 +127,12 @@ class HKPositionManager(PositionManagerBase):
     def _save_positions_to_db(self):
         """保存港股持仓到数据库"""
         # 保存状态（只保存有效持仓，quantity>0）
-        valid_positions = {code: pos for code, pos in self.strategy_positions.items() 
-                          if pos.get('quantity', 0) > 0}
+        valid_positions = {code: pos for code, pos in self.strategy_positions.items()
+                          if pos.get('quantity', 0) > 0 and not pos.get('demo')}
+        self.strategy_used_capital = sum(
+            pos.get('quantity', 0) * pos.get('cost_price', 0)
+            for pos in valid_positions.values()
+        )
         
         self.state_persistence.save_state(
             positions=valid_positions,
@@ -141,11 +147,12 @@ class HKPositionManager(PositionManagerBase):
     def _save_positions_detail(self):
         """保存持仓明细"""
         # 如果策略持仓为空，跳过写入（避免清空 positions 表）
-        if not self.strategy_positions:
+        real_positions = {c: p for c, p in self.strategy_positions.items() if not p.get('demo')}
+        if not real_positions:
             logger.info("[HK] 策略持仓为空，跳过写入 positions 表（保留现有手动标记）")
             return
         self.state_persistence.clear_positions()
-        for stock_code, pos in self.strategy_positions.items():
+        for stock_code, pos in real_positions.items():
             self.state_persistence.save_position(
                 stock_code=stock_code,
                 stock_name=self._get_stock_name(stock_code),
@@ -394,4 +401,3 @@ class HKPositionManager(PositionManagerBase):
                 logger.error(f"[HK] ⚠️  已降级到简化止损逻辑: {stock_code}（盈亏计算可能不准确）")
 
         return should_exit, reason, atr, take_profit_price, stop_loss_price
-

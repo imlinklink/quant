@@ -190,8 +190,13 @@ class BuyTimingStrategy:
             if price is None:
                 continue
 
-            score, details = self._get_kline_score(stock_code, price, force_refresh=force_refresh,
-                                                     price_fetcher=price_fetcher)
+            score, details, result = self._get_kline_score(
+                stock_code, price, force_refresh=force_refresh,
+                price_fetcher=price_fetcher)
+            self._record_buy_check(
+                stock_code, price, score, result,
+                threshold=threshold, in_strong=in_strong_window,
+            )
             logger.info(f"[{threshold_label}检查] {stock_code}: {score}分 (阈值{threshold}) | {details}")
 
             if score >= threshold:
@@ -272,9 +277,9 @@ class BuyTimingStrategy:
 
     # ====================== K线评分：追涨/抄底分支 ======================
     def _get_kline_score(self, stock_code: str, price: float, force_refresh: bool = False,
-                         price_fetcher=None) -> Tuple[int, str]:
+                         price_fetcher=None) -> Tuple[int, str, Optional[Dict]]:
         if not self._intraday_kline_provider or not self._intraday_analyzer:
-            return 0, "K线分析器未就绪"
+            return 0, "K线分析器未就绪", None
 
         try:
             bars = self._intraday_kline_provider.get_min5_bars(stock_code, force_refresh=force_refresh)
@@ -283,7 +288,7 @@ class BuyTimingStrategy:
             bars = None
 
         if bars is None or len(bars) < 10:
-            return 0, "K线数据不足"
+            return 0, "K线数据不足", None
 
         try:
             bars_1m = self._intraday_kline_provider.get_min1_bars(stock_code, force_refresh=force_refresh)
@@ -298,13 +303,13 @@ class BuyTimingStrategy:
         if regime == 'uptrend' and self._use_hybrid:
             # 追涨模式
             if bars_1m is None or len(bars_1m) < 5:
-                return 0, "1分钟K线数据不足(追涨)"
+                return 0, "1分钟K线数据不足(追涨)", None
             result = self._intraday_analyzer.analyze_momentum(stock_code, bars_1m, bars, price)
             regime_label = f"{regime}-追涨"
         elif self._use_hybrid:
             # 抄底模式（震荡/下跌行情）
             if bars_1m is None or len(bars_1m) < 5:
-                return 0, "1分钟K线数据不足"
+                return 0, "1分钟K线数据不足", None
             result = self._intraday_analyzer.analyze_hybrid(stock_code, bars_1m, bars, price)
             regime_label = f"{regime}-抄底"
         else:
@@ -313,7 +318,40 @@ class BuyTimingStrategy:
 
         score = result.get('score', 0)
         details = result.get('details', '')
-        return score, f"[{regime_label}]{details}"
+        result['regime_label'] = regime_label
+        return score, f"[{regime_label}]{details}", result
+
+    def _record_buy_check(self, stock_code: str, price: float, score: int,
+                          result: Optional[Dict], threshold: int,
+                          in_strong: bool = False):
+        """港股评估闭环：把每次买入评分检查写入 hk_checks.jsonl（失败不影响交易）。"""
+        try:
+            eval_cfg = (self.config.get('trading', {})
+                        .get('live_trading', {})
+                        .get('evaluation', {}))
+            if not eval_cfg.get('log_checks', True):
+                return
+            from scripts.live_trading.decision_ledger import scan_ledger
+            result = result or {}
+            scan_ledger.record_check(
+                kind='buy_check',
+                market_type='HK',
+                env=str((self.config.get('trading') or {}).get('env', 'SIMULATE')),
+                stock_code=stock_code,
+                price=price,
+                score=score,
+                threshold=threshold,
+                in_strong=bool(in_strong),
+                outcome='above' if score >= threshold else 'below',
+                regime=result.get('regime_label'),
+                rsi_score=result.get('rsi_score'),
+                bb_score=result.get('bb_score'),
+                volume_score=result.get('volume_score'),
+                candle_score=result.get('candle_score'),
+                details=str(result.get('details', ''))[:300],
+            )
+        except Exception:
+            pass
 
     def _is_in_strong_buy_window(self, current_time: dt_time) -> bool:
         for window in self.strong_buy_only_windows:

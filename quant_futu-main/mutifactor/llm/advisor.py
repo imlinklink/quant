@@ -218,6 +218,33 @@ class LLMAdvisor:
         )
         return self.chat(prompt, schema_name='buy_veto')
 
+    def judge_sell(self, position_text: str, sell_reason: str = '',
+                   market_context: str = '') -> Optional[Dict[str, Any]]:
+        """接入点 D: 卖出建议（所有卖出含止损都先问大模型，建议性）。
+        复用 buy_veto 的 JSON 形状：
+          verdict=allow → 建议卖出
+          verdict=delay → 可分批/部分兑现
+          verdict=block → 继续持有
+        """
+        if not self.enabled:
+            return None
+        system = (
+            '你是严格的卖出风控官。任务：根据给定持仓状态与卖出触发原因，'
+            '给出“卖出/分批/继续持有”的建议。\n'
+            '规则：只依据给定信息推理，不编造；宁可保守。\n'
+            'verdict 含义：allow=建议卖出 / delay=可分批或部分兑现 / block=建议继续持有\n'
+            'risk_level: LOW/MEDIUM/HIGH/EXTREME（若继续持有的风险）\n'
+            '输出严格 JSON：{"verdict":"allow|delay|block","reason":"中文一句话",'
+            '"risk_level":"LOW","confidence":0.0~1.0}\n'
+            '注意：这是建议，不替代用户的硬风控决定。'
+        )
+        prompt = (
+            f'持仓状态：{position_text}\n'
+            f'卖出触发原因：{sell_reason or "用户主动评估卖出"}\n'
+            f'市场上下文：{market_context or "无特殊事件"}'
+        )
+        return self.chat(prompt, schema_name='buy_veto', system=system)
+
     def judge_market_status(self, date: str, market_data: str = '') -> Optional[Dict[str, Any]]:
         """接入点 C: 盘前市场状态判断"""
         if not self.enabled:

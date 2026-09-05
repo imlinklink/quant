@@ -65,8 +65,8 @@ def generate(pre_text: Optional[str], post_text: Optional[str]) -> Dict:
         return {'ok': False, 'error': 'LLM 未返回结果（调用失败或 JSON 解析失败）'}
 
     candidates = result.get('candidates')
-    if not isinstance(candidates, list) or not candidates:
-        return {'ok': False, 'error': 'LLM 未给出候选（报告无明确方向？）', 'data': result}
+    if not isinstance(candidates, list):
+        return {'ok': False, 'error': 'LLM 返回格式缺少 candidates 列表', 'data': result}
 
     cleaned = []
     for i, c in enumerate(candidates):
@@ -89,7 +89,15 @@ def generate(pre_text: Optional[str], post_text: Optional[str]) -> Dict:
             'status': 'pending',
         })
     if not cleaned:
-        return {'ok': False, 'error': '候选列表为空或格式不符合 US./HK. 约定', 'data': result}
+        # 空候选是合法结果：报告确实无明确方向时，宁可不推
+        return {
+            'ok': True,
+            'data': {
+                'summary': str(result.get('summary', '今日无明确方向')),
+                'candidates': [],
+                'note': '今日无明确候选（报告方向不明，不硬推）',
+            },
+        }
 
     return {
         'ok': True,

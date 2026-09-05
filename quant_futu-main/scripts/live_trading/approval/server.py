@@ -13,6 +13,68 @@ from urllib.parse import urlparse
 
 logger = logging.getLogger('approval')
 
+_STATIC_CSS = """
+* { box-sizing: border-box; }
+body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+       margin: 0; background: #f4f5f7; color: #222; }
+header { background: #1f2937; color: #fff; padding: 14px 22px;
+         display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.badge { padding: 3px 10px; border-radius: 12px; font-size: 13px; font-weight: 600; }
+.badge.real { background: #dc2626; color: #fff; }
+.badge.sim { background: #2563eb; color: #fff; }
+.badge.llm-on { background: #059669; color: #fff; }
+.badge.llm-off { background: #6b7280; color: #fff; }
+.muted { color: #6b7280; font-size: 13px; }
+nav.tabs { display: flex; gap: 4px; align-items: center; margin-right: 12px; flex-wrap: wrap; }
+nav.tabs a.tab { color: #cbd5e1; text-decoration: none; font-size: 13px;
+                 padding: 4px 10px; border-radius: 8px; white-space: nowrap; }
+nav.tabs a.tab:hover { background: #334155; color: #fff; }
+nav.tabs a.tab.active { background: #2563eb; color: #fff; font-weight: 600; }
+"""
+
+_STATIC_JS = """
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g,
+    c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+"""
+
+
+def _nav_html(active: str) -> str:
+    """统一顶部导航（确认台 / 持仓监控 / LLM建议），active 传当前路径。"""
+    def _tab(path: str, label: str) -> str:
+        cls = ' tab active' if active == path else ' tab'
+        return f'<a class="{cls.strip()}" href="{path}">{label}</a>'
+    return ('<nav class="tabs">'
+            + _tab('/', '确认台')
+            + _tab('/positions', '持仓监控')
+            + _tab('/suggestions', 'LLM建议')
+            + '</nav>')
+
+
+def _inject_nav(page: str, active: str) -> str:
+    """给单页 HTML 注入共享静态文件与导航 HTML，并移除旧的单链接/重复 esc。"""
+    page = page.replace(
+        '<a href="/positions" style="color:#38bdf8;text-decoration:none;font-size:13px;">持仓监控 →</a>',
+        '')
+    page = page.replace('<a class="link" href="/">← 返回买入确认台</a>', '')
+    page = page.replace('<a href="/">买入确认台 →</a>', '')
+    page = page.replace('<head>', '<head>\n'
+                                   '<link rel="stylesheet" href="/static/style.css">', 1)
+    page = page.replace('<script>', '<script src="/static/app.js"></script>\n<script>', 1)
+    # 移除三页各自的 esc 定义（统一由 /static/app.js 提供）
+    esc_block = """function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g,
+    c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+"""
+    page = page.replace(esc_block, '')
+    esc_oneline = """function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,
+  c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+"""
+    page = page.replace(esc_oneline, '')
+    return page.replace('<header>', '<header>\n  ' + _nav_html(active), 1)
+
 
 PAGE_HTML = """<!DOCTYPE html>
 <html lang="zh-CN">
@@ -66,6 +128,12 @@ PAGE_HTML = """<!DOCTYPE html>
   button:disabled { background: #d1d5db; cursor: not-allowed; }
   .countdown { color: #dc2626; font-size: 13px; }
   .note { font-size: 12px; color: #6b7280; margin-top: 6px; }
+  .brief { max-width: 1080px; margin: 14px auto -4px; padding: 10px 18px;
+           border-radius: 8px; font-size: 13px; line-height: 1.5;
+           background: #fff; border: 1px solid #e5e7eb; }
+  .brief.cautious { border-left: 4px solid #f59e0b; }
+  .brief.defensive { border-left: 4px solid #ef4444; }
+  .brief.normal { border-left: 4px solid #059669; }
 </style>
 </head>
 <body>
@@ -76,6 +144,7 @@ PAGE_HTML = """<!DOCTYPE html>
   <a href="/positions" style="color:#38bdf8;text-decoration:none;font-size:13px;">持仓监控 →</a>
   <span id="clock" class="muted"></span>
 </header>
+<div id="brief" class="brief" style="display:none"></div>
 <main>
   <div id="content"><div class="empty">加载中…</div></div>
 </main>
@@ -93,7 +162,7 @@ function fmtTs(sec) {
   const d = new Date(sec * 1000);
   return d.toLocaleString('zh-CN', { hour12: false });
 }
-function llmHtml(llm) {
+function llmHtml(llm, side) {
   if (!llm) {
     return '<div class="llm-box"><span class="muted">大模型未启用或本轮无判定（纯规则信号）</span></div>';
   }
@@ -107,8 +176,11 @@ function llmHtml(llm) {
             : ('block' === v || 'veto' === v) ? 'verdict-block'
             : 'verdict-watch';
   const conf = llm.confidence == null ? '-' : (Number(llm.confidence) * 100).toFixed(0) + '%';
+  const buyLabels = {allow:'允许买入', pass:'通过', watch:'观望', delay:'暂缓(轻仓)', block:'建议否决', veto:'建议否决'};
+  const sellLabels = {allow:'建议卖出', watch:'可分批/观望', delay:'可分批兑现', block:'建议继续持有', veto:'建议继续持有'};
+  const label = (side === 'sell' ? sellLabels : buyLabels)[v] || v;
   return '<div class="llm-box"><div>大模型判定：<span class="llm-verdict ' + cls + '">' +
-         esc(({allow:'允许买入',pass:'通过',watch:'观望',delay:'暂缓(轻仓)',block:'建议否决',veto:'建议否决'})[v] || v) +
+         esc(label) +
          '</span> <span class="muted">(conf ' + conf + ', ' +
          esc({shadow:'影子模式', real_veto:'真实否决'}[llm.mode] || llm.mode || '') + ')</span></div>' +
          (llm.risk_level ? '<div>市场风险：' + esc(llm.risk_level) + '</div>' : '') +
@@ -119,11 +191,15 @@ function llmHtml(llm) {
 function card(item, now) {
   const id = esc(item.id);
   const left = Math.max(0, (item.expires_at || 0) - now);
+  const isSell = item.side === 'sell';
   const countdown = item.status === 'pending'
-    ? '<span class="countdown">' + Math.ceil(left / 1000) + 's 后自动过期</span>' : '';
+    ? '<span class="countdown">' + Math.ceil(left / 1000) + 's 后自动' +
+      (isSell ? '卖出' : '过期') + '</span>' : '';
   const buttons = item.status === 'pending'
-    ? '<div class="actions"><button class="buy" data-id="' + id + '" data-act="approve">下单</button>' +
-      '<button class="reject" data-id="' + id + '" data-act="reject">拒绝</button></div>' : '';
+    ? '<div class="actions"><button class="buy" data-id="' + id + '" data-act="approve">' +
+      (isSell ? '卖出' : '下单') + '</button>' +
+      '<button class="reject" data-id="' + id + '" data-act="reject">' +
+      (isSell ? '继续持有' : '拒绝') + '</button></div>' : '';
   const kline = item.kline_score != null
     ? '<div>日内K线评分：<b>' + esc(item.kline_score) + '</b>（' + esc(item.kline_signal || '-') + '）</div>' : '';
   return '<div class="card ' + esc(item.status) + '">' +
@@ -133,12 +209,15 @@ function card(item, now) {
     '<div class="kv"><span>价格 <b>' + esc(item.price) + '</b></span>' +
     '<span>数量 <b>' + esc(item.quantity) + '</b> 股</span>' +
     '<span>预计金额 <b>' + esc(item.estimated_cost) + '</b></span>' +
+    '<span>方向 <b>' + (isSell ? '卖出' : '买入') + '</b></span>' +
     (item.entry_mode ? '<span>入场方式 <b>' + esc(item.entry_mode) + '</b></span>' : '') +
     '<span>信号时间 ' + fmtTs(item.created_at) + '</span>' + countdown + '</div>' +
     (kline ? '<div class="kv">' + kline + '</div>' : '') +
     '<div class="section-title">规则触发理由</div>' +
     '<div class="reason-box">' + esc(item.reason || '无') + '</div>' +
-    '<div class="section-title">大模型判定</div>' + llmHtml(item.llm) +
+    (item.context ? '<div class="section-title">消息面上下文</div>' +
+      '<div class="reason-box" style="white-space:pre-line">' + esc(item.context) + '</div>' : '') +
+    '<div class="section-title">大模型判定</div>' + llmHtml(item.llm, item.side) +
     (item.note ? '<div class="note">备注：' + esc(item.note) + '</div>' : '') +
     buttons + '</div>';
 }
@@ -190,13 +269,32 @@ document.addEventListener('click', async function (e) {
     load();
   }
 });
+async function loadBrief() {
+  try {
+    const r = await fetch('/api/market-brief');
+    const d = await r.json();
+    const b = d.brief || {};
+    const el = document.getElementById('brief');
+    if (!b.generated_at) { el.style.display = 'none'; return; }
+    const riskLabel = {normal:'正常', cautious:'谨慎', defensive:'防御'}[b.risk_level] || b.risk_level;
+    const freqLabel = {normal:'按计划买入', reduce:'减少买入', avoid:'今日不新增买入'}[b.buy_frequency] || b.buy_frequency;
+    el.className = 'brief ' + (b.risk_level || 'normal');
+    el.style.display = 'block';
+    el.innerHTML = '📋 盘前市场状态：<b>' + esc(riskLabel) + '</b> · 买入策略：<b>' + esc(freqLabel) +
+      '</b>' + (b.risk_note ? '<br>' + esc(b.risk_note) : '');
+  } catch (e) { }
+}
 load();
+loadBrief();
 setInterval(load, 2000);
+setInterval(loadBrief, 30000);
 </script>
 </body>
 </html>
 """
 
+
+PAGE_HTML = _inject_nav(PAGE_HTML, '/')
 
 POSITIONS_HTML = """<!DOCTYPE html>
 <html lang="zh-CN">
@@ -328,6 +426,8 @@ setInterval(load, 3000);
 """
 
 
+POSITIONS_HTML = _inject_nav(POSITIONS_HTML, '/positions')
+
 SUGGESTIONS_HTML = """<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -373,13 +473,19 @@ SUGGESTIONS_HTML = """<!DOCTYPE html>
 <main>
   <div class="summary" id="summary">加载中…</div>
   <div id="content"></div>
-  <div class="tips">建议来源：宏观日报（盘前+盘后）→ 大模型。点「加入观察池」写入 config 的
-  hk.watch_list / dip_buy.watch_list，港股运行中会自动补拉K线参与选股（无需重启）；
+  <div class="tips">建议来源：宏观日报（盘前+盘后）→ 大模型（美股+港股候选混排）。
+  点「加入观察池」会写入对应市场的观察池：美股 → dip_buy.watch_list，
+  港股 → hk.watch_list（港股运行中会自动补拉K线参与选股，无需重启）；
   之后仍需到买入确认台人工点单。</div>
 </main>
 <script>
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,
   c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+function displayCode(c){
+  const m=String(c.market||'').toUpperCase();
+  const code=String(c.code||'');
+  return (m && code.toUpperCase().indexOf(m+'.')===0) ? code.slice(m.length+1) : code;
+}
 function card(c){
   const st=c.status||'pending';
   const btns=st==='pending'
@@ -387,7 +493,7 @@ function card(c){
      '<button class="ignore" data-id="'+esc(c.id)+'">忽略</button></div>':'';
   return '<div class="card '+esc(c.market)+' '+esc(st)+'">'+
     '<div class="row"><span class="mkt">'+esc(c.market)+'</span>'+
-    '<span class="code">'+esc(c.code)+'</span><span>'+esc(c.name||'')+'</span>'+
+    '<span class="code">'+esc(displayCode(c))+'</span><span>'+esc(c.name||'')+'</span>'+
     '<span>'+esc(c.direction||'-')+' · conf '+esc(((Number(c.confidence||0)*100).toFixed(0)+'%'))+
     ' · '+esc(c.horizon||'-')+'</span>'+
     '<span class="status">'+esc(st==='added'?'已加入':st==='ignored'?'已忽略':'')+'</span></div>'+
@@ -426,6 +532,9 @@ load();setInterval(load,5000);
 """
 
 
+SUGGESTIONS_HTML = _inject_nav(SUGGESTIONS_HTML, '/suggestions')
+
+
 class ApprovalServer:
     """本地确认页 HTTP 服务（只监听 127.0.0.1）。"""
 
@@ -438,6 +547,10 @@ class ApprovalServer:
         market_type: str = 'HK',
         llm_enabled: bool = False,
         positions_provider=None,
+        on_approved=None,
+        on_demo_proposal=None,
+        on_demo_exit=None,
+        on_demo_sell=None,
     ):
         self.store = store
         self.host = host
@@ -446,6 +559,10 @@ class ApprovalServer:
         self.market_type = market_type
         self.llm_enabled = bool(llm_enabled)
         self.positions_provider = positions_provider
+        self.on_approved = on_approved
+        self.on_demo_proposal = on_demo_proposal
+        self.on_demo_exit = on_demo_exit
+        self.on_demo_sell = on_demo_sell
         self.httpd: Any = None
         self._thread: Any = None
 
@@ -499,6 +616,14 @@ class ApprovalServer:
                         payload = {'ok': False, 'data': {'candidates': []}, 'error': str(e)}
                     payload['server_time'] = time.time()
                     self._send_json(payload)
+                elif path == '/api/market-brief':
+                    try:
+                        from scripts.live_trading import market_brief
+                        payload = {'ok': True, 'brief': market_brief.load_brief()}
+                    except Exception as e:
+                        payload = {'ok': False, 'brief': {}, 'error': str(e)}
+                    payload['server_time'] = time.time()
+                    self._send_json(payload)
                 elif path == '/api/positions':
                     payload = {}
                     if server_ref.positions_provider is not None:
@@ -517,6 +642,10 @@ class ApprovalServer:
                     payload.setdefault('count', len(positions))
                     payload['server_time'] = time.time()
                     self._send_json(payload)
+                elif path == '/static/style.css':
+                    self._send_text(_STATIC_CSS, 'text/css; charset=utf-8')
+                elif path == '/static/app.js':
+                    self._send_text(_STATIC_JS, 'text/javascript; charset=utf-8')
                 elif path == '/favicon.ico':
                     self.send_response(204)
                     self.end_headers()
@@ -538,6 +667,10 @@ class ApprovalServer:
                             self._send_json({'ok': False, 'error': '建议不存在'}, status=404)
                             return
                         if action == 'add':
+                            valid, vmsg = watchlist.validate_futu_symbol(item.get('code', ''))
+                            if not valid:
+                                self._send_json({'ok': False, 'error': vmsg}, status=400)
+                                return
                             if item.get('market') == 'HK':
                                 added = watchlist.add_hk_watch(item.get('code', ''))
                             else:
@@ -585,8 +718,70 @@ class ApprovalServer:
                             'status': state,
                         }, status=409)
                         return
+                    # 点「下单」后的可选回调（周末演示模式由 manager 注入）
+                    if action == 'approve' and server_ref.on_approved is not None:
+                        try:
+                            server_ref.on_approved(pid)
+                        except Exception as e:
+                            logger.warning(f'[Approval] 下单后回调异常: {e}')
                     item = server_ref.store.get(pid)
                     self._send_json({'ok': True, 'status': item['status'] if item else action})
+                    return
+                # ── 周末演示模式（仅本机；manager 回调内部会校验 SIMULATE）──
+                if len(parts) == 3 and parts[0] == 'api' and parts[1] == 'dev':
+                    try:
+                        length = int(self.headers.get('Content-Length', 0) or 0)
+                        body = {}
+                        if length > 0:
+                            body = json.loads(self.rfile.read(length).decode('utf-8') or '{}')
+                    except Exception:
+                        body = {}
+                    if parts[2] == 'simulate-proposal':
+                        if server_ref.on_demo_proposal is None:
+                            self._send_json({'ok': False, 'error': '演示钩子未注入'}, status=400)
+                            return
+                        code = str(body.get('code', '')).strip().upper()
+                        try:
+                            item = server_ref.on_demo_proposal(code)
+                            self._send_json({'ok': True, 'item': item})
+                        except Exception as e:
+                            self._send_json({'ok': False, 'error': str(e)}, status=400)
+                        return
+                    if parts[2] == 'simulate-exit':
+                        if server_ref.on_demo_exit is None:
+                            self._send_json({'ok': False, 'error': '演示钩子未注入'}, status=400)
+                            return
+                        code = str(body.get('code', '')).strip().upper()
+                        try:
+                            price = float(body.get('exit_price') or 0)
+                        except (TypeError, ValueError):
+                            price = 0.0
+                        try:
+                            ok = server_ref.on_demo_exit(code, price)
+                            self._send_json({'ok': bool(ok), 'code': code,
+                                             'exit_price': price if ok else None})
+                        except Exception as e:
+                            self._send_json({'ok': False, 'error': str(e)}, status=400)
+                        return
+                    if parts[2] == 'simulate-sell':
+                        if server_ref.on_demo_sell is None:
+                            self._send_json({'ok': False, 'error': '演示钩子未注入'}, status=400)
+                            return
+                        code = str(body.get('code', '')).strip().upper()
+                        reason = str(body.get('reason', '模拟止盈触发（演示）'))
+                        try:
+                            try:
+                                pnl_pct = float(body.get('pnl_pct')) \
+                                    if body.get('pnl_pct') is not None else None
+                            except (TypeError, ValueError):
+                                pnl_pct = None
+                            item = server_ref.on_demo_sell(code, reason, pnl_pct)
+                            self._send_json({'ok': True, 'item': item})
+                        except Exception as e:
+                            self._send_json({'ok': False, 'error': str(e)}, status=400)
+                        return
+                    self._send_json({'ok': False, 'error': 'unknown dev action'}, status=400)
+                    return
                 else:
                     self._send_json({'ok': False, 'error': 'not found'}, status=404)
 

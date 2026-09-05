@@ -59,6 +59,7 @@ class ProposalStore:
             item.update(kwargs)
             self._items[proposal_id] = item
         self._log('created', proposal_id, item.get('stock_code', ''), '')
+        self._record_ledger('proposal_created', item)
         return dict(item)
 
     def approve(self, proposal_id: str) -> bool:
@@ -66,6 +67,7 @@ class ProposalStore:
         ok = self._transition(proposal_id, 'approved', '用户点击下单')
         if ok:
             self._log('approved', proposal_id, self._code(proposal_id), '用户点击下单')
+            self._record_ledger('human_decision', self.get(proposal_id), {'action': 'approve'})
         return ok
 
     def reject(self, proposal_id: str, note: str = '') -> bool:
@@ -74,6 +76,7 @@ class ProposalStore:
         ok = self._transition(proposal_id, 'rejected', reason)
         if ok:
             self._log('rejected', proposal_id, self._code(proposal_id), reason)
+            self._record_ledger('human_decision', self.get(proposal_id), {'action': 'reject', 'note': note})
         return ok
 
     def mark(self, proposal_id: str, status: str, note: str = '') -> bool:
@@ -81,15 +84,21 @@ class ProposalStore:
         ok = self._transition(proposal_id, status, note)
         if ok:
             self._log(f'mark:{status}', proposal_id, self._code(proposal_id), note)
+            if status in ('executing', 'executed', 'failed', 'skipped', 'expired'):
+                self._record_ledger('execution_status', self.get(proposal_id), {'status': status, 'note': note})
         return ok
 
     def expire_old(self, now: Optional[float] = None) -> int:
-        """把超过 TTL 仍未操作的提案标记为 expired。"""
+        """把超过 TTL 仍未操作的“买入提案”标记为 expired。
+        卖出提案不在此过期：超时由卖出确认轮询自动执行（兜底），
+        不能被 expire_old 提前打成终态。"""
         now = time.time() if now is None else now
         expired = 0
         for pid in list(self._items.keys()):
             item = self.get(pid)
             if not item:
+                continue
+            if item.get('side') == 'sell':
                 continue
             if item['status'] in ('pending', 'approved') and now > item.get('expires_at', now):
                 if self._transition(pid, 'expired', '超时未确认，自动过期'):
@@ -154,6 +163,33 @@ class ProposalStore:
         with self._lock:
             item = self._items.get(proposal_id)
             return item.get('stock_code', '') if item else ''
+
+    @staticmethod
+    def _record_ledger(event_type: str, item: Optional[Dict[str, Any]], extra: Optional[Dict[str, Any]] = None):
+        """把事件写入共享评估账本（写失败不影响交易）。"""
+        if not item:
+            return
+        try:
+            from scripts.live_trading.decision_ledger import ledger
+            fields = {
+                'proposal_id': item.get('id'),
+                'stock_code': item.get('stock_code'),
+                'market_type': item.get('market_type'),
+                'env': item.get('env'),
+                'price': item.get('price'),
+                'quantity': item.get('quantity'),
+                'estimated_cost': item.get('estimated_cost'),
+                'entry_mode': item.get('entry_mode'),
+                'kline_score': item.get('kline_score'),
+                'reason': item.get('reason'),
+                'context': item.get('context'),
+                'llm': item.get('llm'),
+            }
+            if extra:
+                fields.update(extra)
+            ledger.record(event_type, **fields)
+        except Exception:
+            pass
 
     def _log(self, action: str, proposal_id: str, stock_code: str, note: str):
         try:

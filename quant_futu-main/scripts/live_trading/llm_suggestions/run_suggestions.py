@@ -92,6 +92,11 @@ def main():
     print(f'   文件: {path}')
     print(f'   宏观结论: {payload["summary"]}')
     print('=' * 60)
+    if not payload['candidates']:
+        print('ℹ️  今日无明确候选（报告方向不明，不硬推）。')
+        print('   文件仍会保存，页面显示"暂无建议候选"。')
+        print('=' * 60)
+        return 0
     for c in payload['candidates']:
         print(f"[{c['market']}] {c['code']} {c.get('name', '')} | {c.get('direction', '')} "
               f"| conf={c.get('confidence', 0):.2f} | {c.get('horizon', '')}")

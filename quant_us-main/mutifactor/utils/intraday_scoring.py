@@ -51,6 +51,19 @@ def rsi_from_prices(prices: pd.Series, period: int = 14) -> float:
     return float(100 - 100 / (1 + avg_gain / avg_loss))
 
 
+def _rsi_series(prices: pd.Series, period: int = 14) -> pd.Series:
+    """RSI(period) 序列（与 rsi_from_prices 同算法）。"""
+    if len(prices) < period + 1:
+        return pd.Series(np.nan, index=prices.index)
+    deltas = prices.diff()
+    gains = deltas.clip(lower=0)
+    losses = -deltas.clip(upper=0)
+    avg_gain = gains.rolling(period).mean()
+    avg_loss = losses.rolling(period).mean()
+    rsi = 100 - 100 / (1 + avg_gain / avg_loss)
+    return rsi.where(np.isfinite(rsi), np.nan)
+
+
 # ─── 各维度评分函数 ──────────────────────────────────────────────────────
 
 def score_oversold_atr(df: pd.DataFrame, atr_pct: float) -> Tuple[int, float, float]:
@@ -133,26 +146,117 @@ def score_volume(volumes: pd.Series) -> int:
     return min(score, 2)  # 上限 2
 
 
-def score_volume_divergence(closes: pd.Series, volumes: pd.Series) -> int:
+def score_true_divergence(closes: pd.Series, volumes: pd.Series,
+                          window: int = 12, rsi_period: int = 14) -> Tuple[int, Dict[str, Any]]:
     """
-    量价背离评分（0-3 分）
-    - 连续 2 根下跌 + 缩量（< 前5均量 70%）→ +2（下跌衰竭）
-    - 反弹 + 放量（> 前5均量 150%）→ +1（反弹确认）
+    真实底背离（0-3 分）：
+    - 价格创出“新低”（最近 window 根的最低点 < 前一个 window 的最低点）；
+    - 但 RSI 谷底没有同步创新低（RSI 更高）→ +2（真底背离）；
+    - 创新低时缩量（< 前段均量 70%）→ +1（抛压衰竭）。
+    替代原先只看“最近3根缩量下跌”的伪背离。
     """
-    if len(closes) < 10 or len(volumes) < 10:
-        return 0
-    c = closes.tail(10).values
-    v = volumes.tail(10).values
+    detail: Dict[str, Any] = {'type': 'none', 'score': 0}
+    if len(closes) < 2 * window + rsi_period + 3 or len(volumes) < 2 * window:
+        detail['detail'] = '数据不足'
+        return 0, detail
+    vals = closes.values
+    vols = volumes.values.astype(float)
+    rsi = _rsi_series(closes, rsi_period).values
+    first = vals[-2 * window:-window]
+    second = vals[-window:]
+    fi = int(np.argmin(first))
+    si = int(np.argmin(second))
+    detail.update({
+        'first_low': round(float(first[fi]), 3),
+        'last_low': round(float(second[si]), 3),
+    })
     score = 0
-    if c[-1] < c[-2] < c[-3]:
-        avg5 = float(v[-6:-1].mean())
-        if avg5 > 0 and v[-1] < avg5 * 0.7:
+    if second[si] < first[fi] * 0.9999:
+        detail['type'] = 'new_low'
+        r1 = rsi[-2 * window + fi]
+        r2 = rsi[-window + si]
+        if np.isfinite(r1) and np.isfinite(r2) and float(r2) > float(r1):
             score += 2
-    if c[-1] > c[-2]:
-        avg5 = float(v[-6:-1].mean())
-        if avg5 > 0 and v[-1] > avg5 * 1.5:
+            detail['bullish_divergence'] = True
+            detail['rsi_first_low'] = round(float(r1), 1)
+            detail['rsi_last_low'] = round(float(r2), 1)
+        # 创新低是否缩量（抛压衰竭）
+        avg_vol = float(np.mean(vols[-2 * window:-window]))
+        if avg_vol > 0 and vols[-window + si] < avg_vol * 0.7:
             score += 1
-    return min(score, 3)  # 上限 3
+            detail['low_volume_shrink'] = True
+    detail['score'] = min(score, 3)
+    return min(score, 3), detail
+
+
+def reversal_confirmation(df: pd.DataFrame, atr_pct: float) -> Tuple[bool, Dict[str, Any]]:
+    """
+    P1-1 反转确认（硬条件，不再“越跌越买”）：
+    满足任一即算出现反转迹象：
+      - 阳线收高：最后一根 close > open 且 close > 前一根 close
+      - 长下影探底：下影线 ≥ 60% 振幅，且 low 跌破前几根低点后收回
+      - 自低点回升：收盘较近 3 根最低点回升 ≥ 0.5×ATR
+    """
+    detail: Dict[str, Any] = {'ok': False, 'conditions': [], 'detail': '无反转确认'}
+    if df is None or len(df) < 5:
+        return False, detail
+    closes = df['close'].values
+    opens = df['open'].values
+    highs = df['high'].values
+    lows = df['low'].values
+    cur = float(closes[-1])
+    prev = float(closes[-2])
+    o, h, l = float(opens[-1]), float(highs[-1]), float(lows[-1])
+    conds = []
+    if cur > o and cur > prev:
+        conds.append('阳线收高')
+    rng = h - l
+    lower_shadow = min(o, cur) - l
+    if rng > 0 and lower_shadow >= 0.6 * rng and l <= float(np.min(lows[-4:-1])):
+        conds.append('长下影探底')
+    atr_abs = atr_pct * cur
+    # “自低点回升”必须是收高/收平后再算，否则大跌大振幅也会误报
+    if cur >= prev and atr_abs > 0 and (cur - float(np.min(lows[-3:]))) >= 0.5 * atr_abs:
+        conds.append('自低点回升')
+    if conds:
+        detail.update({'ok': True, 'conditions': conds, 'detail': '、'.join(conds)})
+    return bool(conds), detail
+
+
+def score_higher_tf_env(df: Optional[pd.DataFrame]) -> Tuple[int, Dict[str, Any]]:
+    """
+    P1-2 60分钟环境评分（建议只对“评分已达标”的信号计算并缓存）：
+      - 60m 强下行（收在 MA20 下方 + MA20 走低 + RSI<45）→ -2（禁止/强提示）
+      - 60m RSI≥70（超买区）→ -1
+      - 60m 深度超卖（RSI≤35 且收在中轨下方，通常配合日线多头回踩）→ +1
+      - 其余 → 0
+    """
+    if df is None or len(df) < 30:
+        return 0, {'score': 0, 'detail': '60m数据不足'}
+    closes = df['close']
+    cur = float(closes.iloc[-1])
+    rsi = rsi_from_prices(closes)
+    ma20 = float(closes.rolling(20).mean().iloc[-1])
+    ma20_prev = float(closes.rolling(20).mean().shift(5).iloc[-1]) if len(closes) >= 25 else ma20
+    std = float(closes.rolling(20).std().iloc[-1])
+    mid = float(closes.rolling(20).mean().iloc[-1])
+    lower = mid - 2.0 * std
+    upper = mid + 2.0 * std
+    pos = 50.0 if upper == lower else float((cur - lower) / (upper - lower) * 100)
+    base = {'rsi': round(rsi, 1), 'ma20': round(ma20, 3), 'bb_pos': round(pos, 1)}
+    if cur < ma20 and ma20 <= ma20_prev and rsi < 45:
+        base.update({'trend': 'strong_down',
+                     'detail': f'60m强下行: RSI {rsi:.0f}<45 且收于MA20下方'})
+        return -2, base
+    if rsi >= 70:
+        base.update({'trend': 'overbought', 'detail': f'60m超买 RSI {rsi:.0f}≥70'})
+        return -1, base
+    if rsi <= 35 and cur < mid:
+        base.update({'trend': 'deep_oversold',
+                     'detail': f'60m深度超卖 RSI {rsi:.0f}≤35'})
+        return 1, base
+    base.update({'trend': 'neutral', 'detail': '60m环境中性'})
+    return 0, base
 
 
 def score_drawdown_atr(prices: pd.Series, atr_pct: float) -> Tuple[int, Dict[str, Any]]:
@@ -274,10 +378,15 @@ def analyze_score(
       rsi_score    0-3   超卖（14根高点回撤 ÷ ATR，阈值 3.0/2.0/1.0×ATR）
       bb_score     0-2   布林带（位置 <10/20/35%）
       vol_score    0-2   成交量（放量确认）
-      vol_div      0-3   量价背离（缩量止跌 / 放量反弹）
+      vol_div      0-3   真实底背离（价格新低但 RSI 不创新低 / 缩量创新低）
       trend_adj   -3-0  趋势过滤（strong_down→-3，strong_up→-1，weak→0）
       ──────────────────────────────
       total       0-10
+
+    P1 追加字段（供实盘闸门用，不改总分语义）：
+      reversal.ok        反转确认（阳线收高 / 长下影 / 自低点回升≥0.5ATR）
+      rr                 盈亏比：(目标价-入场价) / max(-5%止损, 2×ATR)
+      divergence_detail  真实背离明细
 
     信号：
       adj_total >= buy_threshold         → buy
@@ -295,13 +404,41 @@ def analyze_score(
     rsi_score, dd_atr, rsi = score_oversold_atr(df, atr_pct)
     bb_score, bb_pos      = score_bollinger(closes)
     vol_score              = score_volume(volumes)
-    vol_div                = score_volume_divergence(closes, volumes)
+    vol_div, div_detail    = score_true_divergence(closes, volumes)
+    rev_ok, rev_detail     = reversal_confirmation(df, atr_pct)
     dd_score, dd_details   = score_drawdown_atr(closes, atr_pct)
     trend_adj, trend       = score_trend_filter(df)
+
+    # P1-3 盈亏比参考：目标价取布林中轨（若高于入场价），
+    # 风险取 max(固定-5%止损距离, 2×ATR)，只做展示/闸门，不改总分
+    entry = float(current_price) if current_price and current_price > 0 \
+        else float(closes.iloc[-1])
+    atr_abs = atr_pct * entry
+    stop_ref = entry * (1 - 0.05)
+    risk = max(entry - stop_ref, 2.0 * atr_abs, entry * 0.001)
+    bb_mid = float(closes.rolling(20).mean().iloc[-1]) if len(closes) >= 20 \
+        else float(closes.mean())
+    target = bb_mid if bb_mid > entry else None
+    rr = (target - entry) / risk if target else 0.0
 
     raw_total = rsi_score + bb_score + vol_score + vol_div  # 不含趋势调整
     adj_total = raw_total + trend_adj
     total = max(adj_total, 0)
+
+    # 人类可读明细（确认页/日志展示）
+    parts = [
+        f"超卖{rsi_score}({dd_atr:.1f}×ATR)",
+        f"布林{bb_score}({bb_pos:.0f}%)",
+        f"量{vol_score}",
+        f"背离{vol_div}",
+    ]
+    if rev_ok:
+        parts.append(f"反转确认[{rev_detail.get('detail', '')}]")
+    else:
+        parts.append("无反转确认")
+    if trend_adj:
+        parts.append(f"趋势调整{trend_adj}")
+    details = " ".join(parts)
 
     trend_name = trend.get('trend', 'weak')
     # BUY：调整后总分够，或弱趋势里深度超跌（raw>=7 绕过阈值）
@@ -313,19 +450,25 @@ def analyze_score(
         signal = 'none'
 
     return {
-        'score':       total,
-        'raw_score':   raw_total,           # 不含趋势调整的原始分
-        'signal':      signal,
-        'rsi':         round(rsi, 1),
-        'rsi_score':   rsi_score,           # 展示用
-        'bb_position': round(bb_pos, 1),     # 展示用
-        'bb_score':    bb_score,            # 展示用
+        'score':        total,
+        'raw_score':    raw_total,           # 不含趋势调整的原始分
+        'signal':       signal,
+        'details':      details,
+        'rsi':          round(rsi, 1),
+        'rsi_score':    rsi_score,           # 展示用
+        'bb_position':  round(bb_pos, 1),     # 展示用
+        'bb_score':     bb_score,            # 展示用
         'volume_score': vol_score,
         'volume_divergence_score': vol_div,
+        'divergence_detail': div_detail,
+        'reversal':     rev_detail,
         'drawdown_score': dd_score,          # 展示用（不参与总分）
         'drawdown':       dd_details,
         'atr_pct':        round(atr_pct * 100, 3),
         'dd_atr':         round(dd_atr, 2),
+        'rr':             round(rr, 2),
+        'target_price':   round(target, 3) if target else None,
+        'stop_ref':       round(stop_ref, 3),
         'trend':          trend,
         'trend_adj':      trend_adj,
         'bars_count':     len(df),

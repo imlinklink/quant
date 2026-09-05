@@ -13,9 +13,11 @@ logger = logging.getLogger(__name__)
 class StatePersistence:
     """状态持久化管理器"""
 
-    def __init__(self):
+    def __init__(self, env: str = 'REAL'):
         self._yaml_storage = None
         self._trading_env = None
+        # 实例默认环境：调用方不传 env 时使用（修复 SIMULATE 误写 REAL 命名空间）
+        self._default_env = 'REAL' if str(env).upper() == 'REAL' else 'SIMULATE'
         self._init_db()
 
     def _init_db(self):
@@ -32,11 +34,12 @@ class StatePersistence:
             logger.error(f"数据库存储模块加载失败 - 系统错误: {type(e).__name__}: {e}", exc_info=True)
             raise
 
-    def load_state(self, env: str = 'REAL') -> Optional[Dict]:
+    def load_state(self, env: Optional[str] = None) -> Optional[Dict]:
         """加载交易状态"""
         if not self._yaml_storage:
             return None
         try:
+            env = self._default_env if env is None else env
             trading_env = self._trading_env.REAL if env == 'REAL' else self._trading_env.SIMULATE
             return self._yaml_storage.load_trading_state(trading_env)
         except DatabaseError as e:
@@ -50,11 +53,12 @@ class StatePersistence:
             raise
 
     def save_state(self, positions: Dict, used_capital: float, capital: float,
-                   last_buy_execution: int, env: str = 'REAL'):
+                   last_buy_execution: int, env: Optional[str] = None):
         """保存交易状态"""
         if not self._yaml_storage:
             return
         try:
+            env = self._default_env if env is None else env
             trading_env = self._trading_env.REAL if env == 'REAL' else self._trading_env.SIMULATE
             self._yaml_storage.save_trading_state(
                 positions=positions,
@@ -71,11 +75,12 @@ class StatePersistence:
             logger.error(f"保存状态失败 - 未知错误: {type(e).__name__}: {e}", exc_info=True)
             raise
 
-    def get_today_buy_quantity(self, env: str = 'REAL') -> int:
+    def get_today_buy_quantity(self, env: Optional[str] = None) -> int:
         """获取今日已买入股数"""
         if not self._yaml_storage:
             return 0
         try:
+            env = self._default_env if env is None else env
             trading_env = self._trading_env.REAL if env == 'REAL' else self._trading_env.SIMULATE
             return self._yaml_storage.get_today_buy_quantity(trading_env)
         except DatabaseError as e:
@@ -88,11 +93,12 @@ class StatePersistence:
             logger.error(f"获取今日买入数量失败 - 未知错误: {type(e).__name__}: {e}", exc_info=True)
             raise
 
-    def get_today_bought_stocks(self, env: str = 'REAL') -> set:
+    def get_today_bought_stocks(self, env: Optional[str] = None) -> set:
         """获取今日已买入的股票代码集合"""
         if not self._yaml_storage:
             return set()
         try:
+            env = self._default_env if env is None else env
             trading_env = self._trading_env.REAL if env == 'REAL' else self._trading_env.SIMULATE
             return self._yaml_storage.get_today_bought_stocks(trading_env)
         except DatabaseError as e:
@@ -106,12 +112,13 @@ class StatePersistence:
             return set()
 
     def save_position(self, stock_code: str, stock_name: str, quantity: int,
-                      cost_price: float, highest_price: float, env: str = 'REAL',
+                      cost_price: float, highest_price: float, env: Optional[str] = None,
                       manual: bool = False):
         """保存持仓"""
         if not self._yaml_storage:
             return
         try:
+            env = self._default_env if env is None else env
             trading_env = self._trading_env.REAL if env == 'REAL' else self._trading_env.SIMULATE
             self._yaml_storage.save_position(stock_code, stock_name, quantity,
                                            cost_price, highest_price, trading_env,
@@ -123,22 +130,24 @@ class StatePersistence:
         except Exception as e:
             logger.warning(f"保存持仓失败: {type(e).__name__}: {e}")
 
-    def get_positions(self, env: str = 'REAL') -> List[Dict]:
+    def get_positions(self, env: Optional[str] = None) -> List[Dict]:
         """获取持仓列表"""
         if not self._yaml_storage:
             return []
         try:
+            env = self._default_env if env is None else env
             trading_env = self._trading_env.REAL if env == 'REAL' else self._trading_env.SIMULATE
             return self._yaml_storage.get_positions(trading_env)
         except Exception as e:
             logger.warning(f"获取持仓失败: {type(e).__name__}: {e}")
             return []
 
-    def clear_positions(self, env: str = 'REAL'):
+    def clear_positions(self, env: Optional[str] = None):
         """清空持仓"""
         if not self._yaml_storage:
             return
         try:
+            env = self._default_env if env is None else env
             trading_env = self._trading_env.REAL if env == 'REAL' else self._trading_env.SIMULATE
             self._yaml_storage.clear_positions(trading_env)
         except DatabaseError as e:
@@ -147,11 +156,13 @@ class StatePersistence:
             logger.warning(f"清空持仓失败: {type(e).__name__}: {e}")
 
     def save_trade(self, stock_code: str, stock_name: str, quantity: int,
-                   price: float, direction: str, order_id: str, env: str = 'REAL'):
+                   price: float, direction: str, order_id: str,
+                   env: Optional[str] = None):
         """保存交易记录"""
         if not self._yaml_storage:
             return
         try:
+            env = self._default_env if env is None else env
             trading_env = self._trading_env.REAL if env == 'REAL' else self._trading_env.SIMULATE
             self._yaml_storage.save_trade(
                 stock_code=stock_code,
@@ -170,11 +181,13 @@ class StatePersistence:
         except Exception as e:
             logger.error(f"保存交易记录失败: {type(e).__name__}: {e}", exc_info=True)
 
-    def save_capital(self, total_capital: float, used_capital: float, env: str = 'REAL'):
+    def save_capital(self, total_capital: float, used_capital: float,
+                     env: Optional[str] = None):
         """保存资金记录"""
         if not self._yaml_storage:
             return
         try:
+            env = self._default_env if env is None else env
             trading_env = self._trading_env.REAL if env == 'REAL' else self._trading_env.SIMULATE
             self._yaml_storage.save_capital_record(total_capital, used_capital, trading_env)
         except DatabaseError as e:
@@ -184,11 +197,13 @@ class StatePersistence:
         except Exception as e:
             logger.warning(f"保存资金记录失败: {type(e).__name__}: {e}")
 
-    def save_selection_results(self, stock_details: List[Dict], env: str = 'REAL'):
+    def save_selection_results(self, stock_details: List[Dict],
+                               env: Optional[str] = None):
         """保存选股结果"""
         if not self._yaml_storage:
             return
         try:
+            env = self._default_env if env is None else env
             trading_env = self._trading_env.REAL if env == 'REAL' else self._trading_env.SIMULATE
             self._yaml_storage.save_selection_results(stock_details, trading_env)
         except DatabaseError as e:

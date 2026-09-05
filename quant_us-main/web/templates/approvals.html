@@ -50,6 +50,12 @@
   .countdown { color: #f87171; font-size: 13px; }
   .note { font-size: 12px; color: #64748b; margin-top: 6px; }
   a.back { color: #38bdf8; text-decoration: none; font-size: 13px; margin-left: auto; }
+  .brief { max-width: 1080px; margin: 14px auto -4px; padding: 10px 18px;
+           border-radius: 8px; font-size: 13px; line-height: 1.5;
+           background: #1a1d27; border: 1px solid #2d3748; color: #e2e8f0; }
+  .brief.cautious { border-left: 4px solid #f59e0b; }
+  .brief.defensive { border-left: 4px solid #ef4444; }
+  .brief.normal { border-left: 4px solid #10b981; }
 </style>
 </head>
 <body>
@@ -60,6 +66,7 @@
   <a class="back" href="/">← 返回行情页</a>
   <span id="clock" class="muted"></span>
 </header>
+<div id="brief" class="brief" style="display:none"></div>
 <main>
   <div id="content"><div class="empty">加载中…</div></div>
 </main>
@@ -68,6 +75,7 @@ const STATUS_TEXT = {
   pending: '待确认', approved: '已确认，准备下单', executing: '正在下单',
   executed: '已成交', rejected: '已拒绝', expired: '已过期', failed: '执行失败', skipped: '已跳过'
 };
+const MODE_LABEL = { dip_buy: '日内抄底', donchian: '日线突破' };
 function esc(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g,
     c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -116,11 +124,13 @@ function card(item, now) {
     '<div class="kv"><span>信号价 <b>' + esc(item.price) + '</b></span>' +
     '<span>数量 <b>' + esc(item.quantity) + '</b> 股</span>' +
     '<span>预计金额 <b>$' + esc(item.estimated_cost) + '</b></span>' +
-    '<span>入场方式 <b>' + esc(item.entry_mode || '-') + '</b></span>' +
+    '<span>策略线 <b>' + esc(MODE_LABEL[item.entry_mode] || item.entry_mode || '-') + '</b></span>' +
     '<span>信号时间 ' + fmtTs(item.created_at) + '</span>' + countdown + '</div>' +
     (kline ? '<div class="kv">' + kline + '</div>' : '') +
     '<div class="section-title">规则触发理由</div>' +
     '<div class="reason-box">' + esc(item.reason || '无') + '</div>' +
+    (item.context ? '<div class="section-title">消息面上下文</div>' +
+      '<div class="reason-box" style="white-space:pre-line">' + esc(item.context) + '</div>' : '') +
     '<div class="section-title">大模型判定</div>' + llmHtml(item.llm) +
     (item.note ? '<div class="note">备注：' + esc(item.note) + '</div>' : '') +
     buttons + '</div>';
@@ -144,7 +154,7 @@ async function load() {
       (b.created_at || 0) - (a.created_at || 0));
     const el = document.getElementById('content');
     if (!items.length) {
-      el.innerHTML = '<div class="empty">暂无待确认的交易信号<br><span class="note">抄底评分达到阈值时会出现在这里，点「下单」才真正执行。</span></div>';
+      el.innerHTML = '<div class="empty">暂无待确认的交易信号<br><span class="note">日内抄底 / 日线突破信号达到阈值时会出现在这里，点「下单」才真正执行。</span></div>';
       return;
     }
     el.innerHTML = items.map(i => card(i, now)).join('');
@@ -168,8 +178,25 @@ document.addEventListener('click', async function (e) {
     load();
   }
 });
+async function loadBrief() {
+  try {
+    const r = await fetch('/api/market-brief');
+    const d = await r.json();
+    const b = d.brief || {};
+    const el = document.getElementById('brief');
+    if (!b.generated_at) { el.style.display = 'none'; return; }
+    const riskLabel = {normal:'正常', cautious:'谨慎', defensive:'防御'}[b.risk_level] || b.risk_level;
+    const freqLabel = {normal:'按计划买入', reduce:'减少买入', avoid:'今日不新增买入'}[b.buy_frequency] || b.buy_frequency;
+    el.className = 'brief ' + (b.risk_level || 'normal');
+    el.style.display = 'block';
+    el.innerHTML = '📋 盘前市场状态：<b>' + esc(riskLabel) + '</b> · 买入策略：<b>' + esc(freqLabel) +
+      '</b>' + (b.risk_note ? '<br>' + esc(b.risk_note) : '');
+  } catch (e) { }
+}
 load();
+loadBrief();
 setInterval(load, 2000);
+setInterval(loadBrief, 30000);
 </script>
 </body>
 </html>

@@ -5,6 +5,7 @@
 """
 import argparse
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -105,6 +106,8 @@ def start_trading(config_path: str, debug: bool = False):
             manager.stop()
             process_manager.cleanup()
             shutdown_requested = True
+            # 富途等库可能残留非守护线程；清理已完成，直接结束进程
+            os._exit(0)
 
         signal.signal(signal.SIGINT, signal_handler)   # Ctrl+C
         signal.signal(signal.SIGTERM, signal_handler)  # make stop / kill

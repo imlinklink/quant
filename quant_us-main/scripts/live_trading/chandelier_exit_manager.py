@@ -47,12 +47,26 @@ from typing import Dict, List, Optional, Tuple, Any, Set
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 import yaml
 
+try:
+    from scripts.live_trading.position_registry import REGISTRY
+except Exception:  # 独立运行/导入失败时降级为空登记簿
+    REGISTRY = None
+
 # 自动加载配置（绝对路径，修复报错）
 CONFIG_PATH = os.path.join(BASE_DIR, "config.yaml")
 with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
     config = yaml.safe_load(f)
 
 logger = logging.getLogger(__name__)
+
+
+def _us_ledger(event_type: str, **fields):
+    """写入美股评估账本（写失败不影响交易）。"""
+    try:
+        from scripts.live_trading.decision_ledger import ledger
+        ledger.record(event_type, market_type='US', **fields)
+    except Exception:
+        pass
 
 
 # ANSI 颜色代码
@@ -275,8 +289,16 @@ class PositionStateManager:
             self.strategy = _DummyStrategy(config)
         self._lock = threading.RLock()
         self._positions: Dict[str, Dict] = {}  # code -> {entry_price, direction, qty, stop_price, profit_price}
+        self.profiles: Dict[str, Any] = (config or {}).get('profiles') or {}
         self._stopped = False
         self.ignore_hk = config.get('ignore_hk_stocks', True)
+
+    def _profile_for(self, mode: str) -> Optional[Dict[str, Any]]:
+        """按策略线取出场参数覆盖；未知/手动持仓用默认（返回 None）。"""
+        if not mode or mode == 'manual':
+            return None
+        profile = self.profiles.get(mode)
+        return profile if isinstance(profile, dict) else None
 
     def stop(self):
         self._stopped = True
@@ -299,15 +321,24 @@ class PositionStateManager:
                     continue
 
                 if code in self._positions:
+                    # 持仓已在簿：若策略线登记变化（如系统内新买入刚登记），
+                    # 清掉旧策略状态，下轮用新参数重新注册
+                    mode = REGISTRY.mode(code) if REGISTRY else 'manual'
+                    if mode != self._positions[code].get('mode'):
+                        self.strategy.on_exit(code)
+                        self._positions[code]['mode'] = mode
                     continue
                 self._positions[code] = {
                     'entry_price': p.get('average_cost', 0),
                     'direction': 'long' if p.get('position_side', 'LONG') in ('LONG', 'long') else 'short',
-                    'qty': abs(p.get('qty', 0))
+                    'qty': abs(p.get('qty', 0)),
+                    'mode': REGISTRY.mode(code) if REGISTRY else 'manual',
                 }
 
             for code in old_codes - new_codes:
                 self.strategy.on_exit(code)
+                if REGISTRY:
+                    REGISTRY.close(code)  # 券商/模拟簿里已无此仓 → 清登记
                 if code in self._positions:
                     del self._positions[code]
 
@@ -325,11 +356,13 @@ class PositionStateManager:
             pos = self._positions.get(code)
             if not pos:
                 return
+            profile = self._profile_for(pos.get('mode', 'manual'))
             self.strategy.on_entry(
                 code,
                 pos['entry_price'] or price,
                 atr,
-                pos['direction']
+                pos['direction'],
+                exit_params=profile,
             )
 
     def all_codes(self):
@@ -361,7 +394,9 @@ class _DummyStrategy:
         self.atr_trailing_mult = config.get('atr_trailing_mult', 2.0)
         self.positions = {}
 
-    def on_entry(self, stock_code: str, entry_price: float, current_atr: float, direction: str):
+    def on_entry(self, stock_code: str, entry_price: float, current_atr: float,
+                 direction: str, exit_params: Optional[Dict] = None):
+        # 兜底策略不区分策略线参数；如需区分应确保 mutifactor.strategies.dual_chandelier 可导入
         if direction == 'long':
             stop = round(entry_price * (1 - self.fixed_stop_pct), 4)
         else:
@@ -500,6 +535,8 @@ class FutuTickSubscriber:
         self.callback = None
         self.ignore_hk = config.get('ignore_hk_stocks', True)
         self._subscribed_codes = set()
+        # 开发/周末演示用：强制覆盖价格（仅 DRY-RUN 接口会设置）
+        self._force_prices: Dict[str, float] = {}
 
     def set_callback(self, cb):
         self.callback = cb
@@ -626,6 +663,19 @@ class FutuTickSubscriber:
             try:
                 with self.pool.get_quote_ctx() as ctx:
                     for code in codes:
+                        forced = None
+                        with self._lock:
+                            forced = self._force_prices.get(code)
+                        if forced and forced > 0:
+                            with self._lock:
+                                old = self._prices.get(code, 0)
+                                self._prices[code] = float(forced)
+                            if self.callback and abs(float(forced) - old) >= self.PRICE_EPSILON:
+                                try:
+                                    self.callback(code, float(forced))
+                                except Exception as e:
+                                    logger.error(f"回调异常: {e}", exc_info=True)
+                            continue
                         price = self.get_stock_price(ctx, code)
                         if price is None:
                             continue
@@ -649,6 +699,20 @@ class FutuTickSubscriber:
         with self._lock:
             p = self._prices.get(code, 0.0)
             return p if p > 0 else 0.0
+
+    def force_price(self, code: str, price: float):
+        """开发/周末演示用：强制某只股票的价格（不清除则持续生效）。"""
+        price = float(price or 0)
+        with self._lock:
+            if price > 0:
+                self._force_prices[code] = price
+                old = self._prices.get(code, 0)
+                self._prices[code] = price
+            else:
+                self._force_prices.pop(code, None)
+                self._prices.pop(code, None)
+        if price > 0:
+            logger.info(f"📡 [DEV] 强制价格 {code} = {price:.2f}")
 
     def add_codes(self, codes: List[str]):
         with self._lock:
@@ -1074,6 +1138,26 @@ class ChandelierExitManager:
         if self._stop_event.is_set():
             return []
 
+        # DRY-RUN：不用券商真实持仓，改用“模拟持仓登记簿”，
+        # 让模拟买入也能完整演练出场逻辑（P0-2）
+        if self.dry_run:
+            if REGISTRY is None:
+                return []
+            rows = []
+            for code, rec in REGISTRY.all().items():
+                qty = float(rec.get('qty') or 0)
+                if qty <= 0:
+                    continue
+                rows.append({
+                    'code': code,
+                    'qty': qty,
+                    'average_cost': float(rec.get('entry_price') or 0),
+                    'position_side': 'LONG',
+                    'currency': 'USD',
+                    'can_sell_qty': qty,
+                })
+            return rows
+
         from futu import RET_OK, TrdEnv
         try:
             trd_env_str = self.live_cfg.get('trd_env', 'SIMULATE')
@@ -1304,6 +1388,26 @@ class ChandelierExitManager:
     def _close_position(self, code: str, exit_price: float = 0.0) -> bool:
         trd_env_str = self.live_cfg.get('trd_env', 'SIMULATE')
         try:
+            if self.dry_run:
+                # DRY-RUN：从模拟持仓登记簿平仓，不查/不动券商账户（P0-2）
+                rec = REGISTRY.get(code) if REGISTRY else None
+                if not rec:
+                    return False
+                qty = float(rec.get('qty') or 0)
+                avg_cost = float(rec.get('entry_price') or 0)
+                if qty <= 0:
+                    return False
+                pnl_pct = ((exit_price - avg_cost) / avg_cost) if avg_cost > 0 and exit_price > 0 else None
+                logger.info(f"[DRY-RUN] 平仓 {code} x {qty} @ {exit_price:.2f}")
+                _us_ledger(
+                    'position_closed',
+                    stock_code=code, quantity=qty, cost_price=avg_cost,
+                    exit_price=exit_price, pnl_pct=pnl_pct,
+                    reason='chandelier_exit', dry_run=True, env='DRY-RUN',
+                )
+                REGISTRY.close(code)
+                return True
+
             from futu import RET_OK, OrderType, TrdSide, TrdEnv
             trd_env = TrdEnv.SIMULATE if trd_env_str == 'SIMULATE' else TrdEnv.REAL
 
@@ -1317,11 +1421,10 @@ class ChandelierExitManager:
             qty = pos['can_sell_qty'] if side == 'LONG' else pos['can_buy_qty']
             if qty <= 0:
                 return False
+            avg_cost = float(pos.get('average_cost', 0) or 0)
+            pnl_pct = (exit_price - avg_cost) / avg_cost if avg_cost > 0 and exit_price > 0 else None
 
             trd_side = TrdSide.SELL if side == 'LONG' else TrdSide.BUY
-            if self.dry_run:
-                logger.info(f"[DRY-RUN] 平仓 {code} x {qty}")
-                return True
 
             with self.pool.get_trade_ctx() as ctx:
                 ret, _ = ctx.place_order(
@@ -1331,7 +1434,16 @@ class ChandelierExitManager:
 
             if ret == RET_OK:
                 self.stop_tracker.cancel_all_for(code)
+                if REGISTRY:
+                    REGISTRY.close(code)
                 logger.info(f"[平仓成功] {code}")
+                _us_ledger(
+                    'position_closed',
+                    stock_code=code, quantity=qty, cost_price=avg_cost,
+                    exit_price=exit_price, pnl_pct=pnl_pct,
+                    reason='chandelier_exit', dry_run=False,
+                    env=str(self.live_cfg.get('trd_env', 'SIMULATE')),
+                )
                 return True
             return False
         except Exception as e:

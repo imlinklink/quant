@@ -1,0 +1,32 @@
+# 运营自动化配置
+
+opend_port: 11111
+
+# 看护是否允许自动拉起服务（默认 false：只告警不自动重启）
+restart_enabled: false
+check_interval_sec: 300
+
+services:
+  - name: us
+    enabled: true
+    project: quant_us-main
+    cmdline: run_all.py
+    port: 8899
+    url: http://127.0.0.1:8899/api/approvals
+    # 自动重启命令（留空 = 不重启）。注意：DRY-RUN/REAL 由你手动决定。
+    restart_cmd: null
+
+  - name: hk
+    enabled: false          # 与 us 共用 8899，不同时启用；跑港股时改成 true
+    project: quant_futu-main
+    cmdline: run_hk_live.py
+    port: 8899
+    url: http://127.0.0.1:8899/api/approvals
+    restart_cmd: null
+
+# 哪些市场需要"当天简报"提醒（简报日期落后于今天时告警）
+markets:
+  - name: us
+    brief_path: quant_us-main/data/market_brief/latest.json
+  - name: hk
+    brief_path: quant_futu-main/data/market_brief/latest.json
