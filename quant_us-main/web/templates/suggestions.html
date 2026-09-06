@@ -10,7 +10,11 @@
   header { background: #1a1d27; border-bottom: 1px solid #2d3748; color: #fff;
            padding: 14px 22px; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
   header h1 { font-size: 18px; margin: 0; }
-  a.link { color: #38bdf8; text-decoration: none; font-size: 13px; }
+  .nav-tabs { display: flex; gap: 8px; margin-left: 6px; }
+  .nav-tab { color: #94a3b8; text-decoration: none; font-size: 13px;
+             padding: 4px 10px; border-radius: 6px; }
+  .nav-tab:hover { color: #fff; background: #2d3748; }
+  .nav-tab.active { color: #fff; background: #2563eb; }
   .muted { color: #64748b; font-size: 13px; margin-left: auto; }
   main { max-width: 1080px; margin: 20px auto; padding: 0 16px; }
   .empty { text-align: center; color: #6b7280; padding: 60px 0; font-size: 15px; line-height: 1.8; }
@@ -51,7 +55,11 @@
 <body>
 <header>
   <h1>大模型选股建议</h1>
-  <a class="link" href="/approvals">买入确认台 →</a>
+  <nav class="nav-tabs">
+    <a class="nav-tab" href="/">行情</a>
+    <a class="nav-tab" href="/approvals">确认台</a>
+    <a class="nav-tab active" href="/suggestions">LLM建议</a>
+  </nav>
   <span id="meta" class="muted"></span>
 </header>
 <main>

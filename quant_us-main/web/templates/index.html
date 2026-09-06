@@ -58,6 +58,30 @@
             color: var(--accent-blue);
         }
 
+        .top-links {
+            display: flex;
+            gap: 4px;
+            margin-left: 24px;
+        }
+
+        .top-links a {
+            color: var(--text-secondary);
+            text-decoration: none;
+            padding: 6px 12px;
+            border-radius: 6px;
+            font-size: 14px;
+        }
+
+        .top-links a:hover {
+            background: var(--bg-card-hover);
+            color: var(--text-primary);
+        }
+
+        .top-links a.active {
+            color: var(--accent-blue);
+            background: rgba(56, 189, 248, 0.12);
+        }
+
         .market-status {
             display: flex;
             gap: 24px;
@@ -316,6 +340,11 @@
 <!-- 顶部状态栏 -->
 <div class="top-bar">
     <div class="logo">📊 quant_us</div>
+    <div class="top-links">
+        <a href="/" class="active">行情</a>
+        <a href="/approvals">确认台</a>
+        <a href="/suggestions">LLM建议</a>
+    </div>
     <div class="market-status" id="market-status">
         <div class="status-item">
             <span class="status-dot"></span>
