@@ -229,6 +229,7 @@ class PositionManagerBase(ABC):
             'atr_stop_loss', 'decline_stop', 'rsrs_stop',
             'early_hard_stop', 'time_exit', 'momentum_stop',
             'trailing_stop', 'hard_stop', 'structure_stop',
+            'bottom_time_stop',
         }
         # 卖出确认链路会把原因包装成 “卖出|atr_stop_loss” 之类前缀，逐个 token 匹配
         if any(t in stop_reason_codes for t in r.split('|')):

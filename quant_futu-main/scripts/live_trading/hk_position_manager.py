@@ -3,6 +3,7 @@
 """
 import logging
 import numpy as np
+import pandas as pd
 from typing import Dict, Tuple
 from datetime import datetime, timedelta
 
@@ -12,6 +13,35 @@ except ImportError:
     from position_manager_base import PositionManagerBase
 
 logger = logging.getLogger(__name__)
+
+
+def _bottom_time_stop_hit(buy_date, kline_df, current_price, highest_price,
+                          entry_price, window_days, rebound_pct) -> tuple:
+    """bottom_fish 观察窗时间止损（纯函数，便于测试）。
+
+    规则：持有超过 window_days 个交易日，且期间最高价从未达到
+    买入价×(1+rebound_pct) → 反弹未发生，判定逻辑失效。
+    Returns: (hit, holding_trading_days)
+    """
+    if (not buy_date or kline_df is None or len(kline_df) < 2
+            or window_days <= 0):
+        return False, 0
+    try:
+        bd = pd.to_datetime(str(buy_date)).normalize()
+        after = kline_df[kline_df['date'] > bd]
+        held = int(len(after))
+    except Exception:
+        return False, 0
+    if held < window_days:
+        return False, held
+    try:
+        peak_after = float(after['high'].max())
+    except Exception:
+        peak_after = 0.0
+    peak = max(float(highest_price or 0), float(current_price or 0), peak_after)
+    if entry_price and entry_price > 0 and peak < entry_price * (1 + rebound_pct):
+        return True, held
+    return False, held
 
 
 class HKPositionManager(PositionManagerBase):
@@ -454,6 +484,35 @@ class HKPositionManager(PositionManagerBase):
                 # 新股/未订阅/无历史数据时，直接降级到简单止损
                 logger.warning(f"[HK] {stock_code} 获取K线失败（可能是新股或未订阅）: {e}，使用固定止损")
                 kline_df = None
+
+        # bottom_fish 观察窗时间止损：结构止损入场的“博反弹”仓，
+        # 若 window_days 个交易日内从未达到 买入价×(1+rebound_pct) → 逻辑失效
+        live_rec = self.strategy_positions.get(stock_code, {})
+        if (not is_manual and entry_mode == 'bottom_fish'
+                and float(live_rec.get('structure_stop') or 0) > 0
+                and kline_df is not None):
+            try:
+                dip_cfg = (self.config.get('trading', {})
+                           .get('live_trading', {})
+                           .get('buy_timing', {})
+                           .get('smart', {})
+                           .get('bottom_fish_daily') or {})
+                if dip_cfg.get('short_time_stop_enabled', True):
+                    window = int(dip_cfg.get('short_time_stop_days', 5))
+                    rebound = float(dip_cfg.get('short_time_stop_rebound_pct', 0.03))
+                    hit, held = _bottom_time_stop_hit(
+                        live_rec.get('buy_date'), kline_df, price,
+                        live_rec.get('highest_price'), cost_price,
+                        window, rebound,
+                    )
+                    if hit:
+                        logger.warning(
+                            f"[HK] {stock_code} 观察窗时间止损: 持仓 {held} 个交易日"
+                            f"未反弹 ≥{rebound * 100:.0f}%（成本 {cost_price:.3f}）"
+                        )
+                        return True, 'bottom_time_stop', 0.0, 0.0, float(price)
+            except Exception as e:
+                logger.debug(f"[HK] {stock_code} 观察窗时间止损计算失败: {e}")
 
         if kline_df is not None and len(kline_df) >= 30:
             # 使用K线数据进行止盈止损检查

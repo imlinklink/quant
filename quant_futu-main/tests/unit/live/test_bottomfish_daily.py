@@ -58,3 +58,41 @@ class TestBottomFishDaily(unittest.TestCase):
         res = self.ana.analyze_bottom_fish_daily(df, 98.0)
         assert res['ok'] is False
         assert '数据不足' in res['details']
+
+
+class TestBottomTimeStop(unittest.TestCase):
+    def setUp(self):
+        from scripts.live_trading.hk_position_manager import _bottom_time_stop_hit
+        self.hit_fn = _bottom_time_stop_hit
+
+    def _df(self, n, high_boost=1.0):
+        closes = [10.0] * n
+        return pd.DataFrame({
+            'date': pd.date_range('2025-02-03', periods=n, freq='B'),
+            'open': closes,
+            'high': [10.0 * high_boost] * n,
+            'low': [9.9] * n,
+            'close': closes,
+        })
+
+    def test_no_rebound_after_window_exits(self):
+        # 买入日 2025-02-03，之后 6 个交易日都未到 10.3 → 触发
+        df = self._df(7)
+        hit, held = self.hit_fn(
+            '2025-02-03', df, 10.0, 10.0, 10.0, 5, 0.03,
+        )
+        assert hit is True and held == 6
+
+    def test_before_window_not_exit(self):
+        df = self._df(4)
+        hit, held = self.hit_fn(
+            '2025-02-03', df, 10.0, 10.0, 10.0, 5, 0.03,
+        )
+        assert hit is False and held == 3
+
+    def test_rebound_reached_not_exit(self):
+        df = self._df(7, high_boost=1.05)
+        hit, _ = self.hit_fn(
+            '2025-02-03', df, 10.4, 10.4, 10.0, 5, 0.03,
+        )
+        assert hit is False
