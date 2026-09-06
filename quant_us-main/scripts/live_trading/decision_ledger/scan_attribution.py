@@ -101,7 +101,27 @@ def main():
     add_group('最终去向 outcome', 'outcome',
               mapping={'below_threshold': '未达阈值', 'blocked_reversal': '反转确认拦截',
                        'blocked_rr': '盈亏比不足', 'blocked_60m': '60m强下行拦截',
-                       'blocked_earnings': '财报窗口拦截', 'passed': '通过全部闸门'})
+                       'blocked_earnings': '财报窗口拦截', 'passed': '通过全部闸门',
+                       'shadow_index_would_block': '指数门影子拦截(仍执行)',
+                       'blocked_index_pause': '指数门暂停拦截',
+                       'blocked_index_stricter': '指数门门槛拦截'})
+    if 'index_action' in df.columns:
+        add_group('指数门状态 index_action', 'index_action',
+                  mapping={'': '无(指数正常/未到指数门)', 'stricter': '弱势·提高门槛',
+                           'pause': '急跌·暂停', 'info': '仅提示'},
+                  order=['无(指数正常/未到指数门)', '弱势·提高门槛',
+                         '急跌·暂停', '仅提示'])
+        # 影子反事实：只看“通过了 reversal/60m/RR/财报”的准可买信号，
+        # 比较 实际放行 vs 指数门影子应拦截 的前向收益。
+        _shadow = df[df['outcome'].isin(
+            ['passed', 'queue_skipped', 'shadow_index_would_block'])].copy()
+        if len(_shadow) > 0:
+            add_group('指数门影子反事实（准可买信号）', 'outcome',
+                      mapping={'passed': '放行·推送/执行',
+                               'queue_skipped': '放行·队列跳过',
+                               'shadow_index_would_block': '影子应拦截(仍执行)'},
+                      order=['放行·推送/执行', '放行·队列跳过',
+                             '影子应拦截(仍执行)'])
     add_group('超卖分 rsi_score', 'rsi_score',
               mapping={0: '0分', 1: '1分', 2: '2分', 3: '3分'},
               order=['0分', '1分', '2分', '3分'])

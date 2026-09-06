@@ -127,6 +127,14 @@ class DipBuyMonitor:
         # ===== P2 评估闭环：扫描流水（组件分/闸门/outcome） =====
         ev = dip_cfg.get('evaluation', {})
         self.eval_log_min_score = int(ev.get('log_min_score', 4))
+
+        # ===== P3 大盘/指数门（板块代理；默认影子验证）=====
+        igc = dip_cfg.get('index_gate') or {}
+        if not isinstance(igc, dict):
+            igc = {}
+        self.index_gate_enabled = bool(igc.get('enabled', False))
+        self.index_gate_enforce = bool(igc.get('enforce', False))
+        self.index_gate = None
         
         # 状态
         self._running = False
@@ -319,6 +327,12 @@ class DipBuyMonitor:
             pc_txt = f"，P/C OI={float(op['put_call_oi']):.2f}" if op.get('put_call_oi') is not None else ''
             reason += f"；期权: {op['label']}{iv_txt}{pc_txt}"
         reason += f"；单票仓位 ${size_usd:.0f}，信号价约 {qty} 股"
+        ig = result.get('index_gate') or {}
+        if ig.get('action'):
+            mode_txt = '影子' if not self.index_gate_enforce else '生效'
+            reason += f"；指数门[{mode_txt}]: {ig.get('reason', ig.get('action'))}"
+            if result.get('index_shadow_block'):
+                reason += "（影子规则：本单应拦截或需更高分，仅供参考）"
 
         # 信息层：打包消息面上下文（新闻 + 下次财报），失败降级为空；
         # 财报闸已拉过 signal_ctx 时直接复用，避免同一信号重复请求 Yahoo
@@ -467,6 +481,13 @@ class DipBuyMonitor:
         # 修复此前误传 buy_timing 段导致阈值落到默认 13 的错配）
         dip_cfg = self.config.get('dip_buy', {})
         self.analyzer = IntradayAnalyzer({'dip_buy': dip_cfg})
+
+        try:
+            from scripts.live_trading.index_gate import DipIndexGate
+            self.index_gate = DipIndexGate(dip_cfg, pool=self.pool)
+        except Exception as e:
+            logger.warning(f"[指数门] 初始化失败（不影响抄底）: {e}")
+            self.index_gate = None
         
         logger.info(f"✅ 初始化完成: 监控 {len(self.watch_codes)} 只股票")
         
@@ -943,6 +964,7 @@ class DipBuyMonitor:
             trend_cache = self._trend_gate_cache.get(code, {})
             fq = result.get('flow_quality') or {}
             op = result.get('option_pressure') or {}
+            ig = result.get('index_gate') or {}
             return scan_ledger.record_scan(
                 market_type='US',
                 env=self._env_label(),
@@ -975,6 +997,13 @@ class DipBuyMonitor:
                 put_call_oi=op.get('put_call_oi'),
                 option_expiry=op.get('expiry'),
                 daily_gate_reason=trend_cache.get('reason'),
+                index_proxy=ig.get('proxy'),
+                index_cluster=ig.get('cluster'),
+                index_action=ig.get('action') or '',
+                index_below_ma20=ig.get('below_ma20'),
+                index_drop_pct=ig.get('drop_pct'),
+                index_ma20=ig.get('ma20'),
+                index_shadow_block=bool(result.get('index_shadow_block')),
                 outcome=outcome,
             )
         except Exception:
@@ -1106,14 +1135,54 @@ class DipBuyMonitor:
                             return
                     if self.shadow_signals_enabled:
                         self._apply_shadow_fields(result, signal_ctx)
+
+                # 5.5 大盘/指数门（板块代理）：默认影子验证，只记录不拦截
+                index_shadow_block = False
+                if self.index_gate_enabled and self.index_gate is not None:
+                    try:
+                        ig_state = self.index_gate.get_state(code)
+                        result['index_gate'] = ig_state
+                        ig_action = str(ig_state.get('action') or '')
+                        eff_threshold = int(self.buy_threshold) + int(
+                            ig_state.get('strict_bonus') or 0)
+                        if ig_action == 'pause':
+                            index_shadow_block = True
+                        elif ig_action == 'stricter':
+                            index_shadow_block = (
+                                int(result.get('score') or 0) < eff_threshold)
+                        result['index_shadow_block'] = bool(index_shadow_block)
+                        if self.index_gate_enforce and ig_action == 'pause':
+                            self._log_scan(code, price, et_now, result,
+                                           outcome='blocked_index_pause',
+                                           env_score=env_score)
+                            logger.info(
+                                f"⏭️  {code} {ig_state.get('reason', '指数门pause')}，"
+                                f"暂停抄底"
+                            )
+                            return
+                        if (self.index_gate_enforce and ig_action == 'stricter'
+                                and index_shadow_block):
+                            self._log_scan(code, price, et_now, result,
+                                           outcome='blocked_index_stricter',
+                                           env_score=env_score)
+                            logger.info(
+                                f"⏭️  {code} 指数弱势(stricter)：评分 "
+                                f"{result.get('score')} < {eff_threshold}，跳过抄底"
+                            )
+                            return
+                    except Exception as e:
+                        logger.warning(f"[指数门] {code} 状态计算失败，放行: {e}")
+
                 if self.approval_enabled:
                     # 人工确认模式：只推送，不自动下单
                     acted = self._queue_approval(code, price, result, signal_ctx=signal_ctx)
                 else:
                     acted = self._execute_buy(code, price, result['score'])
+                outcome = 'passed' if acted else 'queue_skipped'
+                if index_shadow_block and not self.index_gate_enforce:
+                    outcome = 'shadow_index_would_block'
                 self._log_scan(code, price, et_now, result,
-                               outcome='passed' if acted else 'queue_skipped',
-                               env_score=env_score)
+                               outcome=outcome, env_score=env_score)
                 logger.info(f"  📊 {code} {result.get('details', '')}")
             else:
                 self._log_scan(code, price, et_now, result,
