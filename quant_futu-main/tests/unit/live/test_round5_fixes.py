@@ -387,6 +387,34 @@ class TestDualChandelierATRRatchet(unittest.TestCase):
         s.recompute(atr=10, current_price=108)
         assert s._trailing_activated and s.stop_line > 100.0
 
+
+# ---------- 10) ProposalStore 终态提案留存清理 ----------
+
+class TestProposalPurge(unittest.TestCase):
+    def test_terminal_purged_active_kept(self):
+        from scripts.live_trading.approval.proposal_store import ProposalStore
+        store = ProposalStore(ttl_seconds=3600)
+        p1 = store.create(stock_code='HK.A', market_type='HK', side='buy')
+        p2 = store.create(stock_code='HK.B', market_type='HK', side='buy')
+        # p1 终态（rejected），p2 保持活跃
+        assert store.reject(p1['id'])
+        # 模拟 2 天后清理：终态且超过保留期 → 删除；活跃的一律保留
+        removed = store.purge_terminal(now=p1['created_at'] + 172800,
+                                       keep_seconds=86400)
+        assert removed == 1
+        assert store.get(p1['id']) is None
+        assert store.get(p2['id']) is not None
+
+    def test_terminal_within_retention_kept(self):
+        from scripts.live_trading.approval.proposal_store import ProposalStore
+        store = ProposalStore(ttl_seconds=3600)
+        p1 = store.create(stock_code='HK.C', market_type='HK', side='buy')
+        store.reject(p1['id'])
+        removed = store.purge_terminal(now=p1['created_at'] + 3600,
+                                       keep_seconds=86400)
+        assert removed == 0
+        assert store.get(p1['id']) is not None
+
     def test_risk_only_config_still_works(self):
         cfg = {'time_exit': {'phase3_days': 350}, 'early_hard_stop_pct': 0.08}
         s = ExitStrategyFactory.create('atr_dynamic', cfg)

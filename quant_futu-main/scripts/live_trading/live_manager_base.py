@@ -921,7 +921,6 @@ class LiveTradingManager(ABC):
                     if strict_mode:
                         logger.info(f"[K线拦截] 所有候选评分 < {threshold}，跳过本次买入")
                         return
-                        stocks_to_buy = []
                     else:
                         logger.info("[K线排序] 无达标股票，保留原始候选（宽松模式）")
             else:

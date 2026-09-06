@@ -7,6 +7,7 @@
            ↘ expired（超时未操作）
 """
 import json
+import logging
 import os
 import threading
 import time
@@ -14,6 +15,8 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 
 ACTIVE_STATUSES = {'pending', 'approved', 'executing'}
@@ -116,7 +119,33 @@ class ProposalStore:
             if item['status'] in ('pending', 'approved') and now > item.get('expires_at', now):
                 if self._transition(pid, 'expired', '超时未确认，自动过期'):
                     expired += 1
+        # 顺手清理超过保留期的终态提案，避免进程长期运行内存无限增长
+        self.purge_terminal(now=now, keep_seconds=86400)
         return expired
+
+    def purge_terminal(self, now: Optional[float] = None,
+                       keep_seconds: float = 86400) -> int:
+        """删除超过保留期的终态提案（rejected/expired/executed/failed/skipped）。
+
+        历史记录由 decisions.jsonl 与评估账本长期保存，这里只回收进程内内存；
+        活跃提案与保留期内的终态提案（页面还能看到最近记录）不受影响。
+        """
+        now = time.time() if now is None else now
+        removed = 0
+        with self._lock:
+            pids = list(self._items.keys())
+            for pid in pids:
+                item = self._items.get(pid)
+                if not item:
+                    continue
+                if item['status'] in TERMINAL_STATUSES:
+                    updated = float(item.get('updated_at') or item.get('created_at') or 0)
+                    if now - updated > keep_seconds:
+                        del self._items[pid]
+                        removed += 1
+        if removed:
+            logger.debug(f"已清理 {removed} 条超过保留期的终态提案")
+        return removed
 
     # ==================== 读操作 ====================
 
