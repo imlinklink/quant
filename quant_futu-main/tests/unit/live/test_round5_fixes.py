@@ -52,7 +52,8 @@ class _FakeTrader:
         self.orders = 0
     def get_positions(self):
         return []
-    def place_order(self, stock_code, quantity, order_type, side, timeout):
+    def place_order(self, stock_code, quantity, order_type, side, timeout,
+                    partial_timeout=30):
         self.orders += 1
         return ('O1', 55.0, self.dealt)
 
@@ -414,6 +415,34 @@ class TestProposalPurge(unittest.TestCase):
                                        keep_seconds=86400)
         assert removed == 0
         assert store.get(p1['id']) is not None
+
+
+# ---------- 11) 买入手续费必须从策略资金扣除 ----------
+
+class TestBuyFeeDeducted(unittest.TestCase):
+    def test_execute_buy_charges_fee_from_capital(self):
+        pm = _make_pm(dealt=100)
+        # 该 fake 卖出成交价 55；换成买入成交价 10 的假交易器
+        class _BuyTrader:
+            def place_order(self, stock_code, quantity, order_type, side, timeout,
+                            partial_timeout=30):
+                return ('B1', 10.0, quantity)
+            def get_positions(self):
+                return []
+        pm.trader = _BuyTrader()
+        pm.market_adapter.calculate_trading_cost.side_effect = (
+            lambda **kw: {
+                'total': 5.0 if kw.get('direction') == 'buy' else 0.0,
+                'commission': 5.0, 'stamp_duty': 0.0,
+            }
+        )
+        pm.strategy_capital = 100000.0
+        pm.strategy_used_capital = 0.0
+        pm.execute_buy([{'code': 'HK.F1', 'quantity': 100, 'price': 10.0}])
+        assert 'HK.F1' in pm.strategy_positions
+        assert abs(pm.strategy_used_capital - 1000.0) < 1e-6
+        # 佣金等买入费用必须立刻从资本扣除，不能让账目虚增
+        assert abs(pm.strategy_capital - 99995.0) < 1e-6, pm.strategy_capital
 
     def test_risk_only_config_still_works(self):
         cfg = {'time_exit': {'phase3_days': 350}, 'early_hard_stop_pct': 0.08}

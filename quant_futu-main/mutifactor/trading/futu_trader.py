@@ -147,7 +147,8 @@ class FutuTrader:
 
     def place_order(self, stock_code: str, quantity: int,
                    order_type: OrderType, side: str = 'buy',
-                   price: float = None, timeout: int = 30) -> Tuple[str, float, int]:
+                   price: float = None, timeout: int = 30,
+                   partial_timeout: int = 30) -> Tuple[str, float, int]:
         """
         下单
 
@@ -158,6 +159,7 @@ class FutuTrader:
             side: 买卖方向 ('buy'/'sell')
             price: 价格 (限价单需要)
             timeout: 超时时间(秒)
+            partial_timeout: 部分成交后继续等待的秒数（默认30，可用配置覆盖）
 
         Returns:
             (order_id, avg_price, dealt_qty) 订单ID、成交均价、成交数量
@@ -187,7 +189,9 @@ class FutuTrader:
             logger.info(f"下单成功: {order_id}, 股票: {stock_code}, 数量: {quantity}")
 
             # 等待订单确认
-            avg_price, dealt_qty = self.wait_for_confirmation(order_id, timeout)
+            avg_price, dealt_qty = self.wait_for_confirmation(
+                order_id, timeout, partial_timeout=partial_timeout
+            )
             return order_id, avg_price, dealt_qty
 
         except (OSError, IOError) as e:
@@ -204,7 +208,8 @@ class FutuTrader:
             logger.error(f"下单异常: {type(e).__name__}: {e}", exc_info=True)
             raise OrderError(f"下单异常: {e}", stock_code=stock_code)
 
-    def wait_for_confirmation(self, order_id: str, timeout: int = 60) -> Tuple[float, int]:
+    def wait_for_confirmation(self, order_id: str, timeout: int = 60,
+                              partial_timeout: int = 30) -> Tuple[float, int]:
         """
         等待订单确认
 
@@ -216,7 +221,6 @@ class FutuTrader:
             (avg_price, dealt_qty) 成交均价和成交数量
         """
         start_time = time.time()
-        partial_timeout = 30  # 部分成交后等待超时时间
         partial_start_time = None
         last_status = None
 

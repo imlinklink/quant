@@ -73,6 +73,7 @@ class PositionManagerBase(ABC):
         # 订单超时
         trading_config = config.get('trading', {}).get('live_trading', {})
         self.order_timeout = trading_config.get('order_timeout', 60)
+        self.partial_order_timeout = trading_config.get('partial_timeout', 30)
         self.position_check_interval = trading_config.get('position_check_interval', 30)
 
     # ==================== 止损冷却期管理 ====================
@@ -415,7 +416,8 @@ class PositionManagerBase(ABC):
                     quantity=stock['quantity'],
                     order_type=OrderType.MARKET,
                     side='buy',
-                    timeout=self.order_timeout
+                    timeout=self.order_timeout,
+                    partial_timeout=self.partial_order_timeout
                 )
 
                 # 使用实际成交数量
@@ -425,11 +427,27 @@ class PositionManagerBase(ABC):
                     continue
                 
                 actual_cost = dealt_qty * avg_price
+                # 买入手续费（佣金/征费/结算/滑点，最低佣金）也是真实支出：
+                # 必须从策略资金扣除，否则 strategy_capital 随每笔买入缓慢虚增。
+                buy_fee = 0.0
+                try:
+                    fee_info = self.market_adapter.calculate_trading_cost(
+                        amount=actual_cost,
+                        direction='buy',
+                        stock_code=stock['code']
+                    )
+                    buy_fee = float(fee_info.get('total') or 0)
+                except Exception as e:
+                    logger.warning(
+                        f"[{self.market_type}] 买入费用计算失败（按0处理） "
+                        f"{stock['code']}: {e}"
+                    )
                 successful_buys.append({
                     'code': stock['code'],
                     'order_id': order_id,
                     'quantity': dealt_qty,
                     'cost': actual_cost,
+                    'buy_fee': buy_fee,
                     'avg_price': avg_price,
                     'entry_mode': stock.get('entry_mode', 'bottom_fish'),
                     'proposal_id': stock.get('proposal_id'),
@@ -473,6 +491,14 @@ class PositionManagerBase(ABC):
                         'proposal_id': buy.get('proposal_id'),
                     }
                     self.strategy_used_capital += buy['cost']
+                    if buy.get('buy_fee'):
+                        self.strategy_capital -= buy['buy_fee']
+                        if self.strategy_capital < 0:
+                            self.strategy_capital = 0.0
+                        logger.info(
+                            f"[{self.market_type}] 买入费用 {buy['code']}: "
+                            f"{buy['buy_fee']:.2f} 已从策略资金扣除"
+                        )
 
                 # 保存状态到数据库
                 self.save_positions()
@@ -777,7 +803,8 @@ class PositionManagerBase(ABC):
                 quantity=quantity,
                 order_type=OrderType.MARKET,
                 side='sell',
-                timeout=self.order_timeout
+                timeout=self.order_timeout,
+                partial_timeout=self.partial_order_timeout
             )
             
             if dealt_qty <= 0:

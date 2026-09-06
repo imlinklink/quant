@@ -129,6 +129,28 @@ class UnifiedExitStrategy:
         strategy = self._get_exit_strategy()
         return strategy.check_exit(position, current_price, kline_df)
 
+    def _check_with_intraday(self, position: Dict, current_price: float,
+                             today_high: float, today_low: float
+                             ) -> Tuple[bool, str, float, float, float]:
+        """实盘 K线不足(<30) 且只有当日高低价时的兜底。
+
+        只有当日 high/low 无法计算 ATR/吊灯，因此退化为与 HK 实盘一致的
+        简化止损（移动止损/硬止损），保证不因缺失方法而 AttributeError。
+        """
+        logger.warning(
+            f"K线不足且仅有当日高低（high={today_high}, low={today_low}），"
+            "退化为简化止损检查"
+        )
+        return self._check_simple(position, current_price)
+
+    def _check_simple(self, position: Dict, current_price: float
+                      ) -> Tuple[bool, str, float, float, float]:
+        """简化止损兜底（K线不足时使用）：与 ExitStrategyFactory.check_exit_simple 同口径。"""
+        from .exit_strategy import ExitStrategyFactory
+        return ExitStrategyFactory.check_exit_simple(
+            position, current_price, self.config
+        )
+
 def check_exit_unified(config: Dict,
                        position: Dict,
                        current_price: float,
