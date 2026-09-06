@@ -5,6 +5,7 @@
 import os
 import sys
 import logging
+import yaml
 
 # 添加项目根目录到路径
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -58,6 +59,44 @@ def sync_positions(env: str = 'SIMULATE'):
             for pos in positions:
                 logger.info(f"  - {pos}")
 
+        # 备份当前 env 的 positions 表（清空式重建前先留后路，
+        # 中途崩溃也不至于连旧数据都丢）
+        old_rows = []
+        backup_path = None
+        try:
+            old_rows = yaml_storage.get_positions(env=trading_env) or []
+            if old_rows:
+                import time as _time
+                base = yaml_storage._get_filepath('positions')
+                backup_path = os.path.join(
+                    os.path.dirname(base),
+                    f"positions_backup_{env.lower()}_{int(_time.time())}.yaml"
+                )
+                with open(backup_path, 'w', encoding='utf-8') as f:
+                    yaml.dump({'positions': old_rows}, f,
+                              allow_unicode=True, sort_keys=False)
+                logger.warning(f"已备份原持仓 {len(old_rows)} 条到 {backup_path}")
+        except Exception as e:
+            logger.warning(f"备份原持仓失败（继续，风险自担）: {e}")
+
+        # 从 trades 表推导“系统买入过”的代码及最早买入时间：
+        # 没有旧记录时用来区分手动仓（策略仓计入资金、参与止盈止损）
+        bought_map = {}
+        try:
+            trades = yaml_storage.get_trades(env=trading_env) or []
+            for t in trades:
+                code = t.get('stock_code')
+                trade_type = str(t.get('trade_type', '')).upper()
+                if not code or not trade_type.startswith('BUY'):
+                    continue
+                ts = str(t.get('trade_time') or '')
+                if code not in bought_map or ts < bought_map[code]:
+                    bought_map[code] = ts
+        except Exception as e:
+            logger.warning(f"读取交易记录失败（手动/策略判定将退回旧表）: {e}")
+
+        old_by_code = {r.get('stock_code'): r for r in old_rows if r.get('stock_code')}
+
         if not positions:
             logger.info("富途持仓为空，清空数据库持仓")
             yaml_storage.clear_positions(trading_env)
@@ -73,10 +112,26 @@ def sync_positions(env: str = 'SIMULATE'):
             stock_code = pos['stock_code']
             quantity = pos['quantity']
             cost_price = pos['cost_price']
+            old = old_by_code.get(stock_code, {})
 
             # 获取股票名称
             from mutifactor.data import get_hk_stock_name
             stock_name = get_hk_stock_name(stock_code)
+
+            # 保留/推导关键状态，避免恢复后持仓“失去买入日期与历史最高价”：
+            # - buy_time：旧表 > trades 最早 BUY > 空
+            # - manual：旧表标记 > 按是否有系统 BUY 判定（无记录 = 手动买入）
+            # - highest_price：旧表历史最高（不低于成本）> 成本价
+            buy_time = str(old.get('buy_time') or bought_map.get(stock_code) or '')
+            if old:
+                manual = bool(old.get('manual'))
+            else:
+                manual = stock_code not in bought_map
+            try:
+                db_highest = float(old.get('highest_price') or 0)
+            except (TypeError, ValueError):
+                db_highest = 0.0
+            highest_price = max(cost_price, db_highest)
 
             # 保存到数据库
             yaml_storage.save_position(
@@ -84,8 +139,10 @@ def sync_positions(env: str = 'SIMULATE'):
                 stock_name=stock_name or stock_code,
                 quantity=quantity,
                 cost_price=cost_price,
-                highest_price=cost_price,  # 初始化为成本价
-                env=trading_env
+                highest_price=highest_price,
+                manual=manual,
+                buy_time=buy_time,
+                env=trading_env,
             )
             logger.info(f"已同步: {stock_code} ({stock_name}) - {quantity}股 @ {cost_price}")
 

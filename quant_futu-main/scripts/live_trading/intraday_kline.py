@@ -134,38 +134,40 @@ class IntradayKlineProvider:
     def _fetch_min5_bars(self, stock_code: str) -> Optional[pd.DataFrame]:
         """从富途API获取5分钟K线"""
         with self._ctx_lock:
-            if not self._ctx:
-                ctx = OpenQuoteContext(host=self.host, port=self.port)
-            else:
-                ctx = self._ctx
+            # Futu OpenQuoteContext 非线程安全：连接选择与请求必须同持锁，
+            # 否则并发取K线会交错污染响应。
+            try:
+                if self._ctx is None:
+                    self._ctx = OpenQuoteContext(host=self.host, port=self.port)
+                today = datetime.now().strftime('%Y-%m-%d')
+                # 获取当天全部5分钟K线，最多取100根（覆盖全天交易）
+                ret, data, _ = self._ctx.request_history_kline(
+                    code=stock_code,
+                    start=today,
+                    end=today,
+                    ktype=KLType.K_5M,
+                    max_count=100
+                )
 
-        try:
-            today = datetime.now().strftime('%Y-%m-%d')
-            # 获取当天全部5分钟K线，最多取100根（覆盖全天交易）
-            ret, data, _ = ctx.request_history_kline(
-                code=stock_code,
-                start=today,
-                end=today,
-                ktype=KLType.K_5M,
-                max_count=100
-            )
+                if ret != RET_OK or data is None or len(data) == 0:
+                    logger.debug(f"获取5分钟K线失败 {stock_code}: ret={ret}, data={data}")
+                    return None
 
-            if ret != RET_OK or data is None or len(data) == 0:
-                logger.debug(f"获取5分钟K线失败 {stock_code}: ret={ret}, data={data}")
+                # 整理列名
+                df = data[['time_key', 'open', 'close', 'high', 'low', 'volume', 'turnover']].copy()
+                df = df.sort_values('time_key').reset_index(drop=True)
+                df['time_key'] = pd.to_datetime(df['time_key'])
+                return df
+
+            except Exception as e:
+                logger.warning(f"_fetch_min5_bars 异常 {stock_code}: {e}")
+                # 请求异常时丢弃连接，下次调用惰性重建，避免留着坏连接反复失败
+                try:
+                    self._ctx.close()
+                except Exception:
+                    pass
+                self._ctx = None
                 return None
-
-            # 整理列名
-            df = data[['time_key', 'open', 'close', 'high', 'low', 'volume', 'turnover']].copy()
-            df = df.sort_values('time_key').reset_index(drop=True)
-            df['time_key'] = pd.to_datetime(df['time_key'])
-            return df
-
-        except Exception as e:
-            logger.warning(f"_fetch_min5_bars 异常 {stock_code}: {e}")
-            return None
-        finally:
-            if self._ctx is None:
-                ctx.close()
 
     def get_latest_bar(self, stock_code: str) -> Optional[Dict]:
         """获取最新一根5分钟K线"""
@@ -222,36 +224,36 @@ class IntradayKlineProvider:
     def _fetch_min1_bars(self, stock_code: str) -> Optional[pd.DataFrame]:
         """从富途API获取1分钟K线"""
         with self._ctx_lock:
-            if not self._ctx:
-                ctx = OpenQuoteContext(host=self.host, port=self.port)
-            else:
-                ctx = self._ctx
+            # 与 _fetch_min5_bars 一致：连接选择与请求同持锁（非线程安全连接）
+            try:
+                if self._ctx is None:
+                    self._ctx = OpenQuoteContext(host=self.host, port=self.port)
+                today = datetime.now().strftime('%Y-%m-%d')
+                ret, data, _ = self._ctx.request_history_kline(
+                    code=stock_code,
+                    start=today,
+                    end=today,
+                    ktype=KLType.K_1M,
+                    max_count=480  # 最多取480根（约8小时=480分钟）
+                )
 
-        try:
-            today = datetime.now().strftime('%Y-%m-%d')
-            ret, data, _ = ctx.request_history_kline(
-                code=stock_code,
-                start=today,
-                end=today,
-                ktype=KLType.K_1M,
-                max_count=480  # 最多取480根（约8小时=480分钟）
-            )
+                if ret != RET_OK or data is None or len(data) == 0:
+                    logger.debug(f"获取1分钟K线失败 {stock_code}: ret={ret}, data={data}")
+                    return None
 
-            if ret != RET_OK or data is None or len(data) == 0:
-                logger.debug(f"获取1分钟K线失败 {stock_code}: ret={ret}, data={data}")
+                df = data[['time_key', 'open', 'close', 'high', 'low', 'volume', 'turnover']].copy()
+                df = df.sort_values('time_key').reset_index(drop=True)
+                df['time_key'] = pd.to_datetime(df['time_key'])
+                return df
+
+            except Exception as e:
+                logger.warning(f"_fetch_min1_bars 异常 {stock_code}: {e}")
+                try:
+                    self._ctx.close()
+                except Exception:
+                    pass
+                self._ctx = None
                 return None
-
-            df = data[['time_key', 'open', 'close', 'high', 'low', 'volume', 'turnover']].copy()
-            df = df.sort_values('time_key').reset_index(drop=True)
-            df['time_key'] = pd.to_datetime(df['time_key'])
-            return df
-
-        except Exception as e:
-            logger.warning(f"_fetch_min1_bars 异常 {stock_code}: {e}")
-            return None
-        finally:
-            if self._ctx is None:
-                ctx.close()
 
     def clear_cache(self, stock_code: Optional[str] = None):
         """清除缓存"""
