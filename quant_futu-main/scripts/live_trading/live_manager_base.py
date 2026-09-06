@@ -1103,7 +1103,7 @@ class LiveTradingManager(ABC):
                 merged['signal'] = d.get('signal', 'buy')
                 merged['kline_signal'] = '阶段低点'
                 merged['details'] = d.get('details', '')
-                merged['ref_low'] = d.get('ref_low')
+                merged['anchor_low'] = d.get('ref_low')
                 merged['structure_stop'] = d.get('structure_stop')
                 kline_details_by_code[code] = merged
 

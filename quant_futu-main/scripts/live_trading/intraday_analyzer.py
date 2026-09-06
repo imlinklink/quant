@@ -159,6 +159,15 @@ class IntradayAnalyzer:
     def __init__(self, config: Optional[Dict] = None):
         self.cfg = (config or {}).get('analysis', {})
 
+        # v1 阶段低点参数规范位置：buy_timing.smart.bottom_fish_daily
+        # （与 live_manager._dip_daily_cfg / hk_position_manager 读取一致）；
+        # 保留 analysis.bottom_fish_daily 作为兼容旧调用/单测的兜底。
+        _smart = (config or {}).get('smart') or {}
+        _bf_cfg = _smart.get('bottom_fish_daily')
+        if not isinstance(_bf_cfg, dict) or not _bf_cfg:
+            _bf_cfg = self.cfg.get('bottom_fish_daily', {})
+        self.bottom_fish_cfg = _bf_cfg or {}
+
         # RSI参数
         self.rsi_period = self.cfg.get('rsi_period', 14)
         self.rsi_oversold = self.cfg.get('rsi_oversold', 32)   # 原30，放宽更快捕捉
@@ -363,7 +372,7 @@ class IntradayAnalyzer:
           - 拐头确认：RSI 回升 + 今日最低不再创新低 → 给确认分（权重更高）
           - 止损距离否决：以近 20 日最低为参考止损，距离 > 阈值直接放弃
         """
-        cfg = (self.cfg or {}).get('bottom_fish_daily', {})
+        cfg = getattr(self, 'bottom_fish_cfg', None) or {}
         pullback_max = float(cfg.get('pullback_from_low_pct', 0.06))
         retreat_min = float(cfg.get('retreat_from_high_pct', 0.03))
         stop_dist_max = float(cfg.get('max_stop_distance_pct', 0.04))

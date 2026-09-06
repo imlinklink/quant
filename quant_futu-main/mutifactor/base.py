@@ -55,6 +55,11 @@ class BaseStrategy(ABC):
         EXIT_REASON_TIME_EXIT: '到期平仓',
     }
 
+    # 止损类退出原因集合（命中即进入冷却期，防止立刻重买）。子类可扩展。
+    STOP_LOSS_REASONS = {
+        EXIT_REASON_STOP_LOSS,
+    }
+
     def __init__(self, initial_capital: float = None,
                  market_type: MarketType = MarketType.HK,
                  config: Dict = None):
@@ -623,7 +628,7 @@ class BaseStrategy(ABC):
         del self.positions[stock_code]
 
         # 止损卖出 → 加入冷却期（冷却期内不重买）
-        if reason == self.EXIT_REASON_STOP_LOSS:
+        if reason in self.STOP_LOSS_REASONS:
             self.recently_stopped[stock_code] = current_date
             self.logger.debug(f"冷却期: {stock_code} 止损卖出，加入冷却期至 {current_date}")
 

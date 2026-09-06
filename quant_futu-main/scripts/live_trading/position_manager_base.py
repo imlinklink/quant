@@ -452,6 +452,8 @@ class PositionManagerBase(ABC):
                     'avg_price': avg_price,
                     'entry_mode': stock.get('entry_mode', 'bottom_fish'),
                     'proposal_id': stock.get('proposal_id'),
+                    'anchor_low': stock.get('anchor_low'),
+                    'structure_stop': stock.get('structure_stop'),
                 })
 
                 currency = 'HKD' if self.market_type == 'HK' else 'USD'

@@ -57,6 +57,7 @@ class HKPositionManager(PositionManagerBase):
     def _load_positions_from_db(self):
         """从数据库加载港股持仓"""
         # 恢复止损冷却期（进程重启后仍需遵守冷却期，避免刚止损的票被立即买回）
+        saved_state = None
         try:
             saved_state = self.state_persistence.load_state()
             saved_cooldowns = (saved_state or {}).get('cooldowns') or {}
@@ -138,6 +139,29 @@ class HKPositionManager(PositionManagerBase):
                     highest_price = max(cost_price, db_highest)
                     # 重启后恢复买入时间（持仓天数 → 时间退出/RSRS 豁免期判定）
                     buy_time = str(db_rec.get('buy_time') or '')
+                    # 重启后恢复策略仓标签（bottom_fish/momentum）与结构止损锚点：
+                    # trading_state.positions 存的是完整 strategy_positions 字典
+                    # （含 entry_mode/anchor_low/structure_stop），明细表只存少量字段。
+                    saved_positions = (saved_state or {}).get('positions') or {}
+                    saved_rec = saved_positions.get(stock_code) or {}
+                    if not isinstance(saved_rec, dict):
+                        saved_rec = {}
+                    entry_mode = '' if is_manual else str(
+                        saved_rec.get('entry_mode') or '')
+                    structure_stop = 0.0
+                    anchor_low = 0.0
+                    proposal_id = ''
+                    if not is_manual:
+                        try:
+                            structure_stop = float(
+                                saved_rec.get('structure_stop') or 0)
+                        except (TypeError, ValueError):
+                            structure_stop = 0.0
+                        try:
+                            anchor_low = float(saved_rec.get('anchor_low') or 0)
+                        except (TypeError, ValueError):
+                            anchor_low = 0.0
+                        proposal_id = str(saved_rec.get('proposal_id') or '')
 
                     self.strategy_positions[stock_code] = {
                         'quantity': pos['quantity'],
@@ -146,6 +170,10 @@ class HKPositionManager(PositionManagerBase):
                         'manual': is_manual,  # 标记是否手动买入
                         'buy_time': buy_time,
                         'buy_date': buy_time[:10] if buy_time else '',
+                        'entry_mode': entry_mode,
+                        'anchor_low': anchor_low,
+                        'structure_stop': structure_stop,
+                        'proposal_id': proposal_id,
                     }
                     
                     # 手动买入的股票不计入策略资金

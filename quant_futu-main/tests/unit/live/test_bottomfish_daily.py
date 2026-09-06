@@ -71,6 +71,28 @@ class TestBottomFishDaily(unittest.TestCase):
         assert res['ok'] is False
         assert '距20日低点' in res['details']
 
+    def test_smart_config_path_preferred(self):
+        """config 规范位置 smart.bottom_fish_daily 必须生效，且优先于
+        analysis.bottom_fish_daily（旧兜底路径）。"""
+        ana = IntradayAnalyzer({
+            # analysis 下的旧位置：宽松（pullback 上限 9%）
+            'analysis': {'bottom_fish_daily': {
+                'max_stop_distance_pct': 0.08,
+                'pullback_from_low_pct': 0.09,
+            }},
+            # smart 下的规范位置：严格（pullback 上限 1%）
+            'smart': {'bottom_fish_daily': {
+                'max_stop_distance_pct': 0.08,
+                'pullback_from_low_pct': 0.01,
+            }},
+        })
+        df = _daily(_decline_then_stabilize())
+        ref_low = float(df['low'].tail(20).min())
+        price = ref_low * 1.02  # 距低点约 2%：smart 严格口径否决，analysis 宽松口径放行
+        res = ana.analyze_bottom_fish_daily(df, price)
+        assert res['ok'] is False
+        assert '距20日低点' in res['details']
+
 
 class TestBottomTimeStop(unittest.TestCase):
     def setUp(self):
