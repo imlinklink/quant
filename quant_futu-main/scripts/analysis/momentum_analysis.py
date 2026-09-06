@@ -15,6 +15,7 @@
 import argparse
 import os
 import sys
+import time
 import unicodedata
 import yaml
 
@@ -46,7 +47,6 @@ def rjust_d(s: str, width: int) -> str:
 
 import numpy as np
 import pandas as pd
-import pymysql
 
 # 添加项目根目录到 path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -61,14 +61,6 @@ try:
     HAS_PLOT = True
 except ImportError:
     HAS_PLOT = False
-
-# ==================== 配置 ====================
-DB_CONFIG = {
-    'host': 'localhost',
-    'user': 'root',
-    'database': 'quant',
-    'charset': 'utf8mb4',
-}
 
 # 动量计算参数（与 momentum.py 保持一致）
 # 优先读 config.yaml，缺失时兜底硬编码默认值（保证独立运行也能工作）
@@ -117,135 +109,134 @@ LINEAR_WEIGHT_END   = 2.0
 EXP_WEIGHT_START    = 1.0
 EXP_WEIGHT_END      = 2.718  # e
 
-# ==================== 数据库操作 ====================
+# ==================== 数据操作（YAML 股票池 + 富途 K 线）====================
 
-def get_db_connection():
-    return pymysql.connect(**DB_CONFIG)
+
+def _futu_cfg() -> dict:
+    cfg = _load_config() or {}
+    return (cfg.get('trading') or {}).get('futu') or {}
+
+
+def _fetch_stock_klines(stock_code: str, days: int = 120) -> pd.DataFrame:
+    """从富途获取日K（YAML 迁移后无本地 kline_data 表）"""
+    try:
+        from futu import OpenQuoteContext, RET_OK, KLType
+    except ImportError:
+        return pd.DataFrame()
+    futu_cfg = _futu_cfg()
+    ctx = OpenQuoteContext(
+        host=str(futu_cfg.get('host', '127.0.0.1')),
+        port=int(futu_cfg.get('port', 11111)),
+    )
+    try:
+        ret, data, _ = ctx.request_history_kline(
+            code=stock_code, start='', end='',
+            ktype=KLType.K_DAY, max_count=days,
+        )
+        if ret != RET_OK or data is None or len(data) == 0:
+            return pd.DataFrame()
+        df = pd.DataFrame({
+            'date': pd.to_datetime(data['time_key']).dt.normalize(),
+            'open': data['open'].astype(float),
+            'high': data['high'].astype(float),
+            'low': data['low'].astype(float),
+            'close': data['close'].astype(float),
+            'volume': data['volume'].astype(float),
+        })
+        return df.sort_values('date').reset_index(drop=True)
+    except Exception as e:
+        print(f"[警告] {stock_code} K线获取失败: {e}")
+        return pd.DataFrame()
+    finally:
+        ctx.close()
+
+
+def _stock_info_rows():
+    """YAML stock_info 全量行（HK，含上市日期）"""
+    from mutifactor.infra.yaml_storage import YAMLStorage
+    db = YAMLStorage()
+    try:
+        rows = db.get_all_stock_info('HK') or {}
+        if isinstance(rows, dict):
+            # get_all_stock_info 返回 {code: info}，摊平成行列表
+            flat = []
+            for code, info in rows.items():
+                item = {'stock_code': code}
+                if isinstance(info, dict):
+                    item.update(info)
+                flat.append(item)
+            rows = flat
+    except Exception:
+        rows = db._load_table('stock_info') or []
+    return [
+        r for r in rows
+        if r.get('market') == 'HK' and r.get('listing_date')
+    ]
 
 
 def load_stock_info():
-    """加载股票基本信息"""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT stock_code, stock_name, listing_date
-        FROM stock_info WHERE market = 'HK' AND listing_date IS NOT NULL
-    """)
-    result = {row[0]: {'name': row[1], 'listing_date': row[2]} for row in cursor.fetchall()}
-    cursor.close()
-    conn.close()
+    """加载股票基本信息（YAML）"""
+    result = {}
+    for r in _stock_info_rows():
+        code = r.get('stock_code')
+        if code:
+            result[code] = {
+                'name': r.get('stock_name', code),
+                'listing_date': r.get('listing_date'),
+            }
     return result
 
 
 def get_stock_klines(stock_code: str, days: int = 120) -> pd.DataFrame:
-    """从数据库拉取日线数据"""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT kline_date, open, high, low, close, volume
-        FROM kline_data
-        WHERE stock_code = %s AND kline_type = 'DAY'
-        ORDER BY kline_date DESC
-        LIMIT %s
-    """, (stock_code, days))
-    rows = cursor.fetchall()
-    cursor.close()
-    conn.close()
-    
-    if not rows:
-        return pd.DataFrame()
-    
-    df = pd.DataFrame(rows, columns=['date', 'open', 'high', 'low', 'close', 'volume'])
-    df['date'] = pd.to_datetime(df['date'])
-    df = df.sort_values('date').reset_index(drop=True)
-    for col in ['open', 'high', 'low', 'close']:
-        df[col] = df[col].astype(float)
-    df['volume'] = df['volume'].astype(float)
-    return df
+    """获取日K（富途；YAML 迁移后无本地 kline_data 表）"""
+    return _fetch_stock_klines(stock_code, days=days)
 
 
 def get_top_gainers(days: int = 180, limit: int = 20) -> list:
-    """找出近N天涨幅最大的股票，同时计算距期间高点回撤（判断是反弹还是新高）"""
-    from mutifactor.infra.yaml_storage import YAMLStorage
-    db = YAMLStorage()
-    with db._get_connection() as conn:
-        with conn.cursor() as cursor:
-            # 主查询：获取所有有足够数据的港股，同时返回交易日数
-            cursor.execute("""
-                SELECT a.stock_code, a.stock_name, b.cnt, b.start_date, b.end_date
-                FROM stock_info a
-                JOIN (
-                    SELECT stock_code, COUNT(*) as cnt,
-                           MIN(kline_date) as start_date,
-                           MAX(kline_date) as end_date
-                    FROM kline_data
-                    WHERE kline_type = 'DAY'
-                      AND kline_date >= DATE_SUB(CURDATE(), INTERVAL %s DAY)
-                      AND kline_date <= CURDATE()
-                    GROUP BY stock_code
-                    HAVING cnt >= 10
-                ) b ON a.stock_code = b.stock_code
-                WHERE a.market = 'HK' AND a.listing_date IS NOT NULL
-            """, (days,))
-            stock_rows = cursor.fetchall()
+    """找出近N天涨幅最大的股票（YAML 股票池 + 富途K线），计算距高点回撤"""
+    stock_rows = _stock_info_rows()
+    if not stock_rows:
+        return []
 
-            if not stock_rows:
-                return []
+    result = []
+    for i, row in enumerate(stock_rows, 1):
+        code = row.get('stock_code')
+        name = row.get('stock_name', code)
+        if not code:
+            continue
+        print(f"[{i}/{len(stock_rows)}] 拉取 {code} ...", end=' ')
+        df = _fetch_stock_klines(code, days=days)
+        if df is None or len(df) < 2:
+            print('数据不足')
+            continue
+        closes = df['close'].values
+        last_close = float(closes[-1])
+        period_low = float(closes.min())
+        period_high = float(closes.max())
+        gain = (last_close - period_low) / period_low * 100 if period_low else 0.0
+        drawdown = (period_high - last_close) / period_high * 100 if period_high else 0.0
+        result.append((
+            code, name, len(df), gain, drawdown,
+            df['date'].iloc[0].strftime('%Y-%m-%d'),
+            df['date'].iloc[-1].strftime('%Y-%m-%d'),
+        ))
+        print(f'{len(df)}天')
+        time.sleep(0.1)
 
-            # 批量查K线：用窗口函数分行，Python端算高低点
-            codes = [r[0] for r in stock_rows]
-            codes_str = "','".join(codes)
-            cursor.execute(f"""
-                SELECT stock_code, kline_date, close,
-                       ROW_NUMBER() OVER (PARTITION BY stock_code ORDER BY kline_date DESC) as rn
-                FROM kline_data
-                WHERE kline_type = 'DAY'
-                  AND stock_code IN ('{codes_str}')
-                  AND kline_date >= DATE_SUB(CURDATE(), INTERVAL %s DAY)
-                ORDER BY stock_code, kline_date DESC
-            """, (days,))
-            klines = cursor.fetchall()
-
-            stock_klines: dict = {}
-            for kline in klines:
-                code = kline[0]
-                if code not in stock_klines:
-                    stock_klines[code] = []
-                stock_klines[code].append(kline)
-
-            result = []
-            for stock_row in stock_rows:
-                code, name, cnt, sql_start_date, sql_end_date = stock_row
-                kl = stock_klines.get(code, [])
-                if len(kl) < 2:
-                    continue
-                closes = [float(k[2]) for k in kl]
-                last_close = closes[0]
-                period_low = min(closes)
-                period_high = max(closes)
-                gain = (last_close - period_low) / period_low * 100 if period_low else 0
-                drawdown = (period_high - last_close) / period_high * 100 if period_high else 0
-                # 用SQL区间的日期和交易日数，而不是Python取的len(kl)
-                result.append((code, name, cnt, gain, drawdown, sql_start_date, sql_end_date))
-
-            result.sort(key=lambda x: x[3], reverse=True)
-            return result[:limit]
-    return result
+    result.sort(key=lambda x: x[3], reverse=True)
+    return result[:limit]
 
 
 def search_stocks(keyword: str) -> list:
     """按名称或代码模糊搜索"""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT stock_code, stock_name FROM stock_info
-        WHERE market = 'HK' AND listing_date IS NOT NULL
-          AND (stock_code LIKE %s OR stock_name LIKE %s)
-        ORDER BY stock_name
-    """, (f'%{keyword}%', f'%{keyword}%'))
-    result = [(row[0], row[1]) for row in cursor.fetchall()]
-    cursor.close()
-    conn.close()
+    keyword = str(keyword or '').lower()
+    result = []
+    for r in _stock_info_rows():
+        code = str(r.get('stock_code', ''))
+        name = str(r.get('stock_name', ''))
+        if keyword in code.lower() or keyword in name.lower():
+            result.append((code, name))
+    result.sort(key=lambda x: x[1])
     return result
 
 
