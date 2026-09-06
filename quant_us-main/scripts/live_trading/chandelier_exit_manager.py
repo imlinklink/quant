@@ -766,6 +766,11 @@ class StopOrderTracker:
             if code in self._orders:
                 del self._orders[code]
 
+    def tracked_codes(self) -> List[str]:
+        """当前有跟踪条件单的代码列表（供 worker 周期性对账清理）。"""
+        with self._lock:
+            return list(self._orders.keys())
+
     def _get_trd_env(self):
         from futu import TrdEnv
         trd_env_str = self.live_cfg.get('trd_env', 'SIMULATE')
@@ -901,8 +906,11 @@ class StopOrderTracker:
             stop_changed = False
             profit_changed = False
 
-            if abs(stop_line - tracked['last_stop']) >= self.PRICE_EPSILON:
-                if tracked['stop_oid']:
+            qty_changed = abs(float(qty) - float(tracked.get('qty', 0))) > 0
+
+            if (abs(stop_line - tracked['last_stop']) >= self.PRICE_EPSILON
+                    or qty_changed or not tracked.get('stop_oid')):
+                if tracked.get('stop_oid'):
                     ok = self._modify_order(tracked['stop_oid'],
                                            self._stop_limit_price(direction, stop_line),
                                            qty,
@@ -922,10 +930,25 @@ class StopOrderTracker:
                         if tracked['stop_oid']:
                             stop_changed = True
                             tracked['last_stop'] = stop_line
+                            tracked['qty'] = qty
+                else:
+                    # 修复：上一轮撤旧挂新失败导致 stop_oid 为 None 时，
+                    # 这里必须重新挂单，否则该持仓会一直裸奔没有止损保护
+                    tracked['stop_oid'] = self._place_stop_order(
+                        code, direction, stop_line, qty)
+                    if tracked['stop_oid']:
+                        stop_changed = True
+                        tracked['last_stop'] = stop_line
+                        tracked['qty'] = qty
+                        logger.warning(
+                            f"[止损补挂] {code} 此前止损单缺失，已重新挂单 "
+                            f"oid={tracked['stop_oid']}"
+                        )
 
             if profit_line is not None:
                 old_profit = tracked.get('last_profit', 0)
-                if abs(profit_line - old_profit) >= self.PRICE_EPSILON:
+                if (abs(profit_line - old_profit) >= self.PRICE_EPSILON
+                        or qty_changed):
                     if tracked.get('profit_oid'):
                         ok = self._modify_order(
                             tracked['profit_oid'],
@@ -935,6 +958,7 @@ class StopOrderTracker:
                         if ok:
                             profit_changed = True
                             tracked['last_profit'] = profit_line
+                            tracked['qty'] = qty
                             logger.info(f"  {Colors.BLUE}[止盈改单]{Colors.RESET} {code} "
                                        f"{old_profit:.4f} → {profit_line:.4f} "
                                        f"oid={tracked['profit_oid']}")
@@ -946,12 +970,14 @@ class StopOrderTracker:
                             if tracked['profit_oid']:
                                 profit_changed = True
                                 tracked['last_profit'] = profit_line
+                                tracked['qty'] = qty
                     elif not tracked.get('profit_oid'):
                         profit_oid = self._place_profit_order(
                             code, direction, profit_line, qty, entry_price, current_price)
                         if profit_oid:
                             tracked['profit_oid'] = profit_oid
                             tracked['last_profit'] = profit_line
+                            tracked['qty'] = qty
                             profit_changed = True
             elif tracked.get('profit_oid') and not tracked.get('profit_line_active', False):
                 pass
@@ -1251,6 +1277,16 @@ class ChandelierExitManager:
             try:
                 pos = self._sync_positions()
                 codes = self.position_mgr.sync_positions(pos)
+                # 条件单对账：券商已无此仓（券商止损成交/APP手动平仓等）时，
+                # 撤销可能残留的止损/止盈条件单；否则同日重新开仓后
+                # 旧条件单可能按旧数量触发，误卖新仓位。
+                current_codes = set(codes)
+                for stale_code in self.stop_tracker.tracked_codes():
+                    if stale_code not in current_codes:
+                        logger.warning(
+                            f"[条件单对账] {stale_code} 已不在持仓，撤销残留条件单"
+                        )
+                        self.stop_tracker.cancel_all_for(stale_code)
                 self.atr_cache.set_stocks(list(codes))
                 atr_data = self.atr_cache.refresh()
 
