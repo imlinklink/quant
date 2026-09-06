@@ -150,6 +150,21 @@ test:
 	@echo "🧪 运行所有单元测试..."
 	python3 -m pytest -v --cov=. --cov-report=term-missing --cov-report=html:htmlcov
 
+# 关键回归套件：历轮修复固化测试（快、无需网络/OpenD）
+# 注：test_live_manager_base.py::test_do_selection_exception 为既有失败
+# （fetcher 异常被 _get_watch_pool 吞为 warning，测试期望 error），暂不纳入；
+# test_intraday_analyzer 集成组 3 例为既有失败，同样不纳入默认套件。
+test-quant:
+	@echo "🧪 运行关键回归套件（历轮修复固化）..."
+	python3 -m pytest \
+		tests/unit/live/test_round5_fixes.py \
+		tests/unit/live/test_intraday_fixes.py \
+		tests/unit/live/test_picker_confidence.py \
+		tests/unit/strategies/test_unified_exit_fallback.py \
+		tests/unit/strategies/test_exit_strategy.py \
+		tests/unit/llm/test_market_brief_schema.py \
+		-q -p no:cacheprovider -o addopts=''
+
 test-v:
 	@echo "🧪 运行单元测试（详细输出）..."
 	python3 -m pytest -vv --cov=. --cov-report=term-missing --cov-report=html:htmlcov
