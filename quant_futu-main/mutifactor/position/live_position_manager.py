@@ -302,6 +302,10 @@ class LivePositionManager(BasePositionManager):
         与券商同步持仓
         
         从券商获取实际持仓，更新本地状态。
+
+        ⚠️ 注意：实盘/回测实际不使用本类（入口是
+        scripts/live_trading/position_manager_base.py 的 HKPositionManager）。
+        保留本实现仅为兼容旧导出；直接调用前请先核对字段语义。
         
         Returns:
             是否同步成功
@@ -331,12 +335,16 @@ class LivePositionManager(BasePositionManager):
                 for pos in active_positions:
                     code = pos['stock_code']
                     if code in to_add:
+                        # 富途持仓查询没有买入日期/历史最高价：
+                        # buy_date 回退今天（holding_days=0，保守），
+                        # highest_price 必须 >= 成本价——写 0 会让吊灯止盈/止损误触发
+                        cost_price = float(pos.get('cost_price') or pos.get('price') or 0)
                         self.positions[code] = Position(
                             stock_code=code,
                             quantity=pos['quantity'],
-                            cost_price=pos.get('cost_price', pos.get('price', 0)),
+                            cost_price=cost_price,
                             buy_date=pos.get('buy_date', datetime.now().strftime('%Y-%m-%d')),
-                            highest_price=pos.get('price', 0),
+                            highest_price=max(cost_price, float(pos.get('price') or 0)),
                             manual=code in self.manual_position_codes
                         )
                         logger.info(f"[{self.market_type_str}] 同步: 添加新持仓 {code}")
