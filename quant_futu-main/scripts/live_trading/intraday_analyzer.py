@@ -179,7 +179,9 @@ class IntradayAnalyzer:
         self.watch_threshold = self.cfg.get('watch_threshold', 4)
 
         # ─── 追涨打分参数（Phase 2）─────────────────────────────
-        bo_cfg = (config or {}).get('momentum', {})
+        # 追涨参数在 trading.live_trading.buy_timing.analysis.momentum 下；
+        # 之前误读 buy_timing 顶层 'momentum'（恒为空），导致配置全部失效退回默认值
+        bo_cfg = self.cfg.get('momentum', {})
         self.bo_rsi_strong = bo_cfg.get('rsi_strong', 65)
         self.bo_rsi_moderate = bo_cfg.get('rsi_moderate', 55)
         self.bo_rsi_weak = bo_cfg.get('rsi_weak', 50)
@@ -286,10 +288,10 @@ class IntradayAnalyzer:
 
     def _calc_rsi(self, bars: pd.DataFrame) -> Tuple[float, int]:
         """
-        计算RSI(14)及得分
+        计算RSI(14)及得分（三级超卖阈值：severe=3 / oversold=2 / <40=1）。
 
-        增强逻辑：RSI超卖时，必须连续下跌至少2根才给分
-        避免在刚开始下跌时就触发（假信号），只捕捉真正触底的反弹
+        注：早期注释提到“RSI 超卖需连续下跌≥2根才给分”，当前实现未包含
+        该连续下跌过滤，注释已按实现校正。
         """
         closes = bars['close'].values
         if len(closes) < self.rsi_period + 1:
@@ -426,13 +428,15 @@ class IntradayAnalyzer:
             score += 1
             details.append("双阴反阳")
 
-        # 连续下跌后出现小阳线
+        # 连续下跌后出现小阳线（企稳）：
+        # 前一/前二根在跌（close[-2] <= close[-3]），最后一根翻红收在上一根之上
         if len(bars) >= 3:
             recent_closes = bars['close'].values[-3:]
-            if all(recent_closes[i] <= recent_closes[i-1] for i in range(1, 3)):
-                if last['close'] > last['open'] and last['close'] > bars.iloc[-2]['close']:
-                    score += 1
-                    details.append("跌后企稳")
+            if (recent_closes[-2] <= recent_closes[-3]
+                    and last['close'] > last['open']
+                    and last['close'] > recent_closes[-2]):
+                score += 1
+                details.append("跌后企稳")
 
         detail_str = ",".join(details) if details else "无形态"
         return min(score, 3), detail_str
@@ -639,8 +643,8 @@ class IntradayAnalyzer:
         score = 0
 
         if len(closes) >= 2:
-            # 上涨放量（主力进攻信号）
-            if closes[-1] > closes[-2] and current_vol > avg_vol * self.volume_ratio_threshold:
+            # 上涨放量（主力进攻信号）——追涨模式用量价专用阈值
+            if closes[-1] > closes[-2] and current_vol > avg_vol * self.bo_volume_surge_ratio:
                 score += 2
             elif closes[-1] > closes[-2] and current_vol > avg_vol * 1.2:
                 score += 1  # 温和放量上涨

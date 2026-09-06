@@ -948,6 +948,25 @@ class LiveTradingManager(ABC):
             logger.info("LLM 否决买入，本轮跳过")
             return
 
+        # max_positions 上限：当前持仓数 + 本轮待买 ≤ 配置上限。
+        # 实盘选股侧 strategy.positions 恒为空（每次新建策略实例），
+        # 不能依赖选股阶段的 available_slots 限流，必须在买入前截断。
+        try:
+            max_positions = int(self.config.get('momentum', {}).get('max_positions', 3))
+            held_count = len(self._position_codes())
+            slots = max(0, max_positions - held_count)
+            if slots == 0:
+                logger.info(f"[{self.market_type}] 持仓已达上限({held_count}/{max_positions})，本轮不新增买入")
+                return
+            if len(stocks_to_buy) > slots:
+                logger.warning(
+                    f"[{self.market_type}] 待买 {len(stocks_to_buy)} 只超过剩余空位 "
+                    f"{slots}（持仓 {held_count}/{max_positions}），截断至前 {slots} 只"
+                )
+                stocks_to_buy = stocks_to_buy[:slots]
+        except Exception as e:
+            logger.warning(f"[{self.market_type}] max_positions 截断计算失败，按原计划执行: {e}")
+
         # 计算买入数量和资金
         strategy_remaining = self.position_manager.get_remaining_capital()
         max_ratio = float(self.config.get('risk', {}).get('max_single_position_ratio', 0.5))
@@ -2222,6 +2241,18 @@ class LiveTradingManager(ABC):
         try:
             if not self.approval_store.mark(pid, 'executing', note='用户已确认，开始下单'):
                 return  # 已在执行或已结束，防止重复下单
+
+            # 持仓上限复检：多张已确认买单排队时，逐张执行前都要确认仍有空位
+            try:
+                max_positions = int(self.config.get('momentum', {}).get('max_positions', 3))
+                if len(self.position_manager.strategy_positions) >= max_positions:
+                    self.approval_store.mark(
+                        pid, 'skipped',
+                        note=f'持仓已满（{max_positions}），等待平仓后再买',
+                    )
+                    return
+            except Exception:
+                pass
 
             # 复检 1：是否已持仓 / 今日已买 / 冷却期
             if code in self.position_manager.strategy_positions:

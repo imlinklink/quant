@@ -103,8 +103,10 @@ class BuyTimingStrategy:
             from .intraday_analyzer import IntradayAnalyzer
 
             trading_cfg = self.config.get('trading', {})
-            host = trading_cfg.get('host', '127.0.0.1')
-            port = trading_cfg.get('port', 11111)
+            futu_cfg = trading_cfg.get('futu', {})
+            # 与 PriceFetcher/FutuTrader 一致：OpenD 地址在 trading.futu.host/port
+            host = futu_cfg.get('host', trading_cfg.get('host', '127.0.0.1'))
+            port = futu_cfg.get('port', trading_cfg.get('port', 11111))
 
             self._intraday_kline_provider = IntradayKlineProvider(
                 host=host, port=port, cache_ttl=kline_cfg.get('cache_ttl', 25)
