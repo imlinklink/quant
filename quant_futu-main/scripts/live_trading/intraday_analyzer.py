@@ -327,6 +327,124 @@ class IntradayAnalyzer:
 
         return float(rsi), score
 
+    # ─── 阶段低点抄底（v1：日线位置 + RSI 拐头 + 止损距离，日内仅做确认） ─────
+
+    @staticmethod
+    def _rsi_series(closes: np.ndarray, period: int = 14) -> np.ndarray:
+        if len(closes) <= period:
+            return np.full(len(closes), 50.0)
+        deltas = np.diff(closes)
+        gains = np.where(deltas > 0, deltas, 0.0)
+        losses = np.where(deltas < 0, -deltas, 0.0)
+        avg_gain = gains[:period].mean()
+        avg_loss = losses[:period].mean()
+        rsi = np.full(len(closes), 50.0)
+        for i in range(period, len(deltas)):
+            avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+            avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+            if avg_loss == 0:
+                rsi[i + 1] = 100.0
+            else:
+                rs = avg_gain / avg_loss
+                rsi[i + 1] = 100.0 - (100.0 / (1.0 + rs))
+        return rsi
+
+    def analyze_bottom_fish_daily(
+        self,
+        daily_df: pd.DataFrame,
+        price: float,
+    ) -> Dict:
+        """阶段低点评分（目标：几天级别的低点，不是分时超卖反弹）。
+
+        规则（v1，全部可配）：
+          - 现价在近 20 日低点上方不远（拉回低位，但未追高）
+          - 距 20 日高点回撤 >= 阈值（说明是回调不是新高追涨）
+          - 日线 RSI(14) 处于超卖区给基础分
+          - 拐头确认：RSI 回升 + 今日最低不再创新低 → 给确认分（权重更高）
+          - 止损距离否决：以近 20 日最低为参考止损，距离 > 阈值直接放弃
+        """
+        cfg = (self.cfg or {}).get('bottom_fish_daily', {})
+        pullback_max = float(cfg.get('pullback_from_low_pct', 0.06))
+        retreat_min = float(cfg.get('retreat_from_high_pct', 0.03))
+        stop_dist_max = float(cfg.get('max_stop_distance_pct', 0.04))
+        rsi_oversold = float(cfg.get('rsi_oversold', 32))
+        rsi_moderate = float(cfg.get('rsi_moderate', 38))
+        confirm_need = float(cfg.get('confirm_min_score', 3))
+
+        base = {'ok': False, 'score': 0, 'signal': 'no_buy',
+                'details': '阶段低点未触发', 'rsi': None, 'rsi_turn': False,
+                'pullback_pct': None, 'stop_distance_pct': None,
+                'ref_low': None, 'kline_signal': 'bottom_fish_daily'}
+        if daily_df is None or len(daily_df) < 22:
+            base['details'] = '日线数据不足（<22根）'
+            return base
+        try:
+            closes = daily_df['close'].values.astype(float)
+            highs = daily_df['high'].values.astype(float)
+            lows = daily_df['low'].values.astype(float)
+        except Exception as e:
+            base['details'] = f'日线字段异常: {e}'
+            return base
+        if price is None or price <= 0:
+            base['details'] = '无当前价'
+            return base
+
+        ref_low = float(lows[-20:].min())
+        high20 = float(highs[-20:].max())
+        pullback = (price - ref_low) / ref_low if ref_low > 0 else 0.0
+        retreat = (high20 - price) / high20 if high20 > 0 else 0.0
+        stop_dist = (price - ref_low) / price if price > 0 else 0.0
+
+        # 止损距离否决：离参考低点太远 = 时机已过 / 止损空间过大
+        if stop_dist > stop_dist_max:
+            base['details'] = (
+                f'止损距离 {stop_dist * 100:.1f}% > {stop_dist_max * 100:.0f}%'
+                f'（参考低点 {ref_low:.2f}），放弃'
+            )
+            return base
+        if retreat < retreat_min:
+            base['details'] = (
+                f'距20日高点回撤仅 {retreat * 100:.1f}% < '
+                f'{retreat_min * 100:.0f}%，非回调低位，放弃'
+            )
+            return base
+
+        rsi_series = self._rsi_series(closes)
+        rsi_now = float(rsi_series[-1])
+        rsi_prev = float(rsi_series[-2]) if len(rsi_series) >= 2 else rsi_now
+        no_new_low = len(lows) >= 2 and float(lows[-1]) > float(lows[-6:-1].min())
+        rsi_turn = rsi_now > rsi_prev and no_new_low
+
+        base_score = 0
+        if rsi_now < rsi_oversold:
+            base_score = 2
+        elif rsi_now < rsi_moderate:
+            base_score = 1
+        confirm = 2 if rsi_turn else 0
+        total = base_score + confirm
+        base.update({
+            'rsi': round(rsi_now, 2), 'rsi_turn': bool(rsi_turn),
+            'pullback_pct': round(pullback * 100, 2),
+            'stop_distance_pct': round(stop_dist * 100, 2),
+            'ref_low': round(ref_low, 3),
+            'score': total,
+        })
+        if total < confirm_need:
+            base['details'] = (
+                f'RSI {rsi_now:.1f} 基础{base_score}+拐头{confirm} '
+                f'不足 {confirm_need} 分'
+            )
+            return base
+        base['ok'] = True
+        base['signal'] = 'strong_buy' if total >= 4 else 'buy'
+        base['details'] = (
+            f'阶段低点: RSI {rsi_now:.1f}'
+            f'{"↑拐头" if rsi_turn else "未拐头"} | '
+            f'距低点 {pullback * 100:.1f}% | 参考止损 {ref_low:.3f} '
+            f'(距离 {stop_dist * 100:.1f}%)'
+        )
+        return base
+
     # ─── 布林带 ──────────────────────────────────────────────────────────
 
     def _calc_bollinger(self, bars: pd.DataFrame, current_price: float) -> Tuple[float, int]:

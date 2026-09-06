@@ -289,6 +289,9 @@ class BuyTimingStrategy:
     # ====================== K线评分：追涨/抄底分支 ======================
     def _get_kline_score(self, stock_code: str, price: float, force_refresh: bool = False,
                          price_fetcher=None) -> Tuple[int, str, Optional[Dict]]:
+        # 主路径也尊重 kline_enable_time（与 _check_intraday_kline/_get_intraday_kline_scores 一致）
+        if datetime.now().time() < self.kline_enable_time:
+            return 0, "K线分析未启用", None
         if not self._intraday_kline_provider or not self._intraday_analyzer:
             return 0, "K线分析器未就绪", None
 

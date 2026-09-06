@@ -833,6 +833,53 @@ class LiveTradingManager(ABC):
         except Exception as e:
             logger.error(f"{self.market_type}选股失败: {type(e).__name__}: {e}", exc_info=True)
 
+    def _dip_daily_cfg(self) -> Dict:
+        bt = (self.config.get('trading', {}).get('live_trading', {})
+              .get('buy_timing', {}).get('smart', {}))
+        return (bt.get('bottom_fish_daily') or {}) if isinstance(bt, dict) else {}
+
+    def _dip_daily_enabled(self) -> bool:
+        try:
+            return bool(self._dip_daily_cfg().get('enabled', False))
+        except Exception:
+            return False
+
+    def _hsi_gate_ok(self) -> tuple:
+        """恒指大盘闸（阶段低点抄底用；默认关闭）。失败放行并记录。"""
+        try:
+            mg = (self.config.get('trading', {}).get('live_trading', {})
+                  .get('buy_timing', {}).get('smart', {}).get('market_gate') or {})
+            if not bool(mg.get('enabled', False)):
+                return True, ''
+            drop_pct = float(mg.get('hsi_drop_pct', 0.01))
+            cache = getattr(self, '_hsi_gate_cache', None)
+            now = time.time()
+            if cache and now - cache[0] < 300:
+                return cache[1], cache[2]
+            if self._shared_fetcher is None:
+                return True, ''
+            end = datetime.now().date()
+            start = end - timedelta(days=90)
+            df = self._shared_fetcher.fetch_stock_kline(
+                'HK.800000', start.strftime('%Y-%m-%d'), end.strftime('%Y-%m-%d')
+            )
+            allowed, note = True, ''
+            if df is not None and len(df) >= 25:
+                closes = df.sort_values('date')['close'].astype(float).values
+                ma20 = float(closes[-20:].mean())
+                last = float(closes[-1])
+                prev = float(closes[-2]) if len(closes) > 1 else last
+                drop = last / prev - 1 if prev > 0 else 0.0
+                if last < ma20 and drop <= -drop_pct:
+                    allowed = False
+                    note = (f'恒指 {last:.0f} < MA20 {ma20:.0f} 且日内跌 '
+                            f'{drop * 100:.1f}%，暂停阶段低点抄底')
+            self._hsi_gate_cache = (now, allowed, note)
+            return allowed, note
+        except Exception as e:
+            logger.warning(f'[大盘闸] 恒指状态获取失败，放行: {e}')
+            return True, ''
+
     def _do_buy(self):
         """执行买入"""
         self._last_buy_veto_result = None
@@ -966,6 +1013,48 @@ class LiveTradingManager(ABC):
                 stocks_to_buy = stocks_to_buy[:slots]
         except Exception as e:
             logger.warning(f"[{self.market_type}] max_positions 截断计算失败，按原计划执行: {e}")
+
+        # ===== v1 阶段低点抄底（日线位置/RSI拐头/止损距离，默认关闭）=====
+        daily_details: Dict[str, Dict] = {}
+        if self._dip_daily_enabled():
+            gate_ok, gate_note = self._hsi_gate_ok()
+            if not gate_ok:
+                logger.warning(f'[阶段低点] {gate_note}，本轮跳过')
+                return
+            analyzer = None
+            if self.buy_timing is not None:
+                analyzer = getattr(self.buy_timing, '_intraday_analyzer', None)
+            kept = []
+            for code in stocks_to_buy:
+                daily_df = (self.kline_cache or {}).get(code)
+                px = self.price_fetcher.get_current_price(code)
+                try:
+                    res = (analyzer.analyze_bottom_fish_daily(daily_df, px)
+                           if analyzer is not None else None)
+                except Exception as e:
+                    logger.warning(f'[阶段低点] {code} 评分异常: {e}')
+                    res = None
+                if not res or not res.get('ok'):
+                    detail = (res or {}).get('details', '未触发')
+                    logger.info(f'[阶段低点] 跳过 {code}: {detail}')
+                    continue
+                kept.append(code)
+                daily_details[code] = res
+                logger.info(
+                    f'[阶段低点] {code} 通过: {res.get("details", "")}'
+                )
+            stocks_to_buy = kept
+            if not stocks_to_buy:
+                logger.info('[阶段低点] 本轮无候选通过，跳过买入')
+                return
+            # 把日线阶段低点理由合并进提案卡片展示字段
+            for code, d in daily_details.items():
+                merged = dict(kline_details_by_code.get(code) or {})
+                merged['score'] = d.get('score')
+                merged['signal'] = d.get('signal', 'buy')
+                merged['kline_signal'] = '阶段低点'
+                merged['details'] = d.get('details', '')
+                kline_details_by_code[code] = merged
 
         # 计算买入数量和资金
         strategy_remaining = self.position_manager.get_remaining_capital()
