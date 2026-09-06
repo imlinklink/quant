@@ -2173,6 +2173,48 @@ class LiveTradingManager(ABC):
             for it in self.approval_store.get_all()
         )
 
+    def _sell_market_context(self) -> str:
+        """卖出确认的市场上下文（展示 + 喂给 LLM；失败降级为空）。"""
+        parts = []
+        try:
+            from scripts.live_trading import market_brief as mb
+            b = mb.load_brief()
+            if b and b.get('date'):
+                parts.append(
+                    f"简报 {b['date']}: risk={b.get('risk_level')} "
+                    f"buy={b.get('buy_frequency')}"
+                )
+        except Exception:
+            pass
+        try:
+            cache = getattr(self, '_hsi_sell_cache', None)
+            now = time.time()
+            txt = ''
+            if cache and now - cache[0] < 300:
+                txt = cache[1]
+            elif self._shared_fetcher is not None:
+                end = datetime.now().date()
+                start = end - timedelta(days=90)
+                df = self._shared_fetcher.fetch_stock_kline(
+                    'HK.800000', start.strftime('%Y-%m-%d'),
+                    end.strftime('%Y-%m-%d'),
+                )
+                if df is not None and len(df) >= 25:
+                    closes = df.sort_values('date')['close'].astype(float).values
+                    last = float(closes[-1])
+                    prev = float(closes[-2]) if len(closes) > 1 else last
+                    ma20 = float(closes[-20:].mean())
+                    chg = (last / prev - 1) * 100 if prev > 0 else 0.0
+                    side = 'MA20下方' if last < ma20 else 'MA20上方'
+                    txt = (f'恒指 {last:.0f} ({chg:+.1f}%) '
+                           f'MA20 {ma20:.0f}（{side}）')
+                self._hsi_sell_cache = (now, txt)
+            if txt:
+                parts.append(txt)
+        except Exception as e:
+            logger.debug(f'[卖出] 恒指上下文获取失败: {e}')
+        return '；'.join(parts)
+
     def queue_sell_proposal(self, code: str, reason: str, quantity: int = None,
                             pnl_pct: float = None,
                             position_info: Dict = None) -> bool:
@@ -2199,6 +2241,15 @@ class LiveTradingManager(ABC):
             return False
         pnl = pnl_pct if pnl_pct is not None else ((price - cost) / cost if cost > 0 else 0.0)
         ttl = float(self._sell_cfg().get('ttl_seconds', 300))
+        market_ctx = ''
+        if bool(self._sell_cfg().get('attach_market_context', True)):
+            market_ctx = self._sell_market_context()
+        reason_text = (
+            f'【卖出确认】规则触发: {reason}；成本 {cost:.3f}，现价约 {price:.3f}，'
+            f'浮盈 {pnl * 100:+.1f}%；超时 {int(ttl)} 秒未确认将自动执行。'
+        )
+        if market_ctx:
+            reason_text += f'\n市场: {market_ctx}'
 
         created = self.approval_store.create(
             side='sell',
@@ -2211,10 +2262,7 @@ class LiveTradingManager(ABC):
             estimated_cost=round(price * qty, 2),
             entry_mode=str(pos.get('entry_mode') or 'manual'),
             trigger_reason=f'卖出|{reason}',
-            reason=(
-                f'【卖出确认】规则触发: {reason}；成本 {cost:.3f}，现价约 {price:.3f}，'
-                f'浮盈 {pnl * 100:+.1f}%；超时 {int(ttl)} 秒未确认将自动执行。'
-            ),
+            reason=reason_text,
             llm=None,
             position_cost=cost,
             pnl_pct=round(pnl, 5),
@@ -2237,6 +2285,7 @@ class LiveTradingManager(ABC):
                             f'浮盈 {pnl * 100:+.1f}%'
                         ),
                         sell_reason=reason,
+                        market_context=market_ctx or None,
                     )
                     if result:
                         self.approval_store.update_fields(
