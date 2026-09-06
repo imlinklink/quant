@@ -1099,6 +1099,8 @@ class LiveTradingManager(ABC):
                 merged['signal'] = d.get('signal', 'buy')
                 merged['kline_signal'] = '阶段低点'
                 merged['details'] = d.get('details', '')
+                merged['ref_low'] = d.get('ref_low')
+                merged['structure_stop'] = d.get('structure_stop')
                 kline_details_by_code[code] = merged
 
         # 计算买入数量和资金
@@ -1152,7 +1154,9 @@ class LiveTradingManager(ABC):
                 'code': stock_code,
                 'quantity': quantity,
                 'price': current_price,
-                'entry_mode': entry_mode
+                'entry_mode': entry_mode,
+                'anchor_low': (daily_details.get(stock_code) or {}).get('ref_low'),
+                'structure_stop': (daily_details.get(stock_code) or {}).get('structure_stop'),
             })
 
         logger.info(f"买入列表: {buy_list}")
@@ -1833,6 +1837,10 @@ class LiveTradingManager(ABC):
             )
             if shadow_suffix:
                 proposal_reason += f"；{shadow_suffix}"
+            extra_fields = {}
+            for _k in ('anchor_low', 'structure_stop'):
+                if (kline or {}).get(_k) is not None:
+                    extra_fields[_k] = (kline or {}).get(_k)
             self.approval_store.create(
                 side='buy',
                 stock_code=code,
@@ -1850,6 +1858,7 @@ class LiveTradingManager(ABC):
                 reason=proposal_reason,
                 context=context_text,
                 llm=llm_info,
+                **extra_fields,
             )
             queued += 1
             logger.info(
@@ -2464,12 +2473,17 @@ class LiveTradingManager(ABC):
                 return
 
             before = self._position_codes()
+            _extra = {}
+            for _k in ('anchor_low', 'structure_stop'):
+                if item.get(_k) is not None:
+                    _extra[_k] = item.get(_k)
             self.position_manager.execute_buy([{
                 'code': code,
                 'quantity': quantity,
                 'price': price,
                 'entry_mode': item.get('entry_mode') or 'bottom_fish',
                 'proposal_id': pid,
+                **_extra,
             }])
             after = self._position_codes()
             if code in after and code not in before:

@@ -396,6 +396,20 @@ class HKPositionManager(PositionManagerBase):
         # 检查是否为手动买入
         is_manual = self.strategy_positions.get(stock_code, {}).get('manual', False)
 
+        # 结构止损（bottom_fish 阶段低点入场锚定）：参考低点 - buffer×日线ATR，
+        # 只作为初始硬止损，不随价格上涨（锁盈交给吊顶/后续移动止盈）
+        structure_stop = 0.0
+        try:
+            structure_stop = float((position or {}).get('structure_stop') or 0)
+        except (TypeError, ValueError):
+            structure_stop = 0.0
+        if structure_stop > 0 and price <= structure_stop and not is_manual:
+            logger.warning(
+                f"[HK] {stock_code} 结构止损触发: 现价 {price:.3f} "
+                f"<= 结构止损 {structure_stop:.3f}"
+            )
+            return True, 'structure_stop', 0.0, 0.0, structure_stop
+
         # ==================== Layer 1: 追涨止损保护 ====================
         if entry_mode == 'momentum' and not is_manual:
             should_exit, reason, atr = self._check_momentum_stop(

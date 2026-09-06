@@ -370,6 +370,7 @@ class IntradayAnalyzer:
         rsi_oversold = float(cfg.get('rsi_oversold', 32))
         rsi_moderate = float(cfg.get('rsi_moderate', 38))
         confirm_need = float(cfg.get('confirm_min_score', 3))
+        stop_atr_buffer = float(cfg.get('structure_stop_atr_buffer', 0.5))
 
         base = {'ok': False, 'score': 0, 'signal': 'no_buy',
                 'details': '阶段低点未触发', 'rsi': None, 'rsi_turn': False,
@@ -437,11 +438,27 @@ class IntradayAnalyzer:
             return base
         base['ok'] = True
         base['signal'] = 'strong_buy' if total >= 4 else 'buy'
+        # 结构止损：参考低点 - buffer×日线ATR（传导给持仓做初始硬止损）
+        try:
+            _h = daily_df['high'].values.astype(float)
+            _l = daily_df['low'].values.astype(float)
+            _c = daily_df['close'].values.astype(float)
+            _tr = np.maximum(
+                _h[1:] - _l[1:],
+                np.maximum(np.abs(_h[1:] - _c[:-1]),
+                           np.abs(_c[:-1] - _l[1:])),
+            )
+            daily_atr = float(np.mean(_tr[-14:])) if len(_tr) >= 14 else 0.0
+        except Exception:
+            daily_atr = 0.0
+        base['structure_stop'] = round(
+            float(ref_low - stop_atr_buffer * daily_atr), 3
+        )
         base['details'] = (
             f'阶段低点: RSI {rsi_now:.1f}'
             f'{"↑拐头" if rsi_turn else "未拐头"} | '
             f'距低点 {pullback * 100:.1f}% | 参考止损 {ref_low:.3f} '
-            f'(距离 {stop_dist * 100:.1f}%)'
+            f'(距离 {stop_dist * 100:.1f}%) | 结构止损 {base["structure_stop"]}'
         )
         return base
 

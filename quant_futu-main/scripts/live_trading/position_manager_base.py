@@ -228,7 +228,7 @@ class PositionManagerBase(ABC):
         stop_reason_codes = {
             'atr_stop_loss', 'decline_stop', 'rsrs_stop',
             'early_hard_stop', 'time_exit', 'momentum_stop',
-            'trailing_stop', 'hard_stop',
+            'trailing_stop', 'hard_stop', 'structure_stop',
         }
         # 卖出确认链路会把原因包装成 “卖出|atr_stop_loss” 之类前缀，逐个 token 匹配
         if any(t in stop_reason_codes for t in r.split('|')):
@@ -489,6 +489,8 @@ class PositionManagerBase(ABC):
                         'buy_date': datetime.now().strftime('%Y-%m-%d'),
                         'entry_mode': buy.get('entry_mode', 'bottom_fish'),
                         'proposal_id': buy.get('proposal_id'),
+                        'anchor_low': buy.get('anchor_low'),
+                        'structure_stop': buy.get('structure_stop'),
                     }
                     self.strategy_used_capital += buy['cost']
                     if buy.get('buy_fee'):

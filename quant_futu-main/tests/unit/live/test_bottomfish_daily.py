@@ -41,6 +41,8 @@ class TestBottomFishDaily(unittest.TestCase):
         assert res['ok'] is True, res['details']
         assert res['rsi_turn'] is True
         assert res['score'] >= 3
+        assert res.get('structure_stop') is not None
+        assert 0 < res['structure_stop'] < price
 
     def test_stop_distance_veto(self):
         df = _daily(_decline_then_stabilize())
