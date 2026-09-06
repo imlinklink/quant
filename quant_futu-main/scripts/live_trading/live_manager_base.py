@@ -1930,16 +1930,24 @@ class LiveTradingManager(ABC):
 
     def _dev_simulate_sell(self, code: str, reason: str = '模拟止盈触发（演示）',
                            pnl_pct: float = None) -> Dict:
-        """周末演示：对演示持仓生成卖出确认提案（LLM+人工+超时兜底）。"""
+        """周末演示：对演示持仓生成卖出确认提案（LLM+人工+超时兜底）。
+
+        参数 pnl_pct 为百分数（如 5 = +5%），内部转小数后交给真实卖出链路，
+        避免卡片显示把 3 渲染成 +300%（真实链路 pnl_pct 为小数）。
+        """
         if not self._demo_env_ok():
             raise RuntimeError('演示模式仅港股 SIMULATE 可用')
         pos = self.position_manager.strategy_positions.get(code)
         if not pos or not pos.get('demo'):
             raise ValueError('仅演示持仓可触发演示卖出')
+        try:
+            pnl_frac = float(pnl_pct) / 100.0 if pnl_pct is not None else None
+        except (TypeError, ValueError):
+            pnl_frac = None
         ok = self.queue_sell_proposal(
             code, f'模拟演示（非真实盈亏）: {str(reason or "模拟止盈触发")}',
             quantity=int(pos.get('quantity', 0)),
-            pnl_pct=pnl_pct,
+            pnl_pct=pnl_frac,
         )
         if not ok:
             raise RuntimeError('卖出提案生成失败（可能已有待确认卖出或处于拒绝冷却期）')
