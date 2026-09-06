@@ -5,6 +5,9 @@
     export DEEPSEEK_API_KEY=sk-xxx   # 或已写进 config.yaml
     python scripts/live_trading/llm_suggestions/run_suggestions.py
     python scripts/live_trading/llm_suggestions/run_suggestions.py --dirs /path/to/reports
+    python scripts/live_trading/llm_suggestions/run_suggestions.py  # 自动带上 xcom 外部观点
+    python scripts/live_trading/llm_suggestions/run_suggestions.py \
+        --views /path/推特观点1.txt /path/推特观点2.md
     python scripts/live_trading/llm_suggestions/run_suggestions.py --demo  # 不调 API 的自测
 """
 import argparse
@@ -28,10 +31,56 @@ DEFAULT_DIRS = [
     '/Users/wh1817w/Documents/github/mySkill/report-result',
 ]
 
+# 外部观点默认目录（推特总结等第三方观点，自动作为素材喂给大模型）
+DEFAULT_VIEW_DIRS = [
+    '/Users/wh1817w/Documents/xcom',
+]
+
+# 本工程只生成美股候选（港股写自己的 hk_latest.json）
+SELF_MARKET = 'US'
+
+
+def load_view_files(paths) -> list:
+    """读取外部观点文件（txt/md/html），返回 [{source, text, path}]。
+    传目录则递归收集同后缀文件；单个文件直接读。
+    """
+    suffixes = ('.txt', '.md', '.markdown', '.html', '.htm')
+    views = []
+    for p in paths or []:
+        path = Path(p)
+        files = []
+        try:
+            if path.is_dir():
+                files = sorted(
+                    f for f in path.rglob('*')
+                    if f.is_file() and f.suffix.lower() in suffixes
+                )
+            elif path.is_file():
+                files = [path]
+        except OSError as e:
+            logger.warning(f'外部观点路径不可读 {p}: {e}')
+            continue
+        for f in files:
+            try:
+                if f.suffix.lower() in ('.html', '.htm'):
+                    text = report_reader.html_to_text(str(f)).strip()
+                else:
+                    text = f.read_text(
+                        encoding='utf-8', errors='replace').strip()
+            except OSError as e:
+                logger.warning(f'读取外部观点失败 {f}: {e}')
+                continue
+            if not text:
+                continue
+            views.append({'source': f.name, 'text': text, 'path': str(f)})
+    return views
+
 
 def main():
     parser = argparse.ArgumentParser(description='LLM 选股建议生成器')
     parser.add_argument('--dirs', nargs='*', default=DEFAULT_DIRS, help='日报所在目录')
+    parser.add_argument('--views', nargs='*', default=None,
+                        help='外部观点文件/目录（默认取 DEFAULT_VIEW_DIRS: xcom）')
     parser.add_argument('--demo', action='store_true', help='自测模式：不调 LLM，生成示例候选')
     args = parser.parse_args()
 
@@ -47,6 +96,15 @@ def main():
     pre_text = report_reader.html_to_text(pre_path) if pre_path else ''
     post_text = report_reader.html_to_text(post_path) if post_path else ''
     logger.info(f'提取文本: 盘前 {len(pre_text)} 字符 / 盘后 {len(post_text)} 字符')
+
+    view_paths = args.views if args.views else DEFAULT_VIEW_DIRS
+    external_views = load_view_files(view_paths)
+    if not args.views:
+        logger.info(f'使用默认外部观点目录: {DEFAULT_VIEW_DIRS}')
+    for v in external_views:
+        logger.info(f'外部观点素材: {v["source"]}（{len(v["text"])} 字符）')
+    if args.views and not external_views:
+        logger.warning('--views 指定的文件没有读到有效内容，将不带外部观点运行')
 
     if args.demo:
         result = {
@@ -66,7 +124,8 @@ def main():
             },
         }
     else:
-        result = picker.generate(pre_text, post_text)
+        result = picker.generate(pre_text, post_text,
+                                 external_views=external_views)
 
     if not result.get('ok'):
         logger.error(f"生成失败: {result.get('error')}")
@@ -75,12 +134,24 @@ def main():
         return 1
 
     data = result['data']
+    before = len(data.get('candidates') or [])
+    data['candidates'] = [
+        c for c in (data.get('candidates') or [])
+        if c.get('market') == SELF_MARKET
+    ]
+    dropped = before - len(data['candidates'])
+    if dropped:
+        logger.info(f'丢弃 {dropped} 条非{SELF_MARKET}市场候选（按市场分流）')
     payload = {
         'generated_at': datetime.now().isoformat(timespec='seconds'),
         'reports': {
             'pre': str(pre_path) if pre_path else None,
             'post': str(post_path) if post_path else None,
         },
+        'external_views': [
+            {'source': v['source'], 'path': v.get('path')}
+            for v in external_views
+        ],
         'summary': data.get('summary', ''),
         'candidates': data.get('candidates', []),
     }
@@ -103,7 +174,7 @@ def main():
         print(f"   理由: {c.get('rationale', '')[:120]}")
     print()
     print('打开确认页查看：')
-    print('  http://127.0.0.1:8899/suggestions   (美股系统)')
+    print('  http://127.0.0.1:8890/suggestions   (美股系统)')
     print('  http://127.0.0.1:8899/suggestions   (港股系统运行时)')
     return 0
 

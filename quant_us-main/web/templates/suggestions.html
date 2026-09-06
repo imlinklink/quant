@@ -91,7 +91,7 @@ async function load() {
     const cs = data.candidates || [];
     const now = new Date().toLocaleString('zh-CN', { hour12: false });
     document.getElementById('meta').textContent = now + ' · ' + cs.length + ' 条建议 · ' +
-      '美股池 ' + (d.us_watch || []).length + ' 只 · 港股池 ' + (d.hk_watch || []).length + ' 只';
+      '美股池 ' + (d.us_watch || []).length + ' 只';
     const s = document.getElementById('summary');
     if (!data.generated_at) {
       s.innerHTML = '⚠️ 还没有生成建议。<br>先运行：<b>python scripts/live_trading/llm_suggestions/run_suggestions.py</b>';
