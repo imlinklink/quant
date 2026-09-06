@@ -1,11 +1,14 @@
 """观察池写入：把 LLM 建议（人工确认后）追加到对应 config 的 watch_list。"""
 import logging
+import os
+import threading
 from pathlib import Path
 from typing import List, Optional
 
 import yaml
 
 logger = logging.getLogger('llm_suggestions')
+_lock = threading.Lock()
 
 # 两个工程是兄弟目录（…/Documents/quant/quant_*-main）
 _QUANT_ROOT = Path(__file__).resolve().parents[3].parent
@@ -69,38 +72,43 @@ def _insert_after_key(path: Path, section: str, key: str, new_line: str) -> bool
                 inserted = True
     if not inserted:
         return False
-    path.write_text(''.join(out), encoding='utf-8')
+    # 原子写：临时文件 + os.replace，避免进程中断留下半写入的 config
+    tmp_path = path.with_name(path.name + '.tmp')
+    tmp_path.write_text(''.join(out), encoding='utf-8')
+    os.replace(tmp_path, path)
     return True
 
 
 def add_us_watch(code: str) -> bool:
     """加入美股观察池（dip_buy.watch_list）。返回是否新增。"""
-    c = _normalize_us(code)
-    if not c:
-        return False
-    cfg = yaml.safe_load(US_CONFIG.read_text(encoding='utf-8')) or {}
-    if c in _yaml_list(cfg, ['dip_buy', 'watch_list']):
-        return False
-    ok = _insert_after_key(
-        US_CONFIG, 'dip_buy', 'watch_list', f'    - {c}\n'
-    )
-    if ok:
-        logger.warning(f'[LLM选股] 已加入美股观察池: {c}（{US_CONFIG}）')
-    return ok
+    with _lock:
+        c = _normalize_us(code)
+        if not c:
+            return False
+        cfg = yaml.safe_load(US_CONFIG.read_text(encoding='utf-8')) or {}
+        if c in _yaml_list(cfg, ['dip_buy', 'watch_list']):
+            return False
+        ok = _insert_after_key(
+            US_CONFIG, 'dip_buy', 'watch_list', f'    - {c}\n'
+        )
+        if ok:
+            logger.warning(f'[LLM选股] 已加入美股观察池: {c}（{US_CONFIG}）')
+        return ok
 
 
 def add_hk_watch(code: str) -> bool:
     """加入港股观察池（hk.watch_list）。返回是否新增。"""
-    c = _normalize_hk(code)
-    if not c:
-        return False
-    cfg = yaml.safe_load(HK_CONFIG.read_text(encoding='utf-8')) or {}
-    if c in _yaml_list(cfg, ['hk', 'watch_list']):
-        return False
-    ok = _insert_after_key(HK_CONFIG, 'hk', 'watch_list', f'    - {c}\n')
-    if ok:
-        logger.warning(f'[LLM选股] 已加入港股观察池: {c}（{HK_CONFIG}）')
-    return ok
+    with _lock:
+        c = _normalize_hk(code)
+        if not c:
+            return False
+        cfg = yaml.safe_load(HK_CONFIG.read_text(encoding='utf-8')) or {}
+        if c in _yaml_list(cfg, ['hk', 'watch_list']):
+            return False
+        ok = _insert_after_key(HK_CONFIG, 'hk', 'watch_list', f'    - {c}\n')
+        if ok:
+            logger.warning(f'[LLM选股] 已加入港股观察池: {c}（{HK_CONFIG}）')
+        return ok
 
 
 def current_us_watch() -> List[str]:
