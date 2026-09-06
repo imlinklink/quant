@@ -688,5 +688,6 @@ def api_suggestion_action(suggestion_id: str, action: str):
 
 if __name__ == '__main__':
     print("🚀 quant_us Web 服务启动...")
-    print("   访问 http://127.0.0.1:8899")
-    app.run(host='0.0.0.0', port=8899, debug=False)
+    web_port = int(os.environ.get('US_WEB_PORT', '8890'))
+    print(f"   访问 http://127.0.0.1:{web_port}")
+    app.run(host='0.0.0.0', port=web_port, debug=False)

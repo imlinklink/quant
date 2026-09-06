@@ -172,7 +172,7 @@ class DipBuyMonitor:
                 )
                 logger.warning(
                     "[人工确认] 未检测到 Web 确认页注入，提案只记录不执行；"
-                    "请通过 run_all.py 启动（页面 http://127.0.0.1:8899/approvals）"
+                    "请通过 run_all.py 启动（页面 http://127.0.0.1:8890/approvals）"
                 )
             self._setup_llm()
         

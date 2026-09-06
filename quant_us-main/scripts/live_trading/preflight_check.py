@@ -33,7 +33,7 @@ sys.path.insert(0, BASE_DIR)
 
 CONFIG_PATH = os.path.join(BASE_DIR, 'config.yaml')
 WEB_HOST = '127.0.0.1'
-WEB_PORT = 8899
+WEB_PORT = 8890
 OPEND_HOST = '127.0.0.1'
 OPEND_PORT = 11111
 

@@ -1,6 +1,6 @@
 """
 美股交易系统统一入口
-同时启动：Web服务(8899) + 抄底监控 + 唐奇安突破监控(可选) + 止盈止损
+同时启动：Web服务(8890) + 抄底监控 + 唐奇安突破监控(可选) + 止盈止损
 
 用法：
     python run_all.py --dry-run     # 模拟模式
@@ -8,7 +8,7 @@
     python run_all.py --web-only    # 仅Web（调参用）
 
 人工确认模式（config.yaml -> trading.live_trading.human_approval.enabled: true）：
-    抄底/突破信号只推送到 http://127.0.0.1:8899/approvals，
+    抄底/突破信号只推送到 http://127.0.0.1:8890/approvals，
     页面显示规则理由 + 大模型判定，点「下单」才真正执行。
 
 第二条策略线（config.yaml -> trend_breakout.enabled: true）：
@@ -26,6 +26,9 @@ from datetime import datetime
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
+
+# Web 端口：可用环境变量 US_WEB_PORT 覆盖（默认 8890，避免与港股 8899 冲突）
+WEB_PORT = int(os.environ.get('US_WEB_PORT', '8890'))
 
 # ===== 日志配置 =====
 LOG_DIR = os.path.join(BASE_DIR, "logs")
@@ -65,8 +68,8 @@ class UnifiedSystem:
         """后台线程启动 Flask"""
         from web.app import app
         self.flask_app = app
-        logger.info("🌐 Web服务启动 http://127.0.0.1:8899")
-        app.run(host="0.0.0.0", port=8899, debug=False, use_reloader=False)
+        logger.info(f"🌐 Web服务启动 http://127.0.0.1:{WEB_PORT}")
+        app.run(host="0.0.0.0", port=WEB_PORT, debug=False, use_reloader=False)
 
     def _prepare_approval(self):
         """
@@ -100,7 +103,7 @@ class UnifiedSystem:
         if enabled:
             logger.warning(
                 "[人工确认] 已启用：买入信号只推送到确认页，点「下单」才执行。"
-                "页面 http://127.0.0.1:8899/approvals"
+                f"页面 http://127.0.0.1:{WEB_PORT}/approvals"
             )
 
     def start(self):
@@ -174,7 +177,7 @@ class UnifiedSystem:
                 pass
 
         logger.info("\n💡 Ctrl+C 优雅退出")
-        logger.info("🌐 http://127.0.0.1:8899")
+        logger.info(f"🌐 http://127.0.0.1:{WEB_PORT}")
 
         # ChandelierExitManager 启动时会注册自己的信号处理器并覆盖主控，
         # 这里重新接管，保证 Ctrl+C / TERM 能整体优雅退出

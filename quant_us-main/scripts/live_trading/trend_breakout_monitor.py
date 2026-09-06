@@ -97,7 +97,7 @@ class TrendBreakoutMonitor:
             )
             logger.warning(
                 "[突破线] 未检测到 Web 确认页注入，提案只记录不执行；"
-                "请通过 run_all.py 启动（页面 http://127.0.0.1:8899/approvals）"
+                "请通过 run_all.py 启动（页面 http://127.0.0.1:8890/approvals）"
             )
         if not self.approval_enabled:
             logger.warning(
