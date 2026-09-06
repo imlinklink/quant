@@ -844,41 +844,56 @@ class LiveTradingManager(ABC):
         except Exception:
             return False
 
-    def _hsi_gate_ok(self) -> tuple:
-        """恒指大盘闸（阶段低点抄底用；默认关闭）。失败放行并记录。"""
+    def _market_gate_state(self) -> tuple:
+        """统一大盘 overlay（动量/日内抄底/阶段低点都生效；默认关闭）。
+
+        Returns:
+            (allowed, action, note)
+              allowed=False → 本轮不产生新买入
+              action='stricter' → 提高买入分数门槛（配合 strict_score_bonus）
+        """
         try:
             mg = (self.config.get('trading', {}).get('live_trading', {})
                   .get('buy_timing', {}).get('smart', {}).get('market_gate') or {})
             if not bool(mg.get('enabled', False)):
-                return True, ''
+                return True, '', ''
             drop_pct = float(mg.get('hsi_drop_pct', 0.01))
+            action = str(mg.get('below_ma20_action', 'stricter')).lower()
             cache = getattr(self, '_hsi_gate_cache', None)
             now = time.time()
             if cache and now - cache[0] < 300:
-                return cache[1], cache[2]
+                return cache[1], cache[2], cache[3]
             if self._shared_fetcher is None:
-                return True, ''
+                return True, '', ''
             end = datetime.now().date()
             start = end - timedelta(days=90)
             df = self._shared_fetcher.fetch_stock_kline(
                 'HK.800000', start.strftime('%Y-%m-%d'), end.strftime('%Y-%m-%d')
             )
-            allowed, note = True, ''
+            allowed, eff_action, note = True, '', ''
             if df is not None and len(df) >= 25:
                 closes = df.sort_values('date')['close'].astype(float).values
                 ma20 = float(closes[-20:].mean())
                 last = float(closes[-1])
                 prev = float(closes[-2]) if len(closes) > 1 else last
                 drop = last / prev - 1 if prev > 0 else 0.0
-                if last < ma20 and drop <= -drop_pct:
+                below = last < ma20
+                if below and drop <= -drop_pct:
                     allowed = False
                     note = (f'恒指 {last:.0f} < MA20 {ma20:.0f} 且日内跌 '
-                            f'{drop * 100:.1f}%，暂停阶段低点抄底')
-            self._hsi_gate_cache = (now, allowed, note)
-            return allowed, note
+                            f'{drop * 100:.1f}%，暂停新买入')
+                elif below and action == 'pause':
+                    allowed = False
+                    note = (f'恒指 {last:.0f} < MA20 {ma20:.0f}，按配置暂停新买入')
+                elif below:
+                    eff_action = 'stricter'
+                    note = (f'恒指 {last:.0f} < MA20 {ma20:.0f}，'
+                            f'新买入门槛提高（stricter）')
+            self._hsi_gate_cache = (now, allowed, eff_action, note)
+            return allowed, eff_action, note
         except Exception as e:
             logger.warning(f'[大盘闸] 恒指状态获取失败，放行: {e}')
-            return True, ''
+            return True, '', ''
 
     def _do_buy(self):
         """执行买入"""
@@ -957,6 +972,15 @@ class LiveTradingManager(ABC):
             logger.info("没有需要买入的股票，等待下次选股")
             return
 
+        # ===== 统一大盘 overlay：动量/日内抄底/阶段低点共用 =====
+        gate_allowed, gate_action, gate_note = self._market_gate_state()
+        self._market_gate_action = gate_action
+        if not gate_allowed:
+            logger.warning(f'[大盘闸] {gate_note}，本轮不产生新买入')
+            return
+        if gate_action == 'stricter':
+            logger.warning(f'[大盘闸] {gate_note}')
+
         # Phase 1: 用K线分析对候选股票排序和过滤
         kline_cfg = self.config.get('trading', {}).get('live_trading', {}).get('buy_timing', {}).get('analysis', {})
         kline_enabled = kline_cfg.get('enabled', False)
@@ -975,6 +999,15 @@ class LiveTradingManager(ABC):
 
                 # 只选K线评分≥阈值的股票，最多取3只
                 threshold = kline_cfg.get('strong_buy_threshold', 6)
+                if getattr(self, '_market_gate_action', '') == 'stricter':
+                    mg = (self.config.get('trading', {}).get('live_trading', {})
+                          .get('buy_timing', {}).get('smart', {})
+                          .get('market_gate') or {})
+                    bonus = int(mg.get('strict_score_bonus', 2))
+                    threshold += bonus
+                    logger.info(
+                        f'[大盘闸] stricter：日内K线门槛提高至 {threshold}'
+                    )
                 ranked = [r['stock_code'] for r in kline_results if r['score'] >= threshold]
                 if ranked:
                     stocks_to_buy = ranked[:3]
@@ -1017,13 +1050,16 @@ class LiveTradingManager(ABC):
         # ===== v1 阶段低点抄底（日线位置/RSI拐头/止损距离，默认关闭）=====
         daily_details: Dict[str, Dict] = {}
         if self._dip_daily_enabled():
-            gate_ok, gate_note = self._hsi_gate_ok()
-            if not gate_ok:
-                logger.warning(f'[阶段低点] {gate_note}，本轮跳过')
-                return
             analyzer = None
             if self.buy_timing is not None:
                 analyzer = getattr(self.buy_timing, '_intraday_analyzer', None)
+            strict_bonus = 0
+            if getattr(self, '_market_gate_action', '') == 'stricter':
+                mg = (self.config.get('trading', {}).get('live_trading', {})
+                      .get('buy_timing', {}).get('smart', {})
+                      .get('market_gate') or {})
+                strict_bonus = int(mg.get('strict_score_bonus', 2))
+                logger.info(f'[阶段低点] stricter：最低分要求 +{strict_bonus}')
             kept = []
             for code in stocks_to_buy:
                 daily_df = (self.kline_cache or {}).get(code)
@@ -1037,6 +1073,15 @@ class LiveTradingManager(ABC):
                 if not res or not res.get('ok'):
                     detail = (res or {}).get('details', '未触发')
                     logger.info(f'[阶段低点] 跳过 {code}: {detail}')
+                    continue
+                min_score = float(
+                    (self._dip_daily_cfg().get('confirm_min_score', 3))
+                ) + strict_bonus
+                if res.get('score', 0) < min_score:
+                    logger.info(
+                        f'[阶段低点] 跳过 {code}: stricter 分 {res.get("score")} '
+                        f'< {min_score:.0f}'
+                    )
                     continue
                 kept.append(code)
                 daily_details[code] = res
