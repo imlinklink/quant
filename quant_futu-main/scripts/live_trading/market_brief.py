@@ -96,8 +96,9 @@ def generate_brief(pre_text: Optional[str], post_text: Optional[str]) -> Dict:
         '请阅读下面的宏观日报，给出今天港美股市场的风险档位和买入建议。\n\n'
         f'【盘前日报】\n{pre}\n\n【盘后日报】\n{post}'
     )
-    # 传 schema_name='market_status' 让 advisor 做 JSON Schema 校验（与其他接入点一致）
-    result = advisor.chat(prompt, expect_json=True, system=system, schema_name='market_status')
+    # 用简报专用 schema 校验（字段为 risk_level/buy_frequency/...；
+    # 曾误用 market_status schema 导致校验必然失败、简报永远生成不了）
+    result = advisor.chat(prompt, expect_json=True, system=system, schema_name='market_brief')
     if not result:
         return {'error': 'LLM 未返回结果（调用失败或 JSON 解析失败）'}
 

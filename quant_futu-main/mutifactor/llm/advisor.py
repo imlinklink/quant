@@ -21,6 +21,7 @@ from mutifactor.llm.schemas import (
     CANDIDATE_VERDICT_SCHEMA,
     BUY_VETO_SCHEMA,
     MARKET_STATUS_SCHEMA,
+    MARKET_BRIEF_SCHEMA,
 )
 from mutifactor.llm.prompts import DEFAULT_SYSTEM_PROMPT
 
@@ -39,6 +40,7 @@ SCHEMA_MAP = {
     'candidate_review': CANDIDATE_VERDICT_SCHEMA,
     'buy_veto': BUY_VETO_SCHEMA,
     'market_status': MARKET_STATUS_SCHEMA,
+    'market_brief': MARKET_BRIEF_SCHEMA,
 }
 
 

@@ -90,3 +90,36 @@ MARKET_STATUS_SCHEMA = {
     },
     "additionalProperties": False,
 }
+
+
+# ========== 接入点 C2: 每日市场状态简报（market_brief） ==========
+# 注意：与 MARKET_STATUS_SCHEMA 不同——generate_brief 的 prompt 输出的是
+# risk_level / buy_frequency / suggested_position_ratio / risk_note。
+# 曾误复用 market_status schema（要求 market_type 且禁止多余字段），
+# 导致简报永远生成失败、latest.json 永远写不进。
+MARKET_BRIEF_SCHEMA = {
+    "type": "object",
+    "required": ["risk_level", "risk_note", "buy_frequency"],
+    "properties": {
+        "risk_level": {
+            "enum": ["normal", "cautious", "defensive"],
+            "description": "今日风险档位",
+        },
+        "risk_note": {
+            "type": "string",
+            "maxLength": 300,
+            "description": "中文一句话理由",
+        },
+        "buy_frequency": {
+            "enum": ["normal", "reduce", "avoid"],
+            "description": "今日买入频率",
+        },
+        "suggested_position_ratio": {
+            "type": ["number", "null"],
+            "minimum": 0.0,
+            "maximum": 1.0,
+            "description": "建议单票仓位比例（0.05~0.6），不知道给 null",
+        },
+    },
+    "additionalProperties": False,
+}
