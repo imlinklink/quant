@@ -431,6 +431,18 @@ class LiveTradingManager(ABC):
                 current_timestamp = time.time()
                 current_date = datetime.now().date()
 
+                # 交易日闸门（周末 + 交易所节假日）：旧逻辑只查时间窗，
+                # 周六 10:00 也在 9:30-16:00 内，会在休市日误触发选股/买入提案
+                if not self._is_trading_day():
+                    if getattr(self, '_non_trading_day_logged', None) != current_date:
+                        self._non_trading_day_logged = current_date
+                        logger.info(
+                            f"[{thread_name}] [{self.market_type}] "
+                            f"{current_date} 非交易日，跳过买入循环"
+                        )
+                    time.sleep(60)
+                    continue
+
                 # 重置每日状态
                 if self.last_trading_date != current_date:
                     self.buy_timing.reset_daily_state()
