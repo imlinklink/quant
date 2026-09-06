@@ -627,10 +627,16 @@ class YAMLStorage:
         today = date.today()
         now = datetime.now()
 
-        data = []
-        for stock in stock_details:
+        # 覆盖只针对当前 env：保留其他 env 的历史行，
+        # 否则 REAL 与 SIMULATE 共用同一文件时会互相抹掉
+        data = [
+            r for r in self._load_table('selection_results', use_cache=False)
+            if r.get('env') != env.value
+        ]
+        next_id = max([int(r.get('id') or 0) for r in data] or [0]) + 1
+        for i, stock in enumerate(stock_details):
             data.append({
-                'id': len(data) + 1,
+                'id': next_id + i,
                 'stock_code': stock.get('stock_code'),
                 'stock_name': stock.get('stock_name'),
                 'price': stock.get('price'),

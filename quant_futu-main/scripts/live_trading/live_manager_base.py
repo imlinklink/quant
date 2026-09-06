@@ -1053,8 +1053,12 @@ class LiveTradingManager(ABC):
                 name = self._get_stock_name(code)
                 in_pos = code in self.position_manager.strategy_positions
                 stock_details.append({
+                    # yaml_storage.save_selection_results 读取 stock_code/stock_name，
+                    # 页面/查看脚本可能用 code/name；两套都写，避免落盘后代码为空
                     'code': str(code),
                     'name': str(name) if name else str(code),
+                    'stock_code': str(code),
+                    'stock_name': str(name) if name else str(code),
                     'price': float(price) if price else None,
                     'in_position': bool(in_pos)
                 })

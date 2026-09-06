@@ -458,6 +458,35 @@ class TestBuyFeeDeducted(unittest.TestCase):
         # 佣金等买入费用必须立刻从资本扣除，不能让账目虚增
         assert abs(pm.strategy_capital - 99995.0) < 1e-6, pm.strategy_capital
 
+
+# ---------- 12) 选股结果按 env 覆盖，不互相抹掉 ----------
+
+class TestSelectionResultsEnvScope(unittest.TestCase):
+    def test_save_keeps_other_env_rows(self):
+        import tempfile
+        from pathlib import Path
+        from mutifactor.infra.yaml_storage import YAMLStorage, TradingEnv
+        d = tempfile.mkdtemp(prefix='selres_')
+        s = YAMLStorage(data_dir=d)
+        s.save_selection_results(
+            [{'stock_code': 'HK.A', 'stock_name': 'A',
+              'price': 10.0, 'in_position': False}],
+            TradingEnv.SIMULATE,
+        )
+        s.save_selection_results(
+            [{'stock_code': 'US.X', 'stock_name': 'X',
+              'price': 20.0, 'in_position': True}],
+            TradingEnv.REAL,
+        )
+        rows = s._load_table('selection_results', use_cache=False)
+        envs = {r.get('env') for r in rows}
+        assert envs == {TradingEnv.SIMULATE.value, TradingEnv.REAL.value}, rows
+        # 覆盖 SIMULATE 为空不应清掉 REAL 行
+        s.save_selection_results([], TradingEnv.SIMULATE)
+        rows2 = s._load_table('selection_results', use_cache=False)
+        assert [r for r in rows2 if r.get('env') == TradingEnv.REAL.value]
+        assert not [r for r in rows2 if r.get('env') == TradingEnv.SIMULATE.value]
+
     def test_risk_only_config_still_works(self):
         cfg = {'time_exit': {'phase3_days': 350}, 'early_hard_stop_pct': 0.08}
         s = ExitStrategyFactory.create('atr_dynamic', cfg)
