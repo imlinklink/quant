@@ -193,7 +193,7 @@ function card(item, now) {
   const left = Math.max(0, (item.expires_at || 0) - now);
   const isSell = item.side === 'sell';
   const countdown = item.status === 'pending'
-    ? '<span class="countdown">' + Math.ceil(left / 1000) + 's 后自动' +
+    ? '<span class="countdown">' + Math.ceil(left) + 's 后自动' +
       (isSell ? '卖出' : '过期') + '</span>' : '';
   const buttons = item.status === 'pending'
     ? '<div class="actions"><button class="buy" data-id="' + id + '" data-act="approve">' +
