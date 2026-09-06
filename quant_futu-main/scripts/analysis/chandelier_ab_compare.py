@@ -146,7 +146,8 @@ def _new_position(cost: float, day: str) -> dict:
     }
 
 
-def walk_stock(strategy, df: pd.DataFrame) -> dict:
+def walk_stock(strategy, df: pd.DataFrame,
+               exclude_today: bool = False) -> dict:
     """单只股票按日推进：周期开仓→规则退出→再开仓。返回交易与每日权益。"""
     trades = []
     daily_eq = []
@@ -173,7 +174,10 @@ def walk_stock(strategy, df: pd.DataFrame) -> dict:
                 pos = None
                 next_entry = i + REENTRY_GAP
             else:
-                df_slice = df.iloc[:i + 1]
+                # 前视口径开关：exclude_today=True 时指标只用已收盘 bar
+                # （不含当日），与实盘“开盘价决策只能看到昨日信息”一致
+                df_slice = (df.iloc[:i] if exclude_today and i > 0
+                            else df.iloc[:i + 1])
                 pos['_current_date'] = day.strftime('%Y-%m-%d')
                 should_exit, reason, _atr, _tp, _sl = strategy.check_exit(
                     pos, price, df_slice
