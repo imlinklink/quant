@@ -560,8 +560,10 @@ class TrendBreakoutMonitor:
             try:
                 from scripts.live_trading import market_brief as mb
                 brief = mb.load_brief()
-                if not mb.buy_allowed(brief):
-                    key = brief.get('date') or datetime.now().strftime('%Y-%m-%d')
+                # 只允许“今天的简报”触发 avoid 闸门（与抄底线一致）
+                today_str = datetime.now().strftime('%Y-%m-%d')
+                if brief.get('date') == today_str and not mb.buy_allowed(brief):
+                    key = brief.get('date') or today_str
                     if getattr(self, '_brief_avoid_date', None) != key:
                         self._brief_avoid_date = key
                         logger.warning(

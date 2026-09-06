@@ -267,7 +267,17 @@ class FutuTrader:
                     except (OSError, IOError) as e:
                         logger.error(f"取消订单网络错误: {e}, 继续等待成交")
                         partial_start_time = time.time()
-                    except OrderError:
+                    except OrderError as e:
+                        # 撤单失败（如订单已被券商取消/完成）时，已成交部分是事实：
+                        # 必须把 dealt_qty/avg_price 返回给调用方记账，
+                        # 否则券商端有真实持仓而本地无记录 → 后续被误判 manual、失去风控。
+                        logger.error(f"取消部分成交订单失败: {e}")
+                        if dealt_qty and dealt_qty > 0 and avg_price and avg_price > 0:
+                            logger.warning(
+                                f"订单 {order_id} 撤单失败但已有部分成交 "
+                                f"({dealt_qty}股)，按实际成交返回"
+                            )
+                            return avg_price, dealt_qty
                         raise
                     except Exception as e:
                         logger.error(f"取消订单异常: {type(e).__name__}: {e}", exc_info=True)

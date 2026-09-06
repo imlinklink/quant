@@ -122,10 +122,11 @@ class TestPartialExitAndCooldown(unittest.TestCase):
 # ---------- 3) wait_for_confirmation 超时部分成交必须撤单 ----------
 
 class _Ctx:
-    def __init__(self, polls):
+    def __init__(self, polls, cancel_fail=False):
         self.polls = list(polls)
         self.last = None
         self.cancel_calls = 0
+        self.cancel_fail = cancel_fail
     def order_list_query(self, order_id=None, trd_env=None):
         if self.polls:
             self.last = self.polls.pop(0)
@@ -138,6 +139,8 @@ class _Ctx:
         return 0, df
     def modify_order(self, **kw):
         self.cancel_calls += 1
+        if self.cancel_fail:
+            return 1, 'cancel error'
         return 0, pd.DataFrame()
 
 
@@ -169,6 +172,17 @@ class TestWaitConfirmationCancelOnPartial(unittest.TestCase):
             with pytest.raises(FutuTimeoutError):
                 trader.wait_for_confirmation('O2', timeout=0.5)
         assert ctx.cancel_calls == 1
+
+    def test_partial_fill_cancel_ordererror_returns_partial(self):
+        from futu import OrderStatus
+        # 部分成交后撤单失败（OrderError）：已成交部分必须返回，不能丢失
+        ctx = _Ctx([(OrderStatus.FILLED_PART, 55.0, 300)] * 50, cancel_fail=True)
+        trader = self._make_trader(ctx)
+        with mock.patch('mutifactor.trading.futu_trader.time.sleep'):
+            avg, qty = trader.wait_for_confirmation('O3', timeout=0.5,
+                                                    partial_timeout=0)
+        assert ctx.cancel_calls >= 1
+        assert qty == 300 and avg == 55.0
 
 
 # ---------- 4) YAML 损坏不覆盖 ----------

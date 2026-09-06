@@ -842,8 +842,12 @@ class LiveTradingManager(ABC):
         try:
             from scripts.live_trading import market_brief as mb
             brief = mb.load_brief()
-            if not mb.buy_allowed(brief):
-                key = brief.get('date') or datetime.now().strftime('%Y-%m-%d')
+            # 只有“今天的简报”才允许触发 avoid 闸门：昨天的 avoid 不应
+            # 静默禁用今天的买入（run_market_brief 今天生成失败时尤其关键），
+            # 与下方 suggested_position_ratio 的 date==today 口径保持一致
+            today_str = datetime.now().strftime('%Y-%m-%d')
+            if brief.get('date') == today_str and not mb.buy_allowed(brief):
+                key = brief.get('date') or today_str
                 if getattr(self, '_brief_avoid_date', None) != key:
                     self._brief_avoid_date = key
                     logger.warning(
