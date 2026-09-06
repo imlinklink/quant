@@ -1933,18 +1933,19 @@ class LiveTradingManager(ABC):
                            pnl_pct: float = None) -> Dict:
         """周末演示：对演示持仓生成卖出确认提案（LLM+人工+超时兜底）。
 
-        参数 pnl_pct 为百分数（如 5 = +5%），内部转小数后交给真实卖出链路，
-        避免卡片显示把 3 渲染成 +300%（真实链路 pnl_pct 为小数）。
+        浮盈按演示持仓成本与当前真实价格计算（不再接受伪造 pnl_pct），
+        避免出现“成本=现价却显示 +2.5%”这类自相矛盾的卡片。
         """
         if not self._demo_env_ok():
             raise RuntimeError('演示模式仅港股 SIMULATE 可用')
         pos = self.position_manager.strategy_positions.get(code)
         if not pos or not pos.get('demo'):
             raise ValueError('仅演示持仓可触发演示卖出')
-        try:
-            pnl_frac = float(pnl_pct) / 100.0 if pnl_pct is not None else None
-        except (TypeError, ValueError):
-            pnl_frac = None
+        cost = float(pos.get('cost_price') or 0)
+        price = self.price_fetcher.get_current_price(code, force_refresh=True)
+        pnl_frac = (float(price) - cost) / cost if cost > 0 and price else 0.0
+        if pnl_pct is not None:
+            logger.warning('[周末演示] pnl_pct 参数已弃用，改用真实市价计算浮盈')
         ok = self.queue_sell_proposal(
             code, f'模拟演示（非真实盈亏）: {str(reason or "模拟止盈触发")}',
             quantity=int(pos.get('quantity', 0)),

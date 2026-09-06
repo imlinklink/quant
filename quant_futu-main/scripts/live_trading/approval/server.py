@@ -228,7 +228,8 @@ async function load() {
     ]);
     const st = await statusR.json();
     const data = await propR.json();
-    const now = (data.server_time || Date.now() / 1000) * 1000;
+    // expires_at/created_at 均为 Unix 秒；now 保持秒，避免倒计时恒为 0
+    const now = data.server_time || Date.now() / 1000;
     const envBadge = document.getElementById('envBadge');
     envBadge.textContent = st.env || '-';
     envBadge.className = 'badge ' + ((st.env || '').toUpperCase() === 'REAL' ? 'real' : 'sim');
