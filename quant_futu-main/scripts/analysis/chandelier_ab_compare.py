@@ -72,12 +72,46 @@ class VariantB(ATRDynamicStrategy):
         return max(new_stop, prev, cost * 0.95)
 
 
-def make_strategies():
+class VariantC(ATRDynamicStrategy):
+    """候选 C：盈利激活后才上移吊灯线（折中锁盈与避免被震死）"""
+
+    def __init__(self, config=None, activate_pct: float = 0.10,
+                 trail_mult: float = 3.0):
+        super().__init__(config)
+        self._activate_pct = activate_pct
+        self._trail_mult = trail_mult
+
+    def calculate_stop_loss(self, position: dict, df: pd.DataFrame) -> float:
+        atr = self.calculate_atr(df, self.atr_period)
+        cost = float(position['cost_price'])
+        if atr <= 0:
+            return cost * 0.95
+        history = df.iloc[:-1] if len(df) > 1 else df
+        lookback = min(self.chandelier_period, len(history) or 1)
+        hist_high = float(history['high'].tail(lookback).max()) if len(history) else cost
+        prev = float(position.get('stop_price') or 0)
+        # 激活前与现状 A 一致：吊灯线下限成本封顶
+        a_stop = min(max(hist_high - self.stop_loss_multiplier * atr, prev), cost)
+        peak = float(position.get('highest_price') or cost)
+        if peak > cost and (peak - cost) / cost >= self._activate_pct:
+            # 浮盈达阈值后：允许止损上移到成本之上，只升不降
+            trail = peak - self._trail_mult * atr
+            return max(a_stop, trail, cost * 0.95)
+        return a_stop
+
+
+VARIANTS = ('A', 'B', 'C1', 'C2')
+
+
+def make_variants():
     cfg = dict(_VariantConfig.risk)
     from mutifactor.strategies.exit_strategy import ExitStrategyFactory
-    a = ExitStrategyFactory.create('atr_dynamic', cfg)
-    b = VariantB(cfg)
-    return a, b
+    return {
+        'A': ExitStrategyFactory.create('atr_dynamic', cfg),
+        'B': VariantB(cfg),
+        'C1': VariantC(cfg, activate_pct=0.10, trail_mult=3.0),
+        'C2': VariantC(cfg, activate_pct=0.20, trail_mult=2.5),
+    }
 
 
 def fetch_daily(code: str) -> pd.DataFrame:
@@ -203,10 +237,9 @@ def summarize(results: dict) -> dict:
 
 
 def run_real(offline: bool):
-    a, b = make_strategies()
+    variants = make_variants()
     rows = []
-    tot_a: dict = {}
-    tot_b: dict = {}
+    tot: dict = {v: {} for v in VARIANTS}
     codes = [] if offline else UNIVERSE
     if offline:
         return rows
@@ -215,41 +248,40 @@ def run_real(offline: bool):
         if len(df) < 80:
             print(f'跳过 {code}: 数据不足 {len(df)}')
             continue
-        ra = walk_stock(a, df)
-        rb = walk_stock(b, df)
-        sa, sb = summarize(ra), summarize(rb)
-        for k, v in sa['reasons'].items():
-            tot_a[k] = tot_a.get(k, 0) + v
-        for k, v in sb['reasons'].items():
-            tot_b[k] = tot_b.get(k, 0) + v
-        rows.append({
-            'code': code,
-            'bars': len(df),
-            'A_total%': sa['total_return_pct'],
-            'B_total%': sb['total_return_pct'],
-            'A_dd%': sa['max_dd'], 'B_dd%': sb['max_dd'],
-            'A_trades': sa['trades'], 'B_trades': sb['trades'],
-            'A_win%': sa['win_rate'] * 100, 'B_win%': sb['win_rate'] * 100,
-            'A_hold': round(sa['avg_hold'], 1), 'B_hold': round(sb['avg_hold'], 1),
-            'A_stop': sa['reasons'].get('STOP_LOSS', 0),
-            'B_stop': sb['reasons'].get('STOP_LOSS', 0),
-            'A_tp': sa['reasons'].get('TAKE_PROFIT', 0),
-            'B_tp': sb['reasons'].get('TAKE_PROFIT', 0),
-        })
-        print(f"{code}: A {sa['total_return_pct']:+.1f}% / dd {sa['max_dd']:.1f}% | "
-              f"B {sb['total_return_pct']:+.1f}% / dd {sb['max_dd']:.1f}% | "
-              f"trades A{sa['trades']}/B{sb['trades']}")
+        sums = {}
+        for v in VARIANTS:
+            sums[v] = summarize(walk_stock(variants[v], df))
+            for k, c in sums[v]['reasons'].items():
+                tot[v][k] = tot[v].get(k, 0) + c
+        row = {'code': code, 'bars': len(df)}
+        for v in VARIANTS:
+            s = sums[v]
+            row[f'{v}_total%'] = s['total_return_pct']
+            row[f'{v}_dd%'] = s['max_dd']
+            row[f'{v}_win%'] = s['win_rate'] * 100
+            row[f'{v}_trades'] = s['trades']
+            row[f'{v}_stop'] = s['reasons'].get('STOP_LOSS', 0)
+            row[f'{v}_tp'] = s['reasons'].get('TAKE_PROFIT', 0)
+        rows.append(row)
+        print(f"{code}: " + " | ".join(
+            f"{v} {row[f'{v}_total%']:+.1f}%/dd{row[f'{v}_dd%']:.1f}%"
+            for v in VARIANTS))
     if rows:
         agg = pd.DataFrame(rows)
-        print('\n=== 真实样本汇总（等权平均/合计）===')
-        print(agg[['code', 'A_total%', 'B_total%', 'A_dd%', 'B_dd%',
-                   'A_win%', 'B_win%', 'A_stop', 'B_stop', 'A_tp', 'B_tp']].to_string(index=False))
-        print('\nA/B 平均: '
-              f"总收益 {agg['A_total%'].mean():+.2f}% / {agg['B_total%'].mean():+.2f}% | "
-              f"回撤 {agg['A_dd%'].mean():.2f}% / {agg['B_dd%'].mean():.2f}% | "
-              f"胜率 {agg['A_win%'].mean():.1f}% / {agg['B_win%'].mean():.1f}%")
-        print(f"退出原因合计 A: {tot_a}")
-        print(f"退出原因合计 B: {tot_b}")
+        print('\n=== 真实样本汇总（等权平均）===')
+        cols = (['code'] + [f'{v}_total%' for v in VARIANTS]
+                + [f'{v}_dd%' for v in VARIANTS])
+        print(agg[cols].to_string(index=False))
+        print('\n平均:')
+        for v in VARIANTS:
+            print(f"  {v}: 总收益 {agg[f'{v}_total%'].mean():+.2f}% | "
+                  f"回撤 {agg[f'{v}_dd%'].mean():.2f}% | "
+                  f"胜率 {agg[f'{v}_win%'].mean():.1f}% | "
+                  f"交易 {int(agg[f'{v}_trades'].sum())} 笔 | "
+                  f"ATR止损 {int(agg[f'{v}_stop'].sum())} | "
+                  f"吊顶止盈 {int(agg[f'{v}_tp'].sum())}")
+        for v in VARIANTS:
+            print(f"  退出原因合计 {v}: {tot[v]}")
     return rows
 
 
@@ -288,20 +320,20 @@ SCENARIOS = {
 
 
 def run_scenarios():
-    a, b = make_strategies()
+    variants = make_variants()
     print('\n=== 合成场景（单仓，入场=首日开盘）===')
-    header = f"{'场景':<24}{'A: 退出日/原因/收益':>26}{'B: 退出日/原因/收益':>26}"
+    header = f"{'场景':<22}" + ''.join(f"{v}: hold/原因/收益".center(26)
+                                       for v in VARIANTS)
     print(header)
     for name, path in SCENARIOS.items():
         df = _scenario_df(path)
         entry_row = df.iloc[WARMUP_BARS]
-        pa = _new_position(entry_row['open'], entry_row['date'])
-        pb = _new_position(entry_row['open'], entry_row['date'])
-        ra = _sim_one(a, pa, df)
-        rb = _sim_one(b, pb, df)
-        fa = f"hold{ra['hold_bars']}d/{ra['reason']}/{ra['pnl_pct']:+.1f}%"
-        fb = f"hold{rb['hold_bars']}d/{rb['reason']}/{rb['pnl_pct']:+.1f}%"
-        print(f"{name:<24}{fa:>26}{fb:>26}")
+        cells = []
+        for v in VARIANTS:
+            pos = _new_position(entry_row['open'], entry_row['date'])
+            r = _sim_one(variants[v], pos, df)
+            cells.append(f"hold{r['hold_bars']}d/{r['reason']}/{r['pnl_pct']:+.1f}%")
+        print(f"{name:<22}" + ''.join(c.center(26) for c in cells))
 
 
 def _sim_one(strategy, pos, df):
