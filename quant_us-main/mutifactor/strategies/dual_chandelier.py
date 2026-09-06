@@ -139,7 +139,11 @@ class PositionExitState:
                 self.profit_line_active = True
 
             # ======== Phase 3: 固定% Trailing (+6%~+19%) ========
-            elif floating_pnl >= self.trailing_activate_pct:
+            # ATR 模式一旦激活（大盈利≥atr_threshold），即使价格回落到该区间，
+            # 也不能退回固定%逻辑：固定%线会“收紧”已放宽的 ATR 止损，
+            # 甚至造成提前止盈，违背“让大利润奔跑”的设计。
+            elif (not self._atr_mode_active
+                  and floating_pnl >= self.trailing_activate_pct):
                 if not self._trailing_activated:
                     self._trailing_activated = True
                     just_activated = True
@@ -157,7 +161,10 @@ class PositionExitState:
                 self.profit_line_active = True
 
             # ======== Phase 2: 保本 (+4%~+5%) ========
-            elif floating_pnl >= self.breakeven_pct:
+            # 同上：ATR 模式激活后深回撤（如跳空）不得把止损改回入场价，
+            # 否则会覆盖已经 ratchet 上去的高位止损，gap 后直接失去保护。
+            elif (not self._atr_mode_active
+                  and floating_pnl >= self.breakeven_pct):
                 if not self._breakeven_moved:
                     old_stop = self.stop_line
                     self.stop_line = round(self.entry_price, 4)
@@ -199,7 +206,8 @@ class PositionExitState:
                 self.profit_line = self.stop_line
                 self.profit_line_active = True
 
-            elif floating_pnl >= self.trailing_activate_pct:
+            elif (not self._atr_mode_active
+                  and floating_pnl >= self.trailing_activate_pct):
                 # Phase 3: 固定% Trailing
                 if not self._trailing_activated:
                     self._trailing_activated = True
@@ -217,7 +225,8 @@ class PositionExitState:
                 self.profit_line = self.stop_line
                 self.profit_line_active = True
 
-            elif floating_pnl >= self.breakeven_pct:
+            elif (not self._atr_mode_active
+                  and floating_pnl >= self.breakeven_pct):
                 # Phase 2: 保本
                 if not self._breakeven_moved:
                     old_stop = self.stop_line

@@ -336,6 +336,57 @@ class TestRateLimiterWindow(unittest.TestCase):
         spec.loader.exec_module(m)
         self._check(m)
 
+
+# ---------- 9) dual_chandelier：ATR 模式激活后止损线只升不降 ----------
+
+class TestDualChandelierATRRatchet(unittest.TestCase):
+    @staticmethod
+    def _load():
+        import importlib.util
+        path = ('/Users/wh1817w/Documents/quant/quant_us-main/'
+                'mutifactor/strategies/dual_chandelier.py')
+        spec = importlib.util.spec_from_file_location('dual_chandelier_test', path)
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        return m.PositionExitState
+
+    def test_atr_mode_pullback_does_not_tighten(self):
+        Pos = self._load()
+        s = Pos(entry_price=100, direction='long', atr_trailing_mult=2.0)
+        s.recompute(atr=10, current_price=130)      # +30% 激活 ATR，止损 110
+        assert s._atr_mode_active and s.stop_line == 110.0
+        s.recompute(atr=10, current_price=118)      # 回落到 +18%，不得退回固定%
+        assert s.stop_line == 110.0
+        hit, reason, _ = s.check_exit(118)
+        assert not hit and reason == 'HOLD'
+
+    def test_atr_mode_gap_keeps_ratcheted_stop(self):
+        Pos = self._load()
+        s = Pos(entry_price=100, direction='long', atr_trailing_mult=2.0)
+        s.recompute(atr=10, current_price=130)
+        s.recompute(atr=10, current_price=103)      # 跳空回落，不得把止损改回入场价
+        assert s.stop_line == 110.0
+        hit, reason, exit_p = s.check_exit(103)
+        assert hit and reason == 'STOP_LOSS' and exit_p == 110.0
+
+    def test_short_atr_mode_ratchet(self):
+        Pos = self._load()
+        s = Pos(entry_price=100, direction='short', atr_trailing_mult=2.0)
+        s.recompute(atr=10, current_price=70)       # -30% 激活，止损 90
+        assert s.stop_line == 90.0
+        s.recompute(atr=10, current_price=82)       # 反弹，不得放松
+        assert s.stop_line == 90.0
+        hit, reason, _ = s.check_exit(82)
+        assert not hit and reason == 'HOLD'
+
+    def test_normal_phase2_3_still_work_before_atr(self):
+        Pos = self._load()
+        s = Pos(entry_price=100, direction='long')
+        s.recompute(atr=10, current_price=105)
+        assert s.stop_line == 100.0 and s._breakeven_moved
+        s.recompute(atr=10, current_price=108)
+        assert s._trailing_activated and s.stop_line > 100.0
+
     def test_risk_only_config_still_works(self):
         cfg = {'time_exit': {'phase3_days': 350}, 'early_hard_stop_pct': 0.08}
         s = ExitStrategyFactory.create('atr_dynamic', cfg)
