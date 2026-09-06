@@ -5,12 +5,29 @@
 """
 import os
 import sys
+import yaml
 
 # 添加项目根目录到路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
 from mutifactor.data import get_hk_stock_name
 from mutifactor.infra.yaml_storage import yaml_storage, TradingEnv
+
+
+def _trading_env() -> TradingEnv:
+    """与实盘写入一致：环境来自 config.yaml 的 trading.env（默认 SIMULATE）。"""
+    env_str = 'SIMULATE'
+    try:
+        config_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+            'config.yaml'
+        )
+        cfg = yaml.safe_load(open(config_path, encoding='utf-8')) or {}
+        env_str = str((cfg.get('trading') or {}).get('env', 'SIMULATE')).upper()
+    except Exception:
+        pass
+    return TradingEnv.REAL if env_str == 'REAL' else TradingEnv.SIMULATE
+
 
 def view_selection():
     """查看最新的选股结果"""
@@ -21,7 +38,8 @@ def view_selection():
     
     # 从数据库读取选股结果
     try:
-        selected = yaml_storage.get_selection_results(TradingEnv.REAL)
+        trading_env = _trading_env()
+        selected = yaml_storage.get_selection_results(trading_env)
 
         if selected:
             from datetime import date
@@ -57,7 +75,7 @@ def view_selection():
                     status = "⚠️ 已在仓" if in_pos else "✅ 可买入"
                     print(f"{i:<4} {code:<12} {name:<14} {price_str:>10} {status:>8}")
 
-                print(f"\n💰 港股数据来自数据库 (env=REAL)")
+                print(f"\n💰 港股数据来自数据库 (env={trading_env.value})")
             else:
                 print("\n⚠️  今日暂无选股结果")
         else:
@@ -68,7 +86,8 @@ def view_selection():
     # 从数据库读取当前持仓
     print("\n" + "-" * 70)
     try:
-        state = yaml_storage.load_trading_state(TradingEnv.REAL)
+        trading_env = _trading_env()
+        state = yaml_storage.load_trading_state(trading_env)
         
         if state:
             positions = state.get('positions', {})
