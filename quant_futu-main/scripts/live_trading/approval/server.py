@@ -474,9 +474,8 @@ SUGGESTIONS_HTML = """<!DOCTYPE html>
 <main>
   <div class="summary" id="summary">加载中…</div>
   <div id="content"></div>
-  <div class="tips">建议来源：宏观日报（盘前+盘后）→ 大模型（美股+港股候选混排）。
-  点「加入观察池」会写入对应市场的观察池：美股 → dip_buy.watch_list，
-  港股 → hk.watch_list（港股运行中会自动补拉K线参与选股，无需重启）；
+  <div class="tips">建议来源：宏观日报（盘前+盘后）→ 大模型（本页只显示港股候选）。
+  点「加入观察池」写入港股 hk.watch_list（港股运行中会自动补拉K线参与选股，无需重启）；
   之后仍需到买入确认台人工点单。</div>
 </main>
 <script>

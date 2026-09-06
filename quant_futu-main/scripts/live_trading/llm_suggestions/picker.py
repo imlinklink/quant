@@ -1,4 +1,4 @@
-"""把盘前/盘后宏观日报交给大模型，生成美股+港股候选清单。"""
+"""把盘前/盘后宏观日报交给大模型，生成港股候选清单。"""
 import logging
 import os
 from pathlib import Path
@@ -9,15 +9,15 @@ logger = logging.getLogger('llm_suggestions')
 MAX_CHARS_PER_REPORT = 16000
 
 SYSTEM_PROMPT = """\
-你是资深宏观策略师 + 交易员，擅长把宏观日报翻译成可交易的美股/港股候选。
+你是资深宏观策略师 + 交易员，擅长把宏观日报翻译成可交易的港股候选。
 
 硬性规则：
 1. 你的输入是"盘前日报"和"盘后日报"两份宏观报告，只能基于报告内容推理，
    不要编造报告里没有的事实，也不要推荐你训练记忆里的"热门股"。
 2. 候选必须可交易且有明确逻辑：报告里的宏观状态 → 传导到哪个板块/资产 →
-   具体标的（美股 US.XXXXX，港股 HK.XXXXX）。逻辑不成立就宁可不给。
+   具体标的（港股 HK.XXXXX）。逻辑不成立就宁可不给。
 3. 优先高流动性标的/ETF；不推荐仙股、无逻辑的题材股。
-4. 每个候选必须带：market(US/HK)、code、name、direction(多头/空头/观察)、
+4. 每个候选必须带：market(HK)、code、name、direction(多头/空头/观察)、
    rationale(报告依据)、catalyst(催化)、risks、confidence(0-1)、horizon(日内/数日/数周)。
 5. 输出必须是严格 JSON，格式：
    {"summary": "今日宏观一句话结论", "candidates": [...]}
@@ -25,7 +25,7 @@ SYSTEM_PROMPT = """\
 """
 
 PROMPT_TEMPLATE = """\
-请阅读今天的宏观日报，给出明天值得放进观察池的美股和港股候选。
+请阅读今天的宏观日报，给出明天值得放进观察池的港股候选。
 
 【盘前日报】
 {pre}
@@ -33,7 +33,7 @@ PROMPT_TEMPLATE = """\
 【盘后日报】
 {post}
 
-输出 JSON：{{"summary": "...", "candidates": [{{"market": "US", "code": "US.XXXX",
+输出 JSON：{{"summary": "...", "candidates": [{{"market": "HK", "code": "HK.XXXX",
 "name": "...", "direction": "多头", "rationale": "报告里哪句推导来的",
 "catalyst": "...", "risks": "...", "confidence": 0.7, "horizon": "数日"}}]}}
 """

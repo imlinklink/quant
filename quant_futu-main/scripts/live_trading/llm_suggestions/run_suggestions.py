@@ -28,6 +28,9 @@ DEFAULT_DIRS = [
     '/Users/wh1817w/Documents/github/mySkill/report-result',
 ]
 
+# 本工程只生成港股候选（美股写自己的 us_latest.json）
+SELF_MARKET = 'HK'
+
 
 def main():
     parser = argparse.ArgumentParser(description='LLM 选股建议生成器')
@@ -75,6 +78,14 @@ def main():
         return 1
 
     data = result['data']
+    before = len(data.get('candidates') or [])
+    data['candidates'] = [
+        c for c in (data.get('candidates') or [])
+        if c.get('market') == SELF_MARKET
+    ]
+    dropped = before - len(data['candidates'])
+    if dropped:
+        logger.info(f'丢弃 {dropped} 条非{SELF_MARKET}市场候选（按市场分流）')
     payload = {
         'generated_at': datetime.now().isoformat(timespec='seconds'),
         'reports': {

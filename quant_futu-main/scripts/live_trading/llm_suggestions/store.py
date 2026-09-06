@@ -1,4 +1,4 @@
-"""建议清单存储：两套系统共享同一份 JSON，页面读取/更新。"""
+"""建议清单存储（港股专用）：与美股分开，读写 hk_latest.json。"""
 import json
 import logging
 import os
@@ -11,9 +11,11 @@ logger = logging.getLogger('llm_suggestions')
 
 _lock = threading.Lock()
 
-# 两个工程共享的目录：…/Documents/quant/.quant_suggestions/latest.json
+# 两个工程共用一个父目录，但文件名按市场分开：
+#   hk_latest.json（本文件，港股系统读写）
+#   us_latest.json（美股系统读写）
 SHARED_DIR = Path(__file__).resolve().parents[3].parent / '.quant_suggestions'
-LATEST_PATH = SHARED_DIR / 'latest.json'
+LATEST_PATH = SHARED_DIR / 'hk_latest.json'
 
 
 def _default() -> Dict[str, Any]:
