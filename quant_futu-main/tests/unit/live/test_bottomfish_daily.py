@@ -59,6 +59,18 @@ class TestBottomFishDaily(unittest.TestCase):
         assert res['ok'] is False
         assert '数据不足' in res['details']
 
+    def test_pullback_veto_reachable(self):
+        ana = IntradayAnalyzer({'analysis': {'bottom_fish_daily': {
+            'max_stop_distance_pct': 0.08,
+            'pullback_from_low_pct': 0.06,
+        }}})
+        df = _daily(_decline_then_stabilize())
+        ref_low = float(df['low'].tail(20).min())
+        price = ref_low * 1.07  # 止损距离6.5%<8%放行，但距低点7%>6%应否决
+        res = ana.analyze_bottom_fish_daily(df, price)
+        assert res['ok'] is False
+        assert '距20日低点' in res['details']
+
 
 class TestBottomTimeStop(unittest.TestCase):
     def setUp(self):

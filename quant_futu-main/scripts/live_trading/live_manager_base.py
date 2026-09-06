@@ -1049,7 +1049,9 @@ class LiveTradingManager(ABC):
 
         # ===== v1 阶段低点抄底（日线位置/RSI拐头/止损距离，默认关闭）=====
         daily_details: Dict[str, Dict] = {}
-        if self._dip_daily_enabled():
+        # 阶段低点过滤只作用于“抄底”轮次：动量轮候选贴近新高/RSI偏高，
+        # 套用日线低位过滤会把追涨信号全部误杀
+        if self._dip_daily_enabled() and entry_mode == 'bottom_fish':
             analyzer = None
             if self.buy_timing is not None:
                 analyzer = getattr(self.buy_timing, '_intraday_analyzer', None)
@@ -1058,7 +1060,9 @@ class LiveTradingManager(ABC):
                 mg = (self.config.get('trading', {}).get('live_trading', {})
                       .get('buy_timing', {}).get('smart', {})
                       .get('market_gate') or {})
-                strict_bonus = int(mg.get('strict_score_bonus', 2))
+                # 阶段低点评分满分 4，不能照搬日内 K 线的 +2：
+                # 使用独立 stage_strict_bonus（默认 +1，min=4 恰好要求“基础+拐头”双满）
+                strict_bonus = int(mg.get('stage_strict_bonus', 1))
                 logger.info(f'[阶段低点] stricter：最低分要求 +{strict_bonus}')
             kept = []
             for code in stocks_to_buy:

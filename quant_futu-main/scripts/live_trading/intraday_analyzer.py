@@ -403,6 +403,13 @@ class IntradayAnalyzer:
                 f'（参考低点 {ref_low:.2f}），放弃'
             )
             return base
+        # 回撤距离否决：现价离20日低点过远 = 已脱离低位区（参数此前未生效）
+        if pullback > pullback_max:
+            base['details'] = (
+                f'距20日低点 {pullback * 100:.1f}% > '
+                f'上限 {pullback_max * 100:.0f}%，放弃'
+            )
+            return base
         if retreat < retreat_min:
             base['details'] = (
                 f'距20日高点回撤仅 {retreat * 100:.1f}% < '
@@ -413,7 +420,10 @@ class IntradayAnalyzer:
         rsi_series = self._rsi_series(closes)
         rsi_now = float(rsi_series[-1])
         rsi_prev = float(rsi_series[-2]) if len(rsi_series) >= 2 else rsi_now
-        no_new_low = len(lows) >= 2 and float(lows[-1]) > float(lows[-6:-1].min())
+        # 拐头窗口与参考止损窗口对齐：比较今日低点与前 20 日（不含今日）低点
+        no_new_low = len(lows) >= 2 and (
+            float(lows[-1]) > float(lows[:-1][-20:].min())
+        )
         rsi_turn = rsi_now > rsi_prev and no_new_low
 
         base_score = 0
