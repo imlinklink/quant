@@ -551,6 +551,7 @@ class ApprovalServer:
         on_demo_proposal=None,
         on_demo_exit=None,
         on_demo_sell=None,
+        on_watch_added=None,
     ):
         self.store = store
         self.host = host
@@ -563,6 +564,7 @@ class ApprovalServer:
         self.on_demo_proposal = on_demo_proposal
         self.on_demo_exit = on_demo_exit
         self.on_demo_sell = on_demo_sell
+        self.on_watch_added = on_watch_added
         self.httpd: Any = None
         self._thread: Any = None
 
@@ -675,6 +677,16 @@ class ApprovalServer:
                                 added = watchlist.add_hk_watch(item.get('code', ''))
                             else:
                                 added = watchlist.add_us_watch(item.get('code', ''))
+                            if added and server_ref.on_watch_added is not None:
+                                try:
+                                    # 同步进运行中内存观察池，下一轮热加入自动补K线，
+                                    # 无需重启港股服务
+                                    server_ref.on_watch_added(
+                                        str(item.get('code', '')).upper(),
+                                        str(item.get('market', '')).upper(),
+                                    )
+                                except Exception as e:
+                                    logger.warning(f'[LLM选股] 内存观察池同步失败: {e}')
                             update_item_status(pid, 'added')
                             self._send_json({
                                 'ok': True,

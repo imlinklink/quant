@@ -1576,6 +1576,7 @@ class LiveTradingManager(ABC):
             self.approval_server.on_demo_proposal = self._dev_simulate_proposal
             self.approval_server.on_demo_exit = self._dev_demo_exit
             self.approval_server.on_demo_sell = self._dev_simulate_sell
+            self.approval_server.on_watch_added = self._on_watch_added
             logger.warning(
                 f"[人工确认] 已启用：买入前必须在页面点「下单」才会执行。"
                 f"打开 http://{host}:{self.approval_server.bound_port} "
@@ -1956,6 +1957,29 @@ class LiveTradingManager(ABC):
                     and item.get('status') == 'pending'):
                 return item
         raise RuntimeError('卖出提案未找到')
+
+    def _on_watch_added(self, code: str, market: str = 'HK'):
+        """LLM建议页「加入观察池」后的运行中同步（仅本市场）。
+
+        只把代码加进内存 config 的 hk.watch_list；下一轮买入循环的
+        _hot_add_extra_watch_codes 会在自己的线程里补拉 K 线并参与选股，
+        因此无需重启服务。文件写入仍由 watchlist.add_hk_watch 负责（重启后保留）。
+        """
+        if str(market).upper() != 'HK' or self.market_type != 'HK':
+            return
+        c = str(code or '').strip().upper()
+        if not c or not c.startswith('HK.'):
+            return
+        try:
+            hk = self.config.setdefault('hk', {})
+            wl = hk.setdefault('watch_list', [])
+            if c not in wl:
+                wl.append(c)
+                logger.warning(
+                    f'[LLM选股] 已同步内存观察池: {c}（下一轮选股自动补拉K线）'
+                )
+        except Exception as e:
+            logger.warning(f'[LLM选股] 内存观察池同步失败: {e}')
 
     # ==================== 卖出人工确认（所有卖出含止损 → LLM + 用户，超时兜底） ====================
 
