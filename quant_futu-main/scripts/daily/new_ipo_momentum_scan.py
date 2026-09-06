@@ -146,7 +146,8 @@ def scan_new_ipos():
         else:
             print(f"[警告] 恒生指数K线获取失败: {hsi_kline}")
         
-        existing_codes = set(db.get_all_stock_codes(market='HK', enabled_only=False))
+        # YAML 存储层没有 enabled_only 参数：stock_info 全量即池子
+        existing_codes = set(db.get_all_stock_codes(market='HK'))
         
         # 过滤近90天日历上市的次新股
         cutoff_date = datetime.now() - timedelta(days=90)
@@ -180,23 +181,16 @@ def scan_new_ipos():
             code = c['code']
             print(f"[{i+1}/{len(candidates)}] 扫描 {code} {c['name']}...", end=" ")
             
-            # 先查数据库，已有数据直接用，避免浪费富途API额度
-            df_db = db.get_kline_data(code, None, None, 'DAY')
-            if df_db is not None and not df_db.empty:
-                kline = df_db.copy()
-                kline.rename(columns={'date': 'time_key'}, inplace=True)
-                print(f"[DB已有 {len(kline)}条]", end=" ")
-            else:
-                # 数据库没有才请求富途API（注意：ret=-1 时错误信息在 kline 字符串里！）
-                ret, kline, _ = quote_ctx.request_history_kline(
-                    code=code, start='', end='', ktype=KLType.K_DAY, max_count=100
-                )
-                if ret != RET_OK or kline is None or kline.empty:
-                    # 富途错误信息可能藏在 kline 字符串里
-                    err_msg = kline if isinstance(kline, str) else '获取失败'
-                    print(f"K线获取失败: {err_msg}")
-                    time.sleep(0.1)
-                    continue
+            # YAML 迁移后无本地K线表，直接请求富途API
+            # （注意：ret=-1 时错误信息可能在 kline 字符串里）
+            ret, kline, _ = quote_ctx.request_history_kline(
+                code=code, start='', end='', ktype=KLType.K_DAY, max_count=100
+            )
+            if ret != RET_OK or kline is None or kline.empty:
+                err_msg = kline if isinstance(kline, str) else '获取失败'
+                print(f"K线获取失败: {err_msg}")
+                time.sleep(0.1)
+                continue
             
             trading_days = len(kline)
             if trading_days > 150:
@@ -272,17 +266,15 @@ def scan_new_ipos():
         print("\n=== 入库 ===")
         for s in top_stocks:
             try:
-                with db._get_connection() as conn:
-                    with conn.cursor() as cursor:
-                        cursor.execute("""
-                            INSERT INTO stock_info (stock_code, stock_name, lot_size, market, sector, listing_date)
-                            VALUES (%s, %s, %s, 'HK', %s, %s)
-                            ON DUPLICATE KEY UPDATE 
-                                stock_name = VALUES(stock_name),
-                                lot_size = VALUES(lot_size),
-                                sector = VALUES(sector),
-                                listing_date = VALUES(listing_date)
-                        """, (s['code'], s['name'], s['lot_size'], s['sector'], s['listing_date']))
+                db.save_stock_info(
+                    stock_code=s['code'],
+                    name=s['name'],
+                    market='HK',
+                    lot_size=int(s['lot_size']),
+                    listing_date=str(s['listing_date']),
+                    sector=s['sector'],
+                    enabled=1,
+                )
                 print(f"入库: {s['code']} {s['name']}")
             except Exception as e:
                 print(f"❌ 入库失败 {s['code']}: {type(e).__name__}: {e}")

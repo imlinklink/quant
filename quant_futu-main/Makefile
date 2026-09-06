@@ -193,7 +193,8 @@ clean-all: clean clean-log
 # === 次新股动量扫描 ===
 new-ipo-scan:
 	@echo "执行次新股动量扫描..."
-	PYTHONPATH=/Users/liwentao/PycharmProjects/quant_futu python3 scripts/daily/new_ipo_momentum_scan.py
+	# 脚本内部已 sys.path.insert 项目根，无需硬编码 PYTHONPATH
+	python3 scripts/daily/new_ipo_momentum_scan.py
 
 # === 日内K线分析验证 ===
 # 用法: make verify-intraday CODE=HK.01877 DATE=2026-04-20

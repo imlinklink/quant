@@ -5,6 +5,7 @@ import os
 import json
 import signal
 import logging
+import time
 from pathlib import Path
 from typing import Optional, Dict
 
@@ -25,10 +26,13 @@ class ProcessManager:
     def save_process_info(self, pid: int, info: Dict):
         """保存进程信息"""
         try:
+            # info 里若带真实启动时间（run_hk_live 传入 time.time()）就优先用，
+            # 避免退回 __file__ 创建时间造成「启动时间」恒为安装时间
+            start_time = float(info.get('start_time') or 0) or time.time()
             data = {
                 'pid': pid,
                 'info': info,
-                'start_time': os.path.getctime(__file__)  # 近似启动时间
+                'start_time': start_time,
             }
 
             with open(self.pid_file, 'w') as f:

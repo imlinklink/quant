@@ -16,22 +16,6 @@ plt.rcParams['axes.unicode_minus'] = False
 import matplotlib.dates as mdates
 
 
-def _get_index_data_from_db(code: str, start_date: str, end_date: str) -> pd.DataFrame:
-    """从本地MySQL数据库读取指数数据，避免富途API调用"""
-    try:
-        from mutifactor.infra.yaml_storage import YAMLStorage
-        db = YAMLStorage()
-        df = db.get_kline_data(code, start_date=start_date, end_date=end_date)
-        if df is not None and len(df) > 0:
-            # DB返回的是 datetime.date，转为 pd.Timestamp 保持一致
-            df['date'] = pd.to_datetime(df['date'])
-            df = df.sort_values('date').reset_index(drop=True)
-            return df
-        return pd.DataFrame()
-    except Exception as e:
-        return pd.DataFrame()
-
-
 class ChartGenerator:
     """图表生成器"""
 
@@ -52,29 +36,21 @@ class ChartGenerator:
                 '恒生指数': 'HK.800000',
             }
 
-            # 获取指数数据：优先从本地MySQL数据库读取，避免富途API调用
+            # 获取指数数据：YAML 迁移后无本地K线表，直接从富途API获取
             index_data = {}
             for name, code in indices.items():
-                # 1. 先尝试从本地数据库读取
-                df = _get_index_data_from_db(code, start_date, end_date)
-                if df is not None and len(df) > 0:
-                    df['date'] = pd.to_datetime(df['date'])
-                    index_data[name] = df
-                    logger.info(f"从本地DB获取{name}数据成功: {len(df)}天")
-                else:
-                    # 2. Fallback: 从富途API获取
-                    try:
-                        logger.info(f"本地DB无数据，从富途API获取 {name} ({code}) ...")
-                        df = fetcher.fetch_stock_kline(code, start_date, end_date)
-                        if df is not None and len(df) > 0:
-                            df['date'] = pd.to_datetime(df['date'])
-                            df = df.sort_values('date').reset_index(drop=True)
-                            index_data[name] = df
-                            logger.info(f"从API获取{name}数据成功: {len(df)}天")
-                        else:
-                            logger.warning(f"获取{name}数据为空")
-                    except Exception as e:
-                        logger.warning(f"获取{name}数据失败: {e}")
+                try:
+                    logger.info(f"从富途API获取 {name} ({code}) ...")
+                    df = fetcher.fetch_stock_kline(code, start_date, end_date)
+                    if df is not None and len(df) > 0:
+                        df['date'] = pd.to_datetime(df['date'])
+                        df = df.sort_values('date').reset_index(drop=True)
+                        index_data[name] = df
+                        logger.info(f"从API获取{name}数据成功: {len(df)}天")
+                    else:
+                        logger.warning(f"获取{name}数据为空")
+                except Exception as e:
+                    logger.warning(f"获取{name}数据失败: {e}")
 
             # 创建图表（上方主图 + 下方水平三栏统计框）
             fig = plt.figure(figsize=(14, 8))

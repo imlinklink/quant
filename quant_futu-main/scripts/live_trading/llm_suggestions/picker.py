@@ -45,6 +45,15 @@ def _truncate(text: Optional[str]) -> str:
     return text[:MAX_CHARS_PER_REPORT]
 
 
+def _clean_confidence(value) -> float:
+    """LLM confidence 安全转换：null/"高"/越界等一律回退 0.5。"""
+    try:
+        conf = float(value)
+    except (TypeError, ValueError):
+        return 0.5
+    return conf if 0.0 <= conf <= 1.0 else 0.5
+
+
 def generate(pre_text: Optional[str], post_text: Optional[str]) -> Dict:
     """调用 LLM 生成建议；返回 {'ok': bool, 'data': {...} | 'error': str}"""
     from mutifactor.llm import LLMAdvisor
@@ -84,7 +93,7 @@ def generate(pre_text: Optional[str], post_text: Optional[str]) -> Dict:
             'rationale': str(c.get('rationale', '')),
             'catalyst': str(c.get('catalyst', '')),
             'risks': str(c.get('risks', '')),
-            'confidence': float(c.get('confidence', 0.5)),
+            'confidence': _clean_confidence(c.get('confidence', 0.5)),
             'horizon': str(c.get('horizon', '数日')),
             'status': 'pending',
         })
