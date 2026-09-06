@@ -71,9 +71,19 @@ class TrendDetector:
         highs = obs_bars['high'].values.astype(float)
         lows = obs_bars['low'].values.astype(float)
 
+        # 剔除含 NaN 的脏 K 线，避免 NaN 比较静默污染统计
+        valid = ~(np.isnan(closes) | np.isnan(opens) | np.isnan(highs) | np.isnan(lows))
+        if not np.all(valid):
+            closes, opens, highs, lows = closes[valid], opens[valid], highs[valid], lows[valid]
+            n = len(closes)
+            if n < 10:
+                return 'sideways', {'reason': f'有效K线不足({n}根)'}
+
         # ========== 实战核心：以窗口起点为基准，看真正涨幅 ==========
         first_close = closes[0]
         last_close = closes[-1]
+        if first_close <= 0:
+            return 'sideways', {'reason': f'基准价无效({first_close})'}
         change = (last_close - first_close) / first_close
 
         # 阳线比例
