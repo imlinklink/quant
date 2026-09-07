@@ -7,6 +7,7 @@ import argparse
 import logging
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -102,12 +103,11 @@ def start_trading(config_path: str, debug: bool = False):
         def signal_handler(signum, frame):
             nonlocal shutdown_requested
             signal_name = 'SIGINT' if signum == signal.SIGINT else 'SIGTERM'
-            logger.info(f"收到 {signal_name} 信号，正在优雅退出...")
-            manager.stop()
-            process_manager.cleanup()
+            if shutdown_requested:
+                logger.info(f"重复收到 {signal_name}，忽略（正在退出）")
+                return
             shutdown_requested = True
-            # 富途等库可能残留非守护线程；清理已完成，直接结束进程
-            os._exit(0)
+            logger.info(f"收到 {signal_name} 信号，正在优雅退出...")
 
         signal.signal(signal.SIGINT, signal_handler)   # Ctrl+C
         signal.signal(signal.SIGTERM, signal_handler)  # make stop / kill
@@ -128,13 +128,24 @@ def start_trading(config_path: str, debug: bool = False):
         # 保持主线程运行，直到收到停止信号
         try:
             while not shutdown_requested:
-                time.sleep(1)
+                time.sleep(0.2)
         except KeyboardInterrupt:
             pass
 
-        # 清理进程信息
-        if not shutdown_requested:
-            process_manager.cleanup()
+        # 信号只在主线程置标志：清理只执行一次（避免信号重入导致重复 join/卡死）。
+        # stop() 内部的线程 join 可能被 Futu 网络调用拖住，这里做有界等待，
+        # 超时则直接收尾退出，避免进程永久挂起。
+        stop_worker = threading.Thread(target=manager.stop,
+                                       name='hk-stop-worker', daemon=True)
+        stop_worker.start()
+        deadline = time.time() + 45
+        while stop_worker.is_alive() and time.time() < deadline:
+            time.sleep(0.5)
+        if stop_worker.is_alive():
+            logger.warning('停止流程超过 45 秒，强制执行退出')
+        process_manager.cleanup()
+        # 富途等库可能残留非守护线程；清理完成后直接结束进程
+        os._exit(0)
 
     except Exception as e:
         logger.error(f"启动失败: {e}")

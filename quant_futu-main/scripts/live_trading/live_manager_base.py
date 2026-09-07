@@ -20,6 +20,50 @@ from .buy_timing import BuyTimingStrategy
 logger = logging.getLogger(__name__)
 
 
+def _sleep_interruptible(stop_event, seconds: float):
+    """分段 sleep：stop_event 置位时提前返回，保证线程能快速退出。"""
+    if seconds <= 0:
+        return
+    end = time.monotonic() + seconds
+    while not stop_event.is_set():
+        remain = end - time.monotonic()
+        if remain <= 0:
+            break
+        time.sleep(min(0.25, remain))
+
+
+def _extract_trading_day_set(data) -> Optional[Set[str]]:
+    """把 futu request_trading_days 的返回解析成 {YYYY-MM-DD}。
+
+    不同 SDK 版本返回结构不同：
+      - 新版：list[{'time': '2026-09-01', 'trade_date_type': 'WHOLE'}]
+      - 旧版：DataFrame（列名可能是 time/time_point/trade_date/date）
+    返回 None 表示无法解析（由上游降级为仅周末判断）。
+    """
+    records: List[dict] = []
+    if data is None:
+        return None
+    if hasattr(data, 'to_dict'):
+        try:
+            records = data.to_dict('records')
+        except Exception:
+            return None
+    elif isinstance(data, list):
+        records = [r for r in data if isinstance(r, dict)]
+    if not records:
+        return None
+    keys: Set[str] = set()
+    for r in records:
+        keys.update(str(k) for k in r.keys())
+    date_col = next((c for c in ('time', 'time_point', 'trade_date', 'date')
+                     if c in keys), None)
+    if date_col is None:
+        logger.warning(f'无法识别交易日列名，keys={sorted(keys)}')
+        return None
+    days = {str(r.get(date_col))[:10] for r in records if r.get(date_col)}
+    return days or None
+
+
 class TradingState(Enum):
     """交易状态"""
     STOPPED = auto()
@@ -411,7 +455,11 @@ class LiveTradingManager(ABC):
             wait_time = min(2 ** self.retry_count * 15, 300)
             self.retry_count += 1
             logger.warning(f"{self.market_type}连接断开, {wait_time}秒后重试...")
-            time.sleep(wait_time)
+            if self.stop_event.is_set():
+                return False
+            _sleep_interruptible(self.stop_event, wait_time)
+            if self.stop_event.is_set():
+                return False
             return self.connect()
         return True
 
@@ -440,7 +488,7 @@ class LiveTradingManager(ABC):
                             f"[{thread_name}] [{self.market_type}] "
                             f"{current_date} 非交易日，跳过买入循环"
                         )
-                    time.sleep(60)
+                    _sleep_interruptible(self.stop_event, 60)
                     continue
 
                 # 重置每日状态
@@ -461,7 +509,7 @@ class LiveTradingManager(ABC):
                 trading_start_time, trading_end_time = self._get_trading_time_window()
                 if not (trading_start_time <= current_time < trading_end_time):
                     # 非交易时段，休眠等待
-                    time.sleep(60)
+                    _sleep_interruptible(self.stop_event, 60)
                     continue
 
                 # 人工确认模式：处理页面上的「下单 / 拒绝」点击结果
@@ -507,15 +555,15 @@ class LiveTradingManager(ABC):
                 if current_positions >= max_pos:
                     # 持仓已满，休眠较长时间（只检查是否卖出）
                     logger.debug(f"[{thread_name}] [{self.market_type}] 持仓已满，休眠{sleep_full}秒")
-                    time.sleep(sleep_full)
+                    _sleep_interruptible(self.stop_event, sleep_full)
                 elif current_positions == 0 and no_selections:
                     # 无持仓无选股，休眠较长时间
                     logger.info(f"[{thread_name}] [{self.market_type}] 无持仓无选股，休眠{sleep_no_pos}秒")
-                    time.sleep(sleep_no_pos)
+                    _sleep_interruptible(self.stop_event, sleep_no_pos)
                 else:
                     # 正常情况按配置时间休眠
                     logger.debug(f"[{thread_name}] [{self.market_type}] 正常交易，休眠{sleep_normal}秒")
-                    time.sleep(sleep_normal)
+                    _sleep_interruptible(self.stop_event, sleep_normal)
 
             except (OSError, IOError) as e:
                 logger.error(f"[{thread_name}] {self.market_type}买入循环网络错误: {e}")
@@ -602,24 +650,11 @@ class LiveTradingManager(ABC):
             logger.warning(f"[{self.market_type}] 查询 {year} 年交易日失败: {data}")
             return None
 
-        # futu 返回列名可能为 time_point / trade_date / date，兼容处理
-        date_col = None
-        for col in ('time', 'time_point', 'trade_date', 'date'):
-            if col in data.columns:
-                date_col = col
-                break
-        if date_col is None:
-            logger.warning(
-                f"[{self.market_type}] 无法识别交易日列名，columns={list(data.columns)}"
-            )
-            return None
-
-        trading_days: Set[str] = set()
-        for v in data[date_col].tolist():
-            s = str(v)[:10]
-            if s:
-                trading_days.add(s)
+        trading_days = _extract_trading_day_set(data)
         if not trading_days:
+            logger.warning(
+                f"[{self.market_type}] 解析 {year} 年交易日失败，降级为仅周末判断"
+            )
             return None
 
         self._trading_days_cache[cache_key] = trading_days
@@ -720,7 +755,7 @@ class LiveTradingManager(ABC):
                     last_check_time = current_timestamp
 
                 # 持仓检查循环的休眠（固定间隔，不受其他逻辑影响）
-                time.sleep(1)  # 每秒检查一次是否到检查时间
+                _sleep_interruptible(self.stop_event, 1)  # 每秒检查一次是否到检查时间
 
             except (OSError, IOError) as e:
                 logger.error(f"[{thread_name}] {self.market_type}持仓检查循环网络错误: {e}")
@@ -2419,7 +2454,7 @@ class LiveTradingManager(ABC):
                 self._process_sell_approvals()
             except Exception as e:
                 logger.error(f"[卖出确认] 轮询异常: {e}", exc_info=True)
-            time.sleep(interval)
+            _sleep_interruptible(self.stop_event, interval)
         logger.info("[卖出确认] 轮询线程已停止")
 
     def _process_approval_actions(self):
