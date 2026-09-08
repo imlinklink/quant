@@ -491,3 +491,39 @@ def get_context_text(symbol: str) -> str:
     except Exception as e:
         logger.warning(f'打包消息面上下文失败 {symbol}: {e}')
         return ''
+
+
+def fetch_event_evidence(symbol: str, count: int = 5) -> List[Dict]:
+    """拉取财报/公告/新闻，转成不可变 evidence 列表（带 evidence_id/content_hash，可被 LLM 引用）。
+
+    事件分类、去重和时间校验由程序完成；LLM 只解释影响。
+    失败/缺数据返回空列表，不伪造证据。
+    """
+    from mutifactor.llm.trade_review import evidence
+
+    ctx = fetch_signal_context(symbol)
+    out: List[Dict] = []
+    seen = set()
+
+    # 财报事件（kind=filing，TTL 长）
+    earn = ctx.get('earnings')
+    if earn and earn.get('date'):
+        summary = f"下次财报日期 {earn['date']}"
+        if earn.get('eps_forecast'):
+            summary += f"，EPS 预期 {earn['eps_forecast']}"
+        e = evidence(summary, 'yahoo:calendarEvents', kind='filing')
+        out.append(e)
+        seen.add(e['evidence_id'])
+
+    # 新闻/公告（kind=news；published_at 缺失时以 observed_at 为时效基准）
+    for n in (ctx.get('news') or [])[:count]:
+        title = str(n.get('title') or '').strip()
+        if not title:
+            continue
+        source = str(n.get('publisher') or 'news')
+        e = evidence(title, source, n.get('observed_at'), n.get('published_at'), kind='news')
+        if e['evidence_id'] not in seen:
+            out.append(e)
+            seen.add(e['evidence_id'])
+
+    return out

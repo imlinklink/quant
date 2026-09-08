@@ -32,7 +32,7 @@ def build_universe(config):
     return codes
 
 
-def build_packet_from_bars(code, bars, *, name=None, sector=None, risk_group=None, now=None):
+def build_packet_from_bars(code, bars, *, name=None, sector=None, risk_group=None, events=None, now=None):
     """从日 K 生成 evidence_packet。行情指标由程序计算，LLM 只解释。数据不足返回 None。"""
     import numpy as np
 
@@ -87,8 +87,10 @@ def build_packet_from_bars(code, bars, *, name=None, sector=None, risk_group=Non
                f'ATR {_fmt(atr)}；趋势 {trend or "N/A"}')
     snapshot_evidence = evidence(summary, 'internal:quote-snapshot', utc(now), kind='rule')
 
+    # 程序行情快照 + 外部事件证据（财报/公告/新闻），让 LLM 有真实事件可引用
+    all_events = [snapshot_evidence] + list(events or [])
     return build_evidence_packet(code, name=name, sector=sector, risk_group=risk_group,
-                                 quote=quote, events=[snapshot_evidence], now=now)
+                                 quote=quote, events=all_events, now=now)
 
 
 def run_selection(config, advisor, fetcher, now=None, dry_run=False):
@@ -105,10 +107,13 @@ def run_selection(config, advisor, fetcher, now=None, dry_run=False):
     start = (datetime.now(timezone.utc) - timedelta(days=90)).strftime('%Y-%m-%d')
     bars_map = fetcher.fetch_multiple_stocks(universe, start, end) if fetcher else {}
 
+    from scripts.live_trading import signal_context as sc
     risk_group = (config.get('risk_budget', {}).get('code_groups') or {})
     packets = []
     for code in universe:
-        p = build_packet_from_bars(code, bars_map.get(code), risk_group=risk_group.get(code), now=now)
+        events = sc.fetch_event_evidence(code)
+        p = build_packet_from_bars(code, bars_map.get(code), risk_group=risk_group.get(code),
+                                   events=events, now=now)
         if p is not None:
             packets.append(p)
 

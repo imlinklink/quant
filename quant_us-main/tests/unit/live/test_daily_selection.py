@@ -45,6 +45,34 @@ class DailySelectionContracts(unittest.TestCase):
         p = build_packet_from_bars('US.A', _bars(), now='2026-09-04T10:00:00+00:00')
         self.assertFalse(p['data_quality']['ok'])
 
+    def test_fetch_event_evidence(self):
+        from unittest.mock import patch
+        from scripts.live_trading import signal_context as sc
+
+        fake_ctx = {
+            'earnings': {'date': '2026-09-20', 'eps_forecast': '1.2'},
+            'news': [
+                {'title': '公司发布业绩', 'publisher': 'test',
+                 'observed_at': '2026-09-08T10:00:00+00:00',
+                 'published_at': '2026-09-07T00:00:00+00:00'},
+            ],
+        }
+        with patch.object(sc, 'fetch_signal_context', return_value=fake_ctx):
+            ev = sc.fetch_event_evidence('US.A')
+        self.assertTrue(all(e.get('evidence_id') for e in ev))
+        self.assertTrue(any(e['kind'] == 'filing' for e in ev))  # 财报
+        self.assertTrue(any(e['kind'] == 'news' for e in ev))    # 新闻
+
+    def test_build_packet_includes_external_events(self):
+        events = [{'summary': '公司发布业绩', 'source': 'filing',
+                   'published_at': '2026-09-03T00:00:00+00:00', 'kind': 'filing'}]
+        p = build_packet_from_bars('US.A', _bars(), events=events,
+                                   now='2026-09-04T10:00:00+00:00')
+        # 行情快照 + 外部事件，至少 2 条
+        self.assertGreaterEqual(len(p['events']), 2)
+        self.assertTrue(any(e['kind'] == 'rule' for e in p['events']))      # 行情快照
+        self.assertTrue(any(e['kind'] == 'filing' for e in p['events']))    # 外部事件
+
 
 if __name__ == '__main__':
     unittest.main()
