@@ -116,6 +116,64 @@ class ExecutionCorrection(unittest.TestCase):
         self.assertEqual(out.get('order_id'), 'str')
         self.assertEqual(out.get('dealt_qty'), 'int')
 
+    # ---------- 审查回归：状态保护 / 已退出更正 / 盈亏重算 ----------
+
+    def test_reconciling_blocks_repeated_report(self):
+        pid = self.pending_order()
+        self.service.apply_report(pid, {'order_id': '1', 'order_status': 'FILLED_PART',
+                                        'dealt_qty': 20, 'dealt_avg_price': 101})
+        self.service.apply_report(pid, {'order_id': '1', 'order_status': 'CANCELLED_PART',
+                                        'dealt_qty': 20, 'dealt_avg_price': 101})
+        # 终结订单新增成交 → 待核对
+        self.service.apply_report(pid, {'order_id': '1', 'order_status': 'FILLED_ALL',
+                                        'dealt_qty': 30, 'dealt_avg_price': 102})
+        with self.registry.transaction() as b:
+            self.assertEqual(b['orders'][pid]['status'], 'reconciling')
+            self.assertEqual(b['orders'][pid]['filled_qty'], 20)
+        # 同一差异回报再次进入 apply_report → 不能绕过保护更新经济数据
+        result = self.service.apply_report(pid, {'order_id': '1', 'order_status': 'FILLED_ALL',
+                                                 'dealt_qty': 30, 'dealt_avg_price': 102})
+        self.assertEqual(result, 'reconciling')
+        with self.registry.transaction() as b:
+            self.assertEqual(b['orders'][pid]['filled_qty'], 20)  # 仍为 20，未被绕过
+
+    def test_quantity_correction_after_partial_exit(self):
+        pid = self.pending_order(qty=50)
+        self.service.apply_report(pid, {'order_id': '1', 'order_status': 'FILLED_ALL',
+                                        'dealt_qty': 20, 'dealt_avg_price': 100})
+        with self.registry.transaction() as b:
+            tid = b['orders'][pid]['trade_id']
+        # 卖出 5 股
+        sell_pid = 'sell1'
+        with self.registry.transaction() as b:
+            b['orders'][sell_pid] = dict(id=sell_pid, code='US.A', side='sell', qty=50, price=100,
+                                         status='submitted', filled_qty=0, risk=0, cost_per_share=.05,
+                                         trade_id=tid, metadata={'initial_stop': 95, 'risk_group': 'semis',
+                                                                 'entry_mode': 'dip_buy', 'direction': 'long'})
+        self.service.apply_report(sell_pid, {'order_id': '2', 'order_status': 'FILLED_PART',
+                                             'dealt_qty': 5, 'dealt_avg_price': 105})
+        with self.registry.transaction() as b:
+            self.assertEqual(b['positions']['US.A']['qty'], 15)
+        # 更正入场累计 20 → 30，当前剩余应为 30 - 5 = 25
+        self.service.apply_correction(pid, {'correction_id': 'c1', 'reason': '券商更正入场数量',
+                                            'dealt_qty': 30, 'dealt_avg_price': 100})
+        with self.registry.transaction() as b:
+            self.assertEqual(b['positions']['US.A']['qty'], 25)
+
+    def test_correction_recomputes_net_pnl(self):
+        pid = self.pending_order(qty=50)
+        self.service.apply_report(pid, {'order_id': '1', 'order_status': 'FILLED_ALL',
+                                        'dealt_qty': 50, 'dealt_avg_price': 100, 'cumulative_fee': 1})
+        with self.registry.transaction() as b:
+            trade = list(b['trades'].values())[0]
+            self.assertEqual(trade['fees'], 1)
+        self.service.apply_correction(pid, {'correction_id': 'f1', 'reason': '补齐费用', 'cumulative_fee': 3})
+        with self.registry.transaction() as b:
+            trade = list(b['trades'].values())[0]
+            self.assertEqual(trade['fees'], 3)
+            # 无卖出：gross=0，fee_complete=True，net = 0 - 3 = -3
+            self.assertEqual(trade['net_realized_pnl'], -3)
+
 
 if __name__ == '__main__':
     unittest.main()

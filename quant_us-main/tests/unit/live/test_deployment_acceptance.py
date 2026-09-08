@@ -46,12 +46,22 @@ class DeploymentAcceptance(unittest.TestCase):
         f=self.fixture;item=self.pending()
         service=ExecutionService(None,f.config,f.store,True,f.registry)
         service.apply_report(item['id'],dict(order_status='CANCELLED_PART',dealt_qty=10,dealt_avg_price=101))
+        # 终结订单新增成交 → 待核对（新契约：返回 reconciling，不静默改写）
+        result = service.apply_report(item['id'],dict(order_status='FILLED_PART',dealt_qty=12,dealt_avg_price=101))
+        self.assertEqual(result, 'reconciling')
         with f.registry.transaction() as book:
-            before=json.dumps(book,sort_keys=True)
-        with self.assertRaisesRegex(ValueError,'终结订单'):
-            service.apply_report(item['id'],dict(order_status='FILLED_PART',dealt_qty=12,dealt_avg_price=101))
+            self.assertEqual(book['orders'][item['id']]['status'], 'reconciling')
+            self.assertEqual(book['orders'][item['id']]['filled_qty'], 10)  # 未静默改写
+        # 重复差异回报不能绕过保护更新经济数据
+        result2 = service.apply_report(item['id'],dict(order_status='FILLED_PART',dealt_qty=12,dealt_avg_price=101))
+        self.assertEqual(result2, 'reconciling')
         with f.registry.transaction() as book:
-            self.assertEqual(before,json.dumps(book,sort_keys=True))
+            self.assertEqual(book['orders'][item['id']]['filled_qty'], 10)  # 仍 10
+        # 只有经过校验的更正才能解除并应用
+        service.apply_correction(item['id'], {'correction_id':'c1','reason':'券商更正新增成交',
+                                              'dealt_qty':12,'dealt_avg_price':101})
+        with f.registry.transaction() as book:
+            self.assertEqual(book['orders'][item['id']]['filled_qty'], 12)
 
     def test_concurrent_migration_retains_pristine_backup(self):
         f=self.fixture;path=f.path/'old.db'

@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 from .position_registry import REGISTRY
 from .decision_ledger.event_store import enqueue, stable_id, EventStore
 
-ACTIVE = {'intent', 'submitting', 'submitted', 'partially_filled', 'unknown'}
+ACTIVE = {'intent', 'submitting', 'submitted', 'partially_filled', 'unknown', 'reconciling'}
 TERMINAL = {'filled', 'cancelled', 'rejected'}
 
 
@@ -119,6 +119,9 @@ class ExecutionService:
         avg = float(report.get('dealt_avg_price') or 0)
         with self.registry.transaction() as book:
             order = book['orders'][pid]
+            if order.get('status') == 'reconciling':
+                # 待核对期间：普通回报不能更新经济数据或解除限制，只能等 apply_correction
+                return 'reconciling'
             if not math.isfinite(filled) or filled > order['qty']:
                 raise ValueError('订单累计成交数量异常')
             if filled < order.get('filled_qty', 0):
@@ -225,21 +228,7 @@ class ExecutionService:
                     trade['entry_terminal'] = True
                     if trade['initial_r0'] is None:
                         trade['initial_r0'] = trade['provisional_r']
-                related = [o for o in book['orders'].values() if o.get('trade_id') == tid and o.get('filled_qty')]
-                trade['fee_complete'] = (not trade['legacy'] and all(o.get('cumulative_fee') is not None for o in related))
-                qty = trade['entry_qty']
-                basis = trade['entry_amount']/qty if qty else 0
-                sign = -1 if trade['direction'] == 'short' else 1
-                trade['gross_realized_pnl'] = sign*(trade['exit_amount']-basis*trade['exit_qty']) if trade.get('basis_known',True) else None
-                trade['net_realized_pnl'] = trade['gross_realized_pnl']-trade['fees'] if trade['fee_complete'] and trade['gross_realized_pnl'] is not None else None
-                trade['remaining_qty'] = qty-trade['exit_qty']
-                trade['remaining_initial_risk'] = (trade['initial_r0']*trade['remaining_qty']/qty
-                                                    if qty and trade['initial_r0'] is not None else None)
-                if trade['exit_qty'] and trade['remaining_qty'] == 0 and trade['status'] != 'closed':
-                    trade.update(status='closed', closed_at=time.time())
-                    enqueue(book, self.registry.namespace, 'trade_closed', tid, dict(trade), **links)
-                elif trade['exit_qty'] and trade['remaining_qty'] > 0:
-                    trade['status'] = 'partially_closed'
+                self._recompute_trade_fields(book, order, trade, links)
                 if delta or previous_status != order['status'] or previous_fee != fee and fee is not None:
                     enqueue(book, self.registry.namespace, 'trade_accounted',
                             [tid, pid, filled, order['status'], fee, order.get('fee_revision',0)], dict(trade), **links)
@@ -250,9 +239,36 @@ class ExecutionService:
             saved = dict(order)
         self.publish(saved)
 
+    def _recompute_trade_fields(self, book, order, trade, links):
+        """重算交易经济字段（费用完整度 / 毛净已实现盈亏 / 剩余数量与风险 / 交易状态）。
+
+        常规回报与更正共用，保证账本与重建报表一致。
+        """
+        if not trade:
+            return
+        tid = trade['trade_id']
+        related = [o for o in book['orders'].values() if o.get('trade_id') == tid and o.get('filled_qty')]
+        trade['fee_complete'] = (not trade['legacy'] and all(o.get('cumulative_fee') is not None for o in related))
+        qty = trade['entry_qty']
+        basis = trade['entry_amount'] / qty if qty else 0
+        sign = -1 if trade['direction'] == 'short' else 1
+        trade['gross_realized_pnl'] = sign * (trade['exit_amount'] - basis * trade['exit_qty']) if trade.get('basis_known', True) else None
+        trade['net_realized_pnl'] = trade['gross_realized_pnl'] - trade['fees'] if trade['fee_complete'] and trade['gross_realized_pnl'] is not None else None
+        trade['remaining_qty'] = qty - trade['exit_qty']
+        trade['remaining_initial_risk'] = (trade['initial_r0'] * trade['remaining_qty'] / qty
+                                           if qty and trade['initial_r0'] is not None else None)
+        if trade['exit_qty'] and trade['remaining_qty'] == 0 and trade['status'] != 'closed':
+            trade.update(status='closed', closed_at=time.time())
+            enqueue(book, self.registry.namespace, 'trade_closed', tid, dict(trade), **links)
+        elif trade['exit_qty'] and trade['remaining_qty'] > 0:
+            trade['status'] = 'partially_closed'
+
     def _flag_reconciling(self, book, pid, reason):
         """发现差异时标记待核对并记录事件；不静默修成表面一致。"""
         order = book['orders'][pid]
+        # 保留最后可信状态（第一次标记时），避免后续恢复用丢失的 cancelled/filled
+        if order.get('status') != 'reconciling':
+            order['last_trusted_status'] = order.get('status')
         order['status'] = 'reconciling'
         order['reconcile_reason'] = reason
         order['reconcile_flagged_at'] = time.time()
@@ -311,25 +327,28 @@ class ExecutionService:
                     book.setdefault('fills', []).append(fill)
                     enqueue(book, self.registry.namespace, 'fill_received', fill_id, fill, fill_id=fill_id, **links)
                     order.update(filled_qty=new_qty, filled_amount=amount, avg_price=new_avg, updated_at=time.time())
-                    pos = book['positions'].get(order['code'])
-                    if order['side'] == 'buy':
-                        if pos is None:
-                            pos = dict(order['metadata'], code=order['code'], opened_at=time.time(), qty=0)
-                            book['positions'][order['code']] = pos
-                        pos.update(qty=new_qty, entry_price=new_avg, trade_id=order.get('trade_id'))
-                    elif pos:
-                        left = max(0, float(pos['qty']) - delta_qty)
-                        if left:
-                            pos['qty'] = left
-                        else:
-                            del book['positions'][order['code']]
                     if trade:
                         prefix = 'entry' if order['side'] == 'buy' else 'exit'
                         trade[prefix + '_qty'] = float(trade.get(prefix + '_qty', 0)) + delta_qty
                         trade[prefix + '_amount'] = float(trade.get(prefix + '_amount', 0)) + delta_amount
-                        # 更正不得重写已冻结 R0，只记修订计数
+                        # 更正不得重写已冻结 R0，只记可追溯的修订计数
                         if trade.get('initial_r0') is not None:
                             trade['r0_revision'] = int(trade.get('r0_revision', 0)) + 1
+                    # 按 trade_id + 成交账本重算当前剩余（entry_qty - exit_qty），
+                    # 不把历史入场累计数量当作当前剩余；已部分退出/已清仓都要正确。
+                    remaining = (float(trade.get('entry_qty', 0)) - float(trade.get('exit_qty', 0))
+                                 if trade else new_qty)
+                    pos = book['positions'].get(order['code'])
+                    # 防止旧交易周期更正应用到同标的新周期
+                    if pos is not None and pos.get('trade_id') != order.get('trade_id'):
+                        pos = None
+                    if remaining > 0:
+                        if pos is None:
+                            pos = dict(order['metadata'], code=order['code'], opened_at=time.time(), qty=0)
+                            book['positions'][order['code']] = pos
+                        pos.update(qty=remaining, entry_price=new_avg, trade_id=order.get('trade_id'))
+                    elif pos is not None:
+                        del book['positions'][order['code']]
                     order['status'] = 'filled' if new_qty == order['qty'] else 'partially_filled'
 
             # ---- 费用更正 ----
@@ -344,6 +363,23 @@ class ExecutionService:
                     trade['fees'] = float(trade.get('fees', 0)) + fee_delta
                 enqueue(book, self.registry.namespace, 'fee_adjusted', [pid, order['fee_revision']],
                         {'cumulative_fee': new_fee, 'delta': fee_delta, 'correction_id': cid}, **links)
+
+            # 解除待核对：恢复最后可信状态，或按更正后数量重算
+            if order.get('status') == 'reconciling':
+                if 'dealt_qty' in correction:
+                    order['status'] = 'filled' if float(correction['dealt_qty']) == order['qty'] else 'partially_filled'
+                else:
+                    order['status'] = order.get('last_trusted_status') or order['status']
+                order.pop('last_trusted_status', None)
+                order.pop('reconcile_reason', None)
+                order.pop('reconcile_flagged_at', None)
+
+            # 重算交易经济字段 + 追加新版交易快照（保留历史）
+            if trade:
+                self._recompute_trade_fields(book, order, trade, links)
+                enqueue(book, self.registry.namespace, 'trade_accounted',
+                        [trade['trade_id'], pid, order.get('filled_qty'), order['status'],
+                         order.get('cumulative_fee'), order.get('fee_revision', 0)], dict(trade), **links)
 
             # 记录已应用更正（幂等键，重复回放不重复应用）
             applied.add(cid)
