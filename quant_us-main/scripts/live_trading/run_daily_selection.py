@@ -14,7 +14,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parents[1]
+BASE_DIR = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(BASE_DIR))
 
 logger = logging.getLogger('run_daily_selection')
