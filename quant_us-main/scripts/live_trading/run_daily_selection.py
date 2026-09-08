@@ -161,6 +161,8 @@ def run_selection(config, advisor, fetcher, now=None, dry_run=False):
     from scripts.live_trading import option_view as ov
     risk_group = (config.get('risk_budget', {}).get('code_groups') or {})
     packets = []
+    opt_ok = 0
+    opt_fail = 0
     for code in universe:
         events = sc.fetch_event_evidence(code)
         # P1 期权市场视角：作为参考证据并入 packet（失败降级为空，不影响选股）
@@ -169,15 +171,20 @@ def run_selection(config, advisor, fetcher, now=None, dry_run=False):
             if oview and not oview.get('error'):
                 opt_ev = ov.make_option_evidence(code, oview, now=now)
                 events = list(events) + [opt_ev]
+                opt_ok += 1
                 logger.info(f"[期权视角] {code} 已并入: {ov.option_view_summary(oview)}")
             else:
+                opt_fail += 1
                 logger.warning(f"[期权视角] {code} 无数据/失败: {oview}")
         except Exception as e:
+            opt_fail += 1
             logger.warning(f"[期权视角] {code} 异常，跳过（不影响选股）: {type(e).__name__}: {e}")
         p = build_packet_from_bars(code, bars_map.get(code), risk_group=risk_group.get(code),
                                    events=events, now=now)
         if p is not None:
             packets.append(p)
+    # warning 级汇总：root 默认 WARNING，info 看不到，用这条一眼确认
+    logger.warning(f"[期权视角] 汇总: 并入 {opt_ok}/{len(universe)}, 失败/跳过 {opt_fail}")
 
     if dry_run:
         return {'dry_run': True, 'universe': universe, 'packet_count': len(packets),
