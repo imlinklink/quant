@@ -49,7 +49,9 @@ def build_data_quality(quote, events, fundamentals, now):
         if t and t > now_dt:
             checks['future'].append(f'events[{i}].time')
 
-    if fundamentals:
+    if not fundamentals:
+        checks['missing'].append('fundamentals')
+    else:
         for k in ('revenue_change', 'earnings_date', 'valuation_date'):
             if fundamentals.get(k) is None:
                 checks['missing'].append(f'fundamentals.{k}')
