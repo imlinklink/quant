@@ -74,8 +74,21 @@ def build_packet_from_bars(code, bars, *, name=None, sector=None, risk_group=Non
         'ma50': ma50,
         'trend': trend,
     }
+
+    # 程序行情快照证据：给 LLM 一个可引用的 evidence_id（events[].evidence_id），
+    # 避免它把 packet_id（evidence_packet_ 前缀）误当证据引用。
+    from mutifactor.llm.trade_review import evidence
+
+    def _fmt(v):
+        return 'N/A' if v is None else f'{v:.4f}' if isinstance(v, float) else str(v)
+
+    summary = (f'程序行情快照：最新价 {price:.2f}；1日收益 {_fmt(ret(1))}；'
+               f'5日收益 {_fmt(ret(5))}；20日收益 {_fmt(ret(20))}；'
+               f'ATR {_fmt(atr)}；趋势 {trend or "N/A"}')
+    snapshot_evidence = evidence(summary, 'internal:quote-snapshot', utc(now), kind='rule')
+
     return build_evidence_packet(code, name=name, sector=sector, risk_group=risk_group,
-                                 quote=quote, now=now)
+                                 quote=quote, events=[snapshot_evidence], now=now)
 
 
 def run_selection(config, advisor, fetcher, now=None, dry_run=False):
