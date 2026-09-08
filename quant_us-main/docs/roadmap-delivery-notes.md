@@ -295,7 +295,32 @@ python3 ./run_selection_outcomes.py         # 回填历史批次固定窗口结�
 
 依赖前三迭代攒够影子样本 + 真实 SIMULATE 闭环验证通过后，用锁定样本外数据分别评估选股/买入/卖出增量价值，只升级通过门槛的单项权限；不整体切换成「LLM 自动交易」。
 
+## H2 / I3 / J3 机制落地（✅，默认 shadow）
+
+**目标**：把「允许模型影响什么」的权限机制、离散计划模板与仓位档位全部实现，但默认全 shadow——不改变现网交易行为；升级与否留给攒样本 + J3 门槛。
+
+### 改动文件
+
+| 文件 | 改动 |
+| --- | --- |
+| `mutifactor/llm/plan_templates.py` | 新增：程序预计算入场模板（standard / wait_for_confirmation）+ 仓位档位 0/0.5x/1.0x；`apply_position_scale` 只降档绝不加档；`resolve_entry_intent` |
+| `mutifactor/llm/trade_review.py` | 改：REVIEW_SCHEMA 加 optional `plan_template` / `position_scale` 并校验；旧 review 向后兼容 |
+| `scripts/live_trading/llm_permission.py` | 新增：权限状态机 shadow/recommend/constrained_action/disabled；`allowed_scale`、`eligibility_met`、`promote_candidate` |
+| `scripts/live_trading/execution.py` | 改：仓位档位影子接入（仅 constrained_action 且降档才真正缩量；默认 shadow 只记录不改量） |
+| `tests/unit/live/test_plan_permissions.py` | 新增：16 用例 |
+
+### 设计要点
+
+- 离散模板与档位由**程序预计算**，LLM 只能从集合里选，不能自由生成数量/止损/加档。
+- `position_scale` 仅允许降档（0 / 0.5x / 1.0x）；>1.0x 与非法档位 fail-closed。
+- 权限每项独立、默认 shadow：模型建议被记录（review 字段 / meta），不改变任何执行。
+- 升级门槛只读判定（样本量 / 市场阶段 / 数据泄漏检查），不自动升级。
+
+### 待评估（真正开放权限前）
+
+- 需靠首个迭代攒 rank IC、第二迭代攒反事实、第三迭代攒 thesis vs 实际退出，三项都过 J3 门槛后，才逐项把对应权限拨到 `constrained_action`（且仍只开降档、不开加档、不自动下单）。
+
 ## 阶段 J（未开始）
 
-模型评测集（J1）、多模型按任务路由（J2）、权限治理门槛（J3）。
+模型评测集（J1）、多模型按任务路由（J2）。权限治理门槛（J3）的机制已随本批落地。
 
