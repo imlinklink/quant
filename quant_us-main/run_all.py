@@ -80,7 +80,7 @@ class UnifiedSystem:
         from web import app as webapp
 
         ha = self.config.get('trading', {}).get('live_trading', {}).get('human_approval', {})
-        enabled = bool(ha.get('enabled', False))
+        enabled = True
         webapp.approval_enabled = enabled
 
         if enabled and webapp.approval_store is None:
@@ -165,6 +165,16 @@ class UnifiedSystem:
                     f"{', '.join(tb_codes) or '无'})"
                 )
 
+            self.pullback_monitors = []
+            for mode in ('pullback', 'breakout_retest'):
+                settings = self.config.get(mode, {})
+                if settings.get('enabled', False):
+                    from scripts.live_trading.pullback_monitor import PullbackMonitor
+                    monitor = PullbackMonitor(settings.get('watch_list') or watch_list, self.config,
+                        dry_run=self.dry_run, approval_store=self.approval_store, mode=mode)
+                    monitor.start()
+                    self.pullback_monitors.append(monitor)
+
             # 把 LLM 实际可用状态同步到 Web（便于页面显示徽标）
             try:
                 from web import app as webapp
@@ -199,6 +209,8 @@ class UnifiedSystem:
         logger.info("\n🛑 收到退出信号...")
         self.running = False
         if not self.web_only:
+            for monitor in getattr(self, 'pullback_monitors', []):
+                monitor.stop()
             if hasattr(self, "dip_monitor"):
                 self.dip_monitor.stop()
             if hasattr(self, "trend_monitor"):

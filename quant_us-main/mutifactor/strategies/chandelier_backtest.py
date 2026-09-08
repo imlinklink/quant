@@ -73,8 +73,9 @@ class ChandelierBacktester:
         self.config = config or {}
 
         # 策略参数
-        chandelier_cfg = self.config.get('chandelier', {})
+        chandelier_cfg = self.config.get('chandelier', self.config)
         self.atr_period = chandelier_cfg.get('atr_period', 14)
+        self.trailing_enabled = chandelier_cfg.get('trailing_enabled', True)
         # 4阶段混合策略参数
         self.fixed_stop_pct = chandelier_cfg.get('fixed_stop_pct', 0.05)
         self.breakeven_pct = chandelier_cfg.get('breakeven_pct', 0.03)
@@ -194,7 +195,8 @@ class ChandelierBacktester:
 
         # 找到买入日次日的K线起点
         entry_date_ts = pd.Timestamp(entry_date)
-        trading_mask = df['date'] > entry_date_ts
+        # 次日买入：从 entry_date 次日 00:00 起，避免把当天 09:30 的分钟 K 也算进来
+        trading_mask = df['date'] >= entry_date_ts.normalize() + pd.Timedelta(days=1)
         trading_df = df[trading_mask].reset_index(drop=True)
 
         if len(trading_df) == 0:
@@ -216,6 +218,7 @@ class ChandelierBacktester:
         # 初始化策略
         strategy = DualChandelierExitStrategy({
             'atr_period': self.atr_period,
+            'trailing_enabled': self.trailing_enabled,
             'fixed_stop_pct': self.fixed_stop_pct,
             'breakeven_pct': self.breakeven_pct,
             'trailing_activate_pct': self.trailing_activate_pct,
@@ -225,13 +228,13 @@ class ChandelierBacktester:
         })
 
         # 找到买入日当天最后一个ATR作为初始ATR
-        warmup_mask = df['date'] <= entry_date_ts
+        warmup_mask = df['date'] < entry_date_ts.normalize() + pd.Timedelta(days=1)
         warmup_df = df[warmup_mask]
         initial_atr = warmup_df['atr'].iloc[-1] if len(warmup_df) > 0 and not warmup_df['atr'].isna().all() else None
 
         if initial_atr is None or np.isnan(initial_atr):
             # 用交易数据的前几根K线算
-            initial_atr = trading_df['atr'].iloc[0] if not trading_df['atr'].isna().all() else entry_price * 0.02
+            initial_atr = entry_price * 0.02
             logger.warning(f"预热ATR不可用，使用: {initial_atr:.4f}")
 
         # 建仓
@@ -264,6 +267,33 @@ class ChandelierBacktester:
                     result.pnl_pct = (current_price - entry_price) / entry_price * 100
                 else:
                     result.pnl_pct = (entry_price - current_price) / entry_price * 100
+                exited = True
+                break
+
+            # 跳空检查：用上一根结束后的保护线，判断当根开盘是否跳空穿线。
+            # 此前 on_tick 只用 close，跳空穿线会按止损价成交、抹掉跳空损失。
+            gap_exit = False
+            if stock_code in strategy.positions:
+                st = strategy.positions[stock_code]
+                # 与策略共用触发方向：移动止盈是回撤保护线，并非固定目标价。
+                gap_exit, gap_reason, _ = st.check_exit(float(row['open']))
+                gap_px = float(row['open'])
+                if not gap_exit:
+                    # 当根内触及已有保护线也应退出；只使用上一根已确定的线。
+                    adverse = float(row['low'] if direction == 'long' else row['high'])
+                    gap_exit, gap_reason, gap_px = st.check_exit(adverse)
+                    if not gap_exit and not st._trailing_enabled:
+                        favorable = float(row['high'] if direction == 'long' else row['low'])
+                        gap_exit, gap_reason, gap_px = st.check_exit(favorable)
+            if gap_exit:
+                result.exit_reason = gap_reason
+                result.exit_date = pd.Timestamp(current_time).strftime('%Y-%m-%d')
+                result.exit_time = str(current_time)
+                result.exit_price = gap_px
+                if direction == 'long':
+                    result.pnl_pct = (gap_px - entry_price) / entry_price * 100
+                else:
+                    result.pnl_pct = (entry_price - gap_px) / entry_price * 100
                 exited = True
                 break
 

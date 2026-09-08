@@ -151,7 +151,7 @@ class DipBuyMonitor:
         # 启用后：抄底信号只推送到确认页，用户点「下单」才真正执行
         approval_cfg = config.get('trading', {}).get('live_trading', {}).get('human_approval', {})
         self.approval_cfg = approval_cfg
-        self.approval_enabled = bool(approval_cfg.get('enabled', False))
+        self.approval_enabled = True
         self.approval_store = approval_store
         self.approval_max_drift = float(approval_cfg.get('max_price_drift_pct', 0.03))
         self._approval_rejected_codes: Set[str] = set()
@@ -356,6 +356,9 @@ class DipBuyMonitor:
             estimated_cost=round(price * qty, 2),
             per_stock_capital=float(size_usd),
             entry_mode='dip_buy',
+            trade_plan={'initial_stop': result.get('stop_ref'), 'target': result.get('target_price'),
+                        'min_rr': self.rr_min, 'time_exit_bars': int(self.config.get('dip_buy', {}).get('time_exit_bars', 8)),
+                        'signal_time': datetime.now(ZoneInfo('America/New_York')).isoformat()},
             trigger_reason='抄底评分 ≥ 阈值',
             kline_score=score,
             kline_signal=result.get('signal'),
@@ -370,54 +373,8 @@ class DipBuyMonitor:
         return True
 
     def _execute_approved(self, item: Dict):
-        """执行用户确认的下单（复检持仓/价格漂移后走原有下单逻辑）"""
-        pid = item.get('id')
-        code = item.get('stock_code')
-        if not pid or not code:
-            return
-        try:
-            if not self.approval_store.mark(pid, 'executing', note='用户已确认，开始下单'):
-                return
-
-            # 复检：持仓数上限
-            if self._get_position_count() >= self.max_positions:
-                self.approval_store.mark(pid, 'skipped', note='持仓已满，跳过')
-                return
-            # 复检：单代码一仓
-            if self.one_position_per_code and self._has_position(code):
-                self.approval_store.mark(pid, 'skipped', note='已持有该代码（单代码一仓），跳过')
-                return
-
-            # 复检：最新价格与漂移保护
-            price = self._get_current_price(code)
-            if not price or price <= 0:
-                self.approval_store.mark(pid, 'failed', note='无法获取最新价格')
-                return
-            base_price = float(item.get('price') or 0)
-            if base_price > 0:
-                drift = abs(price - base_price) / base_price
-                if drift > self.approval_max_drift:
-                    self.approval_store.mark(
-                        pid,
-                        'expired',
-                        note=f'价格偏离 {drift * 100:.1f}% > {self.approval_max_drift * 100:.0f}%，放弃执行',
-                    )
-                    return
-
-            score = int(item.get('kline_score') or 0)
-            ok = self._execute_buy(code, price, score, proposal_id=pid)
-            if ok:
-                self.approval_store.mark(
-                    pid, 'executed', note=f'按最新价 ${price:.2f} 下单'
-                )
-            else:
-                self.approval_store.mark(pid, 'failed', note='下单失败，请查看日志')
-        except Exception as e:
-            logger.error(f"[人工确认] 执行下单异常 {code}: {e}")
-            try:
-                self.approval_store.mark(pid, 'failed', note=f'异常: {e}')
-            except Exception:
-                pass
+        from scripts.live_trading.execution import execute_approved_buy
+        execute_approved_buy(self, item)
 
     def _process_approvals(self):
         """处理确认页点击结果（每个监控循环调用一次）"""
@@ -429,6 +386,8 @@ class DipBuyMonitor:
             self._approval_rejected_codes.clear()
             self._approval_reject_date = today
 
+        from scripts.live_trading.execution import service_for
+        service_for(self).reconcile()
         self.approval_store.expire_old()
 
         # 只处理抄底线（entry_mode=dip_buy）的点击结果；
@@ -492,19 +451,18 @@ class DipBuyMonitor:
         logger.info(f"✅ 初始化完成: 监控 {len(self.watch_codes)} 只股票")
         
     def _get_kline_5m(self, code: str) -> Optional[pd.DataFrame]:
-        """拉取5分钟K线（含盘前盘后夜盘）
+        """拉取已收盘15分钟K线（含盘前盘后夜盘）
         
         注意：Futu 的 time_key 是美东时间（ET），需要用美东时间筛选今日数据
         """
         from futu import KLType, RET_OK, Session
         
         # 使用美东时间
-        bj_now = datetime.now()
-        et_now = bj_now - timedelta(hours=12)
+        et_now = datetime.now(ZoneInfo('America/New_York'))
         
         # 用美东时间计算日期范围
         et_date = et_now.strftime('%Y-%m-%d')
-        et_start = et_now - timedelta(days=2)
+        et_start = et_now - timedelta(days=7)
         
         with self.pool.get_quote_ctx() as ctx:
             # request_history_kline 支持 extended_time + Session.ALL 获取全时段数据
@@ -512,7 +470,7 @@ class DipBuyMonitor:
                 code,
                 start=et_start.strftime('%Y-%m-%d'),
                 end=et_now.strftime('%Y-%m-%d'),
-                ktype=KLType.K_5M,
+                ktype=KLType.K_15M,
                 extended_time=True,
                 session=Session.ALL  # 获取全时段（盘前+盘中+盘后+夜盘）
             )
@@ -520,7 +478,8 @@ class DipBuyMonitor:
             if ret == RET_OK and data is not None and len(data) > 0:
                 # 使用滚动窗口：最多取 60 根（真底背离需要 41+ 根），
                 # 不足 min_bars 时视为数据不够（夜盘刚开时也兼容）
-                data = data.sort_values('time_key').tail(max(self.min_bars, 60))
+                from scripts.live_trading.strategy_rules import completed_bars
+                data = completed_bars(data, et_now, 15).tail(max(self.min_bars, 60))
                 if len(data) >= self.min_bars:
                     logger.info(f"  📊 {code} 最近{len(data)}根K线（含盘前盘后夜盘）")
                     return data.tail(max(self.min_bars, 60))
@@ -870,74 +829,14 @@ class DipBuyMonitor:
         self._refresh_position_cache()
         return bool(self._positions_cache) and code in self._positions_cache
     
-    def _execute_buy(self, code: str, price: float, score: int,
-                     proposal_id: Optional[str] = None) -> bool:
-        """执行买入"""
-        from futu import RET_OK, OrderType, TimeInForce, TrdSide, TrdEnv
-        
-        # 计算买入数量（根据单只仓位和当前价格）
-        qty = int(self._effective_position_size_usd() / price)
-        
-        # 美股最小下单量为1股
-        if qty <= 0:
-            logger.warning(f"❌ 买入数量计算为0: {code} @ ${price:.2f} (仓位${self.position_size_usd})")
+    def _execute_buy(self, code, price, score=0, proposal_id=None):
+        # 所有成交统一经过审批执行器，禁用旧的直接买入入口。
+        if not proposal_id or not self.approval_store:
             return False
-        
-        actual_value = qty * price
-        logger.info(f"🎯 触发买入: {code} x {qty}股 @ ${price:.2f} = ${actual_value:.2f} (评分={score})")
-        
-        if self.dry_run:
-            logger.info(f"  [DRY-RUN] 模拟买入 {code} x {qty}股 @ ${price:.2f}")
-            self.last_buy_time[code] = datetime.now()
-            try:
-                from scripts.live_trading.position_registry import REGISTRY
-                REGISTRY.open(code, 'dip_buy', qty, price)
-            except Exception:
-                pass
-            _us_ledger(
-                'position_opened',
-                stock_code=code, quantity=qty, cost_price=price, score=score,
-                proposal_id=proposal_id, dry_run=True, env='DRY-RUN',
-            )
-            return True
-        
-        # 实盘买入
-        try:
-            with self.pool.get_trade_ctx() as ctx:
-                ret, order = ctx.place_order(
-                    price=0,  # 市价单
-                    qty=qty,
-                    code=code,
-                    trd_side=TrdSide.BUY,
-                    order_type=OrderType.MARKET,
-                    trd_env=TrdEnv.REAL if self.config.get('live_manager', {}).get('trd_env') == 'REAL' else TrdEnv.SIMULATE,
-                    time_in_force=TimeInForce.DAY,  # 当日有效，避免隔夜残留
-                    fill_outside_rth=True,  # 允许盘前/盘后/夜盘成交（抄底监控设计上就是全时段）
-                )
-                
-                if ret == RET_OK:
-                    logger.info(f"✅ 买入成功: {code} x {qty} @ ${price:.2f}")
-                    self.last_buy_time[code] = datetime.now()
-                    try:
-                        from scripts.live_trading.position_registry import REGISTRY
-                        REGISTRY.open(code, 'dip_buy', qty, price)
-                    except Exception:
-                        pass
-                    self._positions_cache = None  # 强制下轮刷新持仓
-                    _us_ledger(
-                        'position_opened',
-                        stock_code=code, quantity=qty, cost_price=price, score=score,
-                        proposal_id=proposal_id, dry_run=False,
-                        env=str(self.config.get('live_manager', {}).get('trd_env', 'SIMULATE')),
-                    )
-                    return True
-                else:
-                    logger.error(f"❌ 买入失败: {order}")
-                    return False
-        except Exception as e:
-            logger.error(f"买入异常 {code}: {e}")
-            return False
-    
+        from scripts.live_trading.execution import service_for
+        item = self.approval_store.get(proposal_id)
+        return service_for(self).submit(item, price, self._effective_position_size_usd()) == 'filled'
+
     def _get_position_count(self) -> int:
         """持仓总数：dry-run 统计共享模拟登记簿；实盘用缓存的券商持仓。"""
         if self.dry_run:

@@ -114,6 +114,7 @@ class TrendBreakoutMonitor:
         # 防止同一根日K重复提案
         self._proposed_signal_date: Dict[str, str] = {}
 
+        self.entry_mode = 'donchian'
         self.pool = None
         self._running = False
         self._stop_event = threading.Event()
@@ -349,6 +350,10 @@ class TrendBreakoutMonitor:
             estimated_cost=round(price * qty, 2),
             per_stock_capital=float(size),
             entry_mode='donchian',
+            trade_plan={'initial_stop': suggested_stop, 'breakout_level': sig['channel_high'],
+                        'signal_atr': atr, 'signal_time': str(sig['signal_date']),
+                        'max_chase_atr': float(self.config.get('trend_breakout', {}).get('max_chase_atr', .5)),
+                        'failure_sessions': int(self.config.get('trend_breakout', {}).get('failure_sessions', 3))},
             trigger_reason=f'唐奇安{self.entry_n}日突破',
             kline_signal='donchian_breakout',
             reason=reason,
@@ -432,94 +437,16 @@ class TrendBreakoutMonitor:
             return None
 
     def _execute_buy(self, code: str, price: float, proposal_id: Optional[str] = None) -> bool:
-        from futu import RET_OK, OrderType, TimeInForce, TrdSide, TrdEnv
-        qty = int(self._effective_position_size_usd() / price)
-        if qty <= 0:
-            logger.warning(f"[突破线] 买入数量计算为0: {code} @ ${price:.2f}")
+        # 所有成交统一经过审批执行器，禁用旧的直接买入入口。
+        if not proposal_id or not self.approval_store:
             return False
-        actual_value = qty * price
-        logger.info(f"🎯 [突破线] 触发买入: {code} x {qty}股 @ ${price:.2f} = ${actual_value:.2f}")
-        if self.dry_run:
-            logger.info(f"  [DRY-RUN] 模拟买入 {code} x {qty}股 @ ${price:.2f}")
-            try:
-                from scripts.live_trading.position_registry import REGISTRY
-                REGISTRY.open(code, 'donchian', qty, price)
-            except Exception:
-                pass
-            _us_ledger(
-                'position_opened',
-                stock_code=code, quantity=qty, cost_price=price,
-                proposal_id=proposal_id, entry_mode='donchian',
-                dry_run=True, env='DRY-RUN',
-            )
-            return True
-        try:
-            trd_env_str = self.config.get('live_manager', {}).get('trd_env', 'SIMULATE')
-            trd_env = TrdEnv.REAL if trd_env_str == 'REAL' else TrdEnv.SIMULATE
-            with self.pool.get_trade_ctx() as ctx:
-                ret, order = ctx.place_order(
-                    price=0, qty=qty, code=code, trd_side=TrdSide.BUY,
-                    order_type=OrderType.MARKET, trd_env=trd_env,
-                    time_in_force=TimeInForce.DAY,
-                    fill_outside_rth=True,
-                )
-            if ret == RET_OK:
-                logger.info(f"✅ [突破线] 买入成功: {code} x {qty} @ ${price:.2f}")
-                try:
-                    from scripts.live_trading.position_registry import REGISTRY
-                    REGISTRY.open(code, 'donchian', qty, price)
-                except Exception:
-                    pass
-                _us_ledger(
-                    'position_opened',
-                    stock_code=code, quantity=qty, cost_price=price,
-                    proposal_id=proposal_id, entry_mode='donchian', dry_run=False,
-                    env=trd_env_str,
-                )
-                return True
-            logger.error(f"❌ [突破线] 买入失败: {order}")
-            return False
-        except Exception as e:
-            logger.error(f"[突破线] 买入异常 {code}: {e}")
-            return False
+        from scripts.live_trading.execution import service_for
+        item = self.approval_store.get(proposal_id)
+        return service_for(self).submit(item, price, self._effective_position_size_usd()) == 'filled'
 
     def _execute_approved(self, item: Dict):
-        pid, code = item.get('id'), item.get('stock_code')
-        if not pid or not code:
-            return
-        try:
-            if not self.approval_store.mark(pid, 'executing', note='用户已确认（突破线），开始下单'):
-                return
-            if self._get_position_count() >= self.max_positions:
-                self.approval_store.mark(pid, 'skipped', note='持仓已满，跳过')
-                return
-            if self.one_position_per_code and self._has_position(code):
-                self.approval_store.mark(pid, 'skipped', note='已持有该代码（单代码一仓），跳过')
-                return
-            price = self._get_current_price(code)
-            if not price or price <= 0:
-                self.approval_store.mark(pid, 'failed', note='无法获取最新价格')
-                return
-            base_price = float(item.get('price') or 0)
-            if base_price > 0:
-                drift = abs(price - base_price) / base_price
-                if drift > self.approval_max_drift:
-                    self.approval_store.mark(
-                        pid, 'expired',
-                        note=f'价格偏离 {drift*100:.1f}% > {self.approval_max_drift*100:.0f}%，放弃执行',
-                    )
-                    return
-            ok = self._execute_buy(code, price, proposal_id=pid)
-            self.approval_store.mark(
-                pid, 'executed' if ok else 'failed',
-                note=f'按最新价 ${price:.2f} 下单' if ok else '下单失败，请查看日志',
-            )
-        except Exception as e:
-            logger.error(f"[突破线] 执行下单异常 {code}: {e}")
-            try:
-                self.approval_store.mark(pid, 'failed', note=f'异常: {e}')
-            except Exception:
-                pass
+        from scripts.live_trading.execution import execute_approved_buy
+        execute_approved_buy(self, item)
 
     def _process_approvals(self):
         """只处理本策略线（entry_mode=donchian）的点击结果。"""
@@ -529,11 +456,13 @@ class TrendBreakoutMonitor:
         if self._approval_reject_date != today:
             self._approval_rejected_codes.clear()
             self._approval_reject_date = today
+        from scripts.live_trading.execution import service_for
+        service_for(self).reconcile()
         self.approval_store.expire_old()
         for item in self.approval_store.rejected_items():
             if item.get('side', 'buy') != 'buy':
                 continue
-            if item.get('entry_mode', '') != 'donchian':
+            if item.get('entry_mode', '') != self.entry_mode:
                 continue
             if item.get('id') in self._approval_processed_reject_ids:
                 continue
@@ -543,13 +472,13 @@ class TrendBreakoutMonitor:
             for other in self.approval_store.get_all():
                 if (other.get('stock_code') == item.get('stock_code')
                         and other.get('side', 'buy') == 'buy'
-                        and other.get('entry_mode', '') == 'donchian'
+                        and other.get('entry_mode', '') == self.entry_mode
                         and other['status'] in ('pending', 'approved')):
                     self.approval_store.mark(other['id'], 'expired', note='突破线同代码已被拒绝，取消')
         for item in self.approval_store.approved_items():
             if item.get('side', 'buy') != 'buy':
                 continue
-            if item.get('entry_mode', '') != 'donchian':
+            if item.get('entry_mode', '') != self.entry_mode:
                 continue
             self._execute_approved(item)
 

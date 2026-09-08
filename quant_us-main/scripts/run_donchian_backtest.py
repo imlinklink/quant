@@ -226,8 +226,8 @@ def run_variant(df: pd.DataFrame, vdef: Dict) -> List[Dict]:
         highest = max(entry_px, float(arr.iloc[entry_idx]["high"]))
         if exit_mode == "chandelier":
             stop = entry_px * (1 - FIXED_STOP_PCT)
-        else:  # reverse: 经典海龟，初始 2×ATR(入场日) 波动止损
-            atr_entry = arr.iloc[entry_idx]["atr"]
+        else:  # reverse: 经典海龟，初始 2×ATR(信号日) 波动止损
+            atr_entry = row["atr"]  # 入场开盘只能使用信号日已完成ATR
             stop = (
                 entry_px - STOP_MULT * atr_entry
                 if np.isfinite(atr_entry)
@@ -240,6 +240,12 @@ def run_variant(df: pd.DataFrame, vdef: Dict) -> List[Dict]:
         j = entry_idx
         while j < n:
             bar = arr.iloc[j]
+            # 买入当天也要检查：开盘买入后，当天盘中跌破初始止损即止损（此前漏检）
+            if j == entry_idx and float(bar["low"]) <= stop:
+                exit_px = min(float(bar["open"]), float(stop))
+                exit_reason = "吊灯止损" if exit_mode == "chandelier" else "2ATR初始止损"
+                exit_date = bar["date"].date()
+                break
             # 反向通道出场（经典海龟）：止损线 = max(2×ATR初始止损, 此前10日低点)
             # 盘中跌破即出场，跳空低开按开盘价成交（保守）
             if exit_mode == "reverse" and j > entry_idx:

@@ -43,6 +43,7 @@ import logging
 import time
 import signal
 from datetime import datetime, timedelta
+import pandas as pd
 from typing import Dict, List, Optional, Tuple, Any, Set
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 import yaml
@@ -327,6 +328,7 @@ class PositionStateManager:
                     if mode != self._positions[code].get('mode'):
                         self.strategy.on_exit(code)
                         self._positions[code]['mode'] = mode
+                    self._positions[code]['qty'] = abs(p.get('qty', 0))
                     continue
                 self._positions[code] = {
                     'entry_price': p.get('average_cost', 0),
@@ -364,6 +366,20 @@ class PositionStateManager:
                 pos['direction'],
                 exit_params=profile,
             )
+            if REGISTRY:
+                rec = REGISTRY.get(code)
+                if rec is None:
+                    rec = REGISTRY.open(code, 'manual', pos['qty'], pos['entry_price'] or price,
+                                        direction=pos['direction'])
+                state = self.strategy.positions[code]
+                saved = rec.get('exit_state') or {}
+                for key in vars(state):
+                    if key in saved:
+                        setattr(state, key, saved[key])
+                if rec.get('initial_stop') and not saved:
+                    state.stop_line = float(rec['initial_stop'])
+                REGISTRY.update(code, exit_state=dict(vars(state)))
+
 
     def all_codes(self):
         with self._lock:
@@ -1098,16 +1114,14 @@ class ChandelierExitManager:
 
         logger.info(f"✅ 港股过滤开关: {'开启(忽略港股)' if self.ignore_hk else '关闭(监控港股)'}")
 
-        # ===== 卖出人工确认（LLM + 人工 + 超时自动执行兜底）=====
+        # ===== 卖出人工确认（LLM + 人工 + 超时过期不执行兜底）=====
         self.approval_store = approval_store
         self.sell_cfg = (
             (config.get('trading') or {})
             .get('live_trading', {})
             .get('sell_approval', {})
         ) or {}
-        self.sell_approval_enabled_flag = bool(
-            self.sell_cfg.get('enabled', True)
-        ) and self.approval_store is not None
+        self.sell_approval_enabled_flag = True
         self.llm_advisor = None
         if self.sell_approval_enabled_flag and self.sell_cfg.get('llm_enabled', True):
             try:
@@ -1118,7 +1132,7 @@ class ChandelierExitManager:
         if self.sell_approval_enabled_flag:
             logger.warning(
                 "[卖出确认] 已开启：所有卖出（含止损）需 LLM+人工确认，"
-                f"{int(float(self.sell_cfg.get('ttl_seconds', 300)))}s 未确认自动执行；"
+                f"{int(float(self.sell_cfg.get('ttl_seconds', 300)))}s 未确认过期不执行；"
                 "不再挂券商自动止损单"
             )
         self.sell_poll_thread = None
@@ -1150,7 +1164,7 @@ class ChandelierExitManager:
         self.ticker.set_callback(self._on_tick)
         self.stop_tracker = StopOrderTracker(
             self.pool, self.live_cfg, dry_run=self.dry_run,
-            disable_auto_orders=self.sell_approval_enabled_flag,
+            disable_auto_orders=True,
         )
 
         self._executor = None
@@ -1170,48 +1184,78 @@ class ChandelierExitManager:
         logger.info(f"\n🛑 收到退出信号: {signal_name}")
         self.stop()
 
+    def _evaluate_position(self, code, price):
+        from scripts.live_trading.strategy_rules import ExitData, exit_reason, completed_bars, atr as daily_atr
+        from datetime import timezone
+        if not price or price <= 0:
+            return False, 'HOLD', price
+        with self.position_mgr._lock:
+            state = self.position_mgr.strategy.positions.get(code)
+            if state is None:
+                self.position_mgr.register(code, self.atr_cache.get_atr(code) or 0, price)
+                state = self.position_mgr.strategy.positions.get(code)
+                if state is None:
+                    return False, 'HOLD', price
+            rec = REGISTRY.get(code) if REGISTRY else None
+            before = dict(vars(state))
+            # 已有保护线始终先检查；没有新ATR也不能丢失审批信号。
+            hit, reason, line = state.check_exit(price)
+            if hit:
+                initial = float((rec or {}).get('initial_stop') or 0)
+                hard = (price <= initial if state.direction == 'long' else price >= initial) if initial else True
+                return True, 'HARD_STOP' if hard else 'TRAILING_EXIT', line
+            mode = (rec or {}).get('entry_mode')
+            if rec and mode in ('dip_buy', 'donchian', 'pullback', 'breakout_retest'):
+                if not hasattr(self, '_exit_data'):
+                    self._exit_data = ExitData(self.pool)
+                now = datetime.now(timezone.utc)
+                # 固定目标无需等待行情历史请求。
+                why = exit_reason(rec, price, now=now)
+                if why:
+                    return True, why, price
+                try:
+                    daily = self._exit_data.get(code) if mode != 'dip_buy' else None
+                    intraday = self._exit_data.get(code, 15) if mode == 'dip_buy' else None
+                    why = exit_reason(rec, price, daily, intraday, now)
+                    if why:
+                        return True, why, price
+                    if mode != 'dip_buy':
+                        d = completed_bars(daily, now)
+                        if len(d) >= 14:
+                            # 仅开仓以来已完成的日K更新趋势极值，避免引用入场前高点。
+                            opened = pd.Timestamp(rec['opened_at'], unit='s', tz='UTC').tz_convert('America/New_York')
+                            held = d[d.date > opened.normalize()]  # 不借用入场当天买入前的日内高点
+                            a = daily_atr(d).iloc[-1]
+                            if len(held) and pd.notna(a) and a > 0:
+                                state.highest_price = max(state.highest_price, float(held.high.max()))
+                                state.stop_line = max(state.stop_line, round(state.highest_price - 2*float(a), 4))
+                except Exception as exc:
+                    logger.warning(f'{code} 策略退出数据暂不可用: {exc}')
+            else:
+                current_atr = self.atr_cache.get_atr(code)
+                if current_atr:
+                    state.recompute(current_atr, price)
+            if REGISTRY and dict(vars(state)) != before:
+                REGISTRY.update(code, exit_state=dict(vars(state)))
+            hit, reason, line = state.check_exit(price)
+            return hit, 'TRAILING_EXIT' if hit else 'HOLD', line
+
     def _on_tick(self, code, price):
         if not self._running or self._stop_event.is_set():
             return
-
-        atr = self.atr_cache.get_atr(code)
-        if not atr:
-            return
-
-        saved_state = None
-        if code in self.position_mgr.strategy.positions:
-            saved_state = self.position_mgr.strategy.positions[code]
-
-        hit, reason, exit_price = self.position_mgr.strategy.on_tick(
-            code, price, atr,
-            keep_on_hit=self.sell_approval_enabled_flag,
-        )
+        hit, reason, exit_price = self._evaluate_position(code, price)
         if hit:
-            logger.debug(f"[触发平仓] {code} | {reason} @ {exit_price:.2f}")
-            if self.sell_approval_enabled_flag:
-                # 卖出人工确认：不直接平仓，先生成卖出提案（状态保留继续跟踪）
-                self._request_exit(code, exit_price, reason)
-            elif self._close_position(code, exit_price):
-                logger.debug(f"[平仓确认] {code} 策略状态已清理")
-            else:
-                logger.warning(f"[平仓失败] {code} 恢复策略状态")
-                if saved_state:
-                    self.position_mgr.strategy.on_entry(
-                        code,
-                        saved_state.entry_price,
-                        atr,
-                        saved_state.direction
-                    )
+            self._request_exit(code, exit_price, reason)
 
     def _sync_positions(self):
         if self._stop_event.is_set():
-            return []
+            return None
 
         # DRY-RUN：不用券商真实持仓，改用“模拟持仓登记簿”，
         # 让模拟买入也能完整演练出场逻辑（P0-2）
         if self.dry_run:
             if REGISTRY is None:
-                return []
+                return None
             rows = []
             for code, rec in REGISTRY.all().items():
                 qty = float(rec.get('qty') or 0)
@@ -1232,10 +1276,11 @@ class ChandelierExitManager:
             trd_env_str = self.live_cfg.get('trd_env', 'SIMULATE')
             trd_env = TrdEnv.SIMULATE if trd_env_str == 'SIMULATE' else TrdEnv.REAL
             with self.pool.get_trade_ctx() as ctx:
-                ret, data = ctx.position_list_query(trd_env=trd_env)
+                from scripts.live_trading.execution import service_for
+                ret, data = ctx.position_list_query(refresh_cache=True, **service_for(self).account(ctx))
                 if ret != RET_OK:
                     logger.error(f"持仓查询失败，错误码: {ret}")
-                    return []
+                    return None
                 data = data[data['qty'] != 0]
                 return data.to_dict('records')
         except RuntimeError as e:
@@ -1243,7 +1288,7 @@ class ChandelierExitManager:
                 logger.info("📋 持仓同步：连接池已关闭，停止持仓查询")
         except Exception as e:
             logger.warning(f"持仓同步失败: {e}", exc_info=True)
-        return []
+        return None
 
     def _calculate_pnl(self, pos: Dict, current_price: float) -> Tuple[float, str, str]:
         qty = pos.get('qty', 0.0)
@@ -1275,7 +1320,12 @@ class ChandelierExitManager:
     def _position_worker(self):
         while not self._stop_event.is_set():
             try:
+                from scripts.live_trading.execution import service_for
+                service_for(self).reconcile()
                 pos = self._sync_positions()
+                if pos is None:
+                    self._stop_event.wait(5)
+                    continue
                 codes = self.position_mgr.sync_positions(pos)
                 # 条件单对账：券商已无此仓（券商止损成交/APP手动平仓等）时，
                 # 撤销可能残留的止损/止盈条件单；否则同日重新开仓后
@@ -1354,7 +1404,7 @@ class ChandelierExitManager:
 
                         state = self.position_mgr.strategy.positions.get(code)
                         if state:
-                            state.recompute(atr=atr_val, current_price=current_price)
+                            self._on_tick(code, current_price)
                             new_stop = state.stop_line
                             new_profit = state.profit_line
                             highest = state.highest_price
@@ -1425,16 +1475,7 @@ class ChandelierExitManager:
                     price = self.ticker.get_price(code)
                     if not atr or not price:
                         continue
-                    hit, reason, exit_price = self.position_mgr.strategy.on_tick(
-                        code, price, atr,
-                        keep_on_hit=self.sell_approval_enabled_flag,
-                    )
-                    if hit:
-                        logger.warning(f"[兜底检查] {code} | {reason} @ {exit_price:.2f}")
-                        if self.sell_approval_enabled_flag:
-                            self._request_exit(code, exit_price, reason)
-                        else:
-                            self._close_position(code, exit_price)
+                    self._on_tick(code, price)
 
             except Exception as e:
                 logger.error(f"线程异常: {e}", exc_info=True)
@@ -1460,7 +1501,7 @@ class ChandelierExitManager:
             self.sell_poll_thread.start()
             logger.info(
                 "[卖出确认] 轮询线程已启动（LLM+人工，"
-                f"{int(float(self.sell_cfg.get('ttl_seconds', 300)))}s 超时自动卖出）"
+                f"{int(float(self.sell_cfg.get('ttl_seconds', 300)))}s 超时过期，不自动卖出）"
             )
 
     def stop(self):
@@ -1482,7 +1523,7 @@ class ChandelierExitManager:
         self.pool.close()
         logger.info("🎉 已安全退出")
 
-    # ==================== 卖出人工确认（LLM + 人工 + 超时自动执行兜底） ====================
+    # ==================== 卖出人工确认（LLM + 人工 + 超时过期不执行兜底） ====================
 
     def _sell_active_for(self, code: str) -> bool:
         if self.approval_store is None:
@@ -1490,7 +1531,7 @@ class ChandelierExitManager:
         return any(
             it.get('side') == 'sell'
             and it.get('stock_code') == code
-            and it.get('status') in ('pending', 'approved', 'executing')
+            and it.get('status') in ('pending', 'approved', 'executing', 'submitted', 'partially_filled', 'unknown')
             for it in self.approval_store.get_all()
         )
 
@@ -1514,9 +1555,9 @@ class ChandelierExitManager:
         return 0.0, 0.0
 
     def _request_exit(self, code: str, exit_price: float, reason: str) -> bool:
-        """卖出候选 → 生成卖出确认提案；确认/超时兜底后才会真正平仓。"""
+        """卖出候选 → 生成卖出确认提案；LLM评估及人工确认后才会真正平仓。"""
         if not self.sell_approval_enabled_flag or self.approval_store is None:
-            return self._close_position(code, exit_price)
+            return False  # 无审批存储时禁止自动平仓
         now = time.time()
         reject_min = float(self.sell_cfg.get('reject_cooldown_minutes', 30))
         if code in self._sell_reject_until and now < self._sell_reject_until[code]:
@@ -1539,6 +1580,7 @@ class ChandelierExitManager:
             pass
         created = self.approval_store.create(
             side='sell',
+            priority=0 if reason == 'HARD_STOP' else 1,
             stock_code=code,
             stock_name=code,
             market_type='US',
@@ -1550,7 +1592,7 @@ class ChandelierExitManager:
             trigger_reason=f'卖出|{reason}',
             reason=(
                 f'【卖出确认】规则触发: {reason}；成本 {cost:.3f}，现价约 {price:.3f}，'
-                f'浮盈 {pnl * 100:+.1f}%；超时 {int(ttl)} 秒未确认将自动执行。'
+                f'浮盈 {pnl * 100:+.1f}%；超时 {int(ttl)} 秒未确认将过期，不执行卖出。'
             ),
             llm=None,
             position_cost=cost,
@@ -1588,7 +1630,7 @@ class ChandelierExitManager:
                              name=f'US-Sell-LLM-{pid}').start()
         logger.warning(
             f"[卖出确认] {code} 推送卖出提案: {reason}（LLM=异步判定中，"
-            f"{int(ttl)}s 超时自动执行）—— 请到确认页点「卖出」或「继续持有」"
+            f"{int(ttl)}s 超时过期不执行）—— 请到确认页点「卖出」或「继续持有」"
         )
         return True
 
@@ -1598,34 +1640,35 @@ class ChandelierExitManager:
         item = self.approval_store.get(pid)
         if not item or item.get('side') != 'sell':
             return
-        if item.get('status') not in ('pending', 'approved'):
+        if auto or item.get('status') != 'approved':
             return
         code = item.get('stock_code')
-        note = '用户确认卖出' if not auto else '超时未确认，自动卖出兜底'
-        if item.get('status') == 'pending':
-            if not self.approval_store.mark(pid, 'approved',
-                                            note='超时未确认，自动批准后执行卖出'):
-                return
+        note = '用户确认卖出'
         if not self.approval_store.mark(pid, 'executing', note=note):
             return
-        exit_price = float(item.get('price') or 0)
-        ok = self._close_position(code, exit_price)
-        if ok:
-            try:
-                self.position_mgr.strategy.on_exit(code)
-                self.position_mgr._positions.pop(code, None)
-            except Exception:
-                pass
-        self.approval_store.mark(
-            pid, 'executed' if ok else 'failed',
-            note=note + ('（执行成功）' if ok else '（执行失败，持仓仍存在）'),
-        )
+        from scripts.live_trading.execution import service_for
+        service = service_for(self)
+        try:
+            # 新报价执行，数量不得超过本次明确批准的数量。
+            with self.pool.get_quote_ctx() as ctx:
+                price = self.ticker.get_stock_price(ctx, code)
+            service.submit(self.approval_store.get(pid), price)
+        except Exception as exc:
+            with service.registry.transaction() as book:
+                order = book['orders'].get(pid)
+            if order:
+                service.publish(order)
+            else:
+                self.approval_store.mark(pid, 'failed', note=str(exc))
 
     def _run_sell_poll_loop(self):
         interval = float(self.sell_cfg.get('poll_interval_sec', 10))
         while not self._stop_event.is_set():
             try:
                 if self.approval_store is not None:
+                    from scripts.live_trading.execution import service_for
+                    service_for(self).reconcile()
+                    self.approval_store.expire_old()
                     now = time.time()
                     for item in self.approval_store.rejected_items():
                         if item.get('side') != 'sell':
@@ -1647,75 +1690,15 @@ class ChandelierExitManager:
                         if (item.get('side') == 'sell'
                                 and item.get('status') == 'pending'
                                 and now > float(item.get('expires_at') or 0)):
-                            self._execute_sell_proposal(item['id'], auto=True)
+                            self.approval_store.mark(item['id'], 'expired', note='超时未确认，不执行卖出')
             except Exception as e:
                 logger.error(f"[卖出确认] 轮询异常: {e}", exc_info=True)
             time.sleep(interval)
 
     def _close_position(self, code: str, exit_price: float = 0.0) -> bool:
-        trd_env_str = self.live_cfg.get('trd_env', 'SIMULATE')
-        try:
-            if self.dry_run:
-                # DRY-RUN：从模拟持仓登记簿平仓，不查/不动券商账户（P0-2）
-                rec = REGISTRY.get(code) if REGISTRY else None
-                if not rec:
-                    return False
-                qty = float(rec.get('qty') or 0)
-                avg_cost = float(rec.get('entry_price') or 0)
-                if qty <= 0:
-                    return False
-                pnl_pct = ((exit_price - avg_cost) / avg_cost) if avg_cost > 0 and exit_price > 0 else None
-                logger.info(f"[DRY-RUN] 平仓 {code} x {qty} @ {exit_price:.2f}")
-                _us_ledger(
-                    'position_closed',
-                    stock_code=code, quantity=qty, cost_price=avg_cost,
-                    exit_price=exit_price, pnl_pct=pnl_pct,
-                    reason='chandelier_exit', dry_run=True, env='DRY-RUN',
-                )
-                REGISTRY.close(code)
-                return True
-
-            from futu import RET_OK, OrderType, TrdSide, TrdEnv
-            trd_env = TrdEnv.SIMULATE if trd_env_str == 'SIMULATE' else TrdEnv.REAL
-
-            with self.pool.get_trade_ctx() as ctx:
-                ret, pos_data = ctx.position_list_query(trd_env=trd_env, code=code)
-            if ret != RET_OK or pos_data.empty:
-                return False
-
-            pos = pos_data.iloc[0]
-            side = pos['position_side']
-            qty = pos['can_sell_qty'] if side == 'LONG' else pos['can_buy_qty']
-            if qty <= 0:
-                return False
-            avg_cost = float(pos.get('average_cost', 0) or 0)
-            pnl_pct = (exit_price - avg_cost) / avg_cost if avg_cost > 0 and exit_price > 0 else None
-
-            trd_side = TrdSide.SELL if side == 'LONG' else TrdSide.BUY
-
-            with self.pool.get_trade_ctx() as ctx:
-                ret, _ = ctx.place_order(
-                    price=0, qty=qty, code=code, trd_side=trd_side,
-                    order_type=OrderType.MARKET, trd_env=trd_env
-                )
-
-            if ret == RET_OK:
-                self.stop_tracker.cancel_all_for(code)
-                if REGISTRY:
-                    REGISTRY.close(code)
-                logger.info(f"[平仓成功] {code}")
-                _us_ledger(
-                    'position_closed',
-                    stock_code=code, quantity=qty, cost_price=avg_cost,
-                    exit_price=exit_price, pnl_pct=pnl_pct,
-                    reason='chandelier_exit', dry_run=False,
-                    env=str(self.live_cfg.get('trd_env', 'SIMULATE')),
-                )
-                return True
-            return False
-        except Exception as e:
-            logger.warning(f"平仓异常 {code}: {e}")
-            return False
+        # 无提案的旧调用不得下单；唯一执行入口是 _execute_sell_proposal。
+        logger.warning(f"{code} 禁止绕过人工/LLM审批的直接平仓")
+        return False
 
 
 if __name__ == "__main__":

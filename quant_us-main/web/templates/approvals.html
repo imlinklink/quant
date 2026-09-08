@@ -81,7 +81,7 @@
 </main>
 <script>
 const STATUS_TEXT = {
-  pending: '待确认', approved: '已确认，准备下单', executing: '正在下单',
+  submitted: '已受理，待成交', partially_filled: '部分成交', unknown: '结果待对账', pending: '待确认', approved: '已确认，准备下单', executing: '正在下单',
   executed: '已成交', rejected: '已拒绝', expired: '已过期', failed: '执行失败', skipped: '已跳过'
 };
 const MODE_LABEL = { dip_buy: '日内抄底', donchian: '日线突破' };
@@ -96,7 +96,7 @@ function fmtTs(sec) {
 }
 function llmHtml(llm, side) {
   if (!llm) {
-    return '<div class="llm-box"><span class="muted">大模型未启用或本轮无判定（纯规则信号）</span></div>';
+    return '<div class="llm-box"><span class="muted">等待大模型评估完成，暂不能下单</span></div>';
   }
   if (!llm.verdict) {
     return '<div class="llm-box"><span class="muted">本轮大模型无判定</span>'
@@ -120,13 +120,13 @@ function llmHtml(llm, side) {
 }
 function card(item, now) {
   const id = esc(item.id);
-  const left = Math.max(0, (item.expires_at || 0) - now);
+  const left = Math.max(0, (item.expires_at || 0) * 1000 - now);
   const isSell = item.side === 'sell';
   const countdown = item.status === 'pending'
     ? '<span class="countdown">' + Math.ceil(left / 1000) + 's 后自动' +
-      (isSell ? '卖出' : '过期') + '</span>' : '';
+      '过期，不自动下单' + '</span>' : '';
   const buttons = item.status === 'pending'
-    ? '<div class="actions"><button class="buy" data-id="' + id + '" data-act="approve">' +
+    ? '<div class="actions"><button class="buy" data-id="' + id + '" data-act="approve" ' + ((!item.llm || !item.llm.verdict || !item.llm.reason) ? 'disabled title="等待LLM评估"' : '') + '>' +
       (isSell ? '卖出' : '下单') + '</button>' +
       '<button class="reject" data-id="' + id + '" data-act="reject">' +
       (isSell ? '继续持有' : '拒绝') + '</button></div>' : '';
@@ -137,11 +137,14 @@ function card(item, now) {
     '<span class="name">' + esc(item.stock_name || '') + '</span>' +
     '<span class="status">' + esc(STATUS_TEXT[item.status] || item.status) + '</span></div>' +
     '<div class="kv"><span>信号价 <b>' + esc(item.price) + '</b></span>' +
-    '<span>数量 <b>' + esc(item.quantity) + '</b> 股</span>' +
+    '<span>批准数量上限 <b>' + esc(item.quantity) + '</b> 股</span>' +
     '<span>预计金额 <b>$' + esc(item.estimated_cost) + '</b></span>' +
     '<span>方向 <b>' + (isSell ? '卖出' : '买入') + '</b></span>' +
     '<span>策略线 <b>' + esc(MODE_LABEL[item.entry_mode] || item.entry_mode || '-') + '</b></span>' +
     '<span>信号时间 ' + fmtTs(item.created_at) + '</span>' + countdown + '</div>' +
+    (item.trade_plan ? '<div class="kv">初始止损 <b>' + esc(item.trade_plan.initial_stop) + '</b>' +
+      (item.trade_plan.target ? ' · 反弹目标 <b>' + esc(item.trade_plan.target) + '</b>' : '') +
+      ' · 实际买入数量受账户风险预算约束</div>' : '') +
     (kline ? '<div class="kv">' + kline + '</div>' : '') +
     '<div class="section-title">规则触发理由</div>' +
     '<div class="reason-box">' + esc(item.reason || '无') + '</div>' +
@@ -164,8 +167,9 @@ async function load() {
     llmBadge.className = 'badge ' + (data.llm_enabled ? 'llm-on' : 'llm-off');
     document.getElementById('clock').textContent =
       new Date(Date.now()).toLocaleString('zh-CN', { hour12: false }) + ' · 2s 自动刷新';
-    const order = { pending: 0, approved: 1, executing: 2 };
+    const order = { pending: 0, approved: 1, executing: 2, unknown: 3, partially_filled: 4, submitted: 5 };
     const items = (data.items || []).sort((a, b) =>
+      (a.priority == null ? 1 : a.priority) - (b.priority == null ? 1 : b.priority) ||
       (order[a.status] == null ? 9 : order[a.status]) - (order[b.status] == null ? 9 : order[b.status]) ||
       (b.created_at || 0) - (a.created_at || 0));
     const el = document.getElementById('content');

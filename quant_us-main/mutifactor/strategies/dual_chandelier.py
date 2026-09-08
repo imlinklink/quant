@@ -167,7 +167,8 @@ class PositionExitState:
                   and floating_pnl >= self.breakeven_pct):
                 if not self._breakeven_moved:
                     old_stop = self.stop_line
-                    self.stop_line = round(self.entry_price, 4)
+                    # 阶段只能前进：若已进入过 Trailing，止损可能已高于保本价，不得降回
+                    self.stop_line = max(self.stop_line, round(self.entry_price, 4))
                     self._breakeven_moved = True
                     logger.info(
                         f"  [LONG] 止损移至保本 {old_stop:.2f}→{self.entry_price:.2f} "
@@ -230,7 +231,8 @@ class PositionExitState:
                 # Phase 2: 保本
                 if not self._breakeven_moved:
                     old_stop = self.stop_line
-                    self.stop_line = round(self.entry_price, 4)
+                    # 阶段只能前进：若已进入过 Trailing，止损可能已低于保本价，不得升回
+                    self.stop_line = min(self.stop_line, round(self.entry_price, 4))
                     self._breakeven_moved = True
                     logger.info(
                         f"  [SHORT] 止损移至保本 {old_stop:.2f}→{self.entry_price:.2f} "

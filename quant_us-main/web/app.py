@@ -111,7 +111,7 @@ def load_config():
         # 兼容老的 strong/normal 两档配置
         APP_CONFIG['buy_threshold'] = dip.get('buy_threshold', dip.get('strong_buy_threshold', 10))
         ha = cfg.get('trading', {}).get('live_trading', {}).get('human_approval', {})
-        approval_enabled = bool(ha.get('enabled', False))
+        approval_enabled = True
         approval_env = str(cfg.get('live_manager', {}).get('trd_env', 'SIMULATE'))
         approval_llm_enabled = bool(cfg.get('llm', {}).get('enabled', False))
         if approval_enabled and approval_store is None:
@@ -527,7 +527,7 @@ def api_approval_action(proposal_id: str, action: str):
         state = item['status'] if item else 'not_found'
         return jsonify({
             'ok': False,
-            'error': f'当前状态 {state} 不允许该操作',
+            'error': f'当前状态 {state} 不允许该操作，或LLM评估尚未完成、提案已过期',
             'status': state,
         }), 409
 

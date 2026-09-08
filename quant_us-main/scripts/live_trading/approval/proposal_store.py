@@ -19,13 +19,16 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 
-ACTIVE_STATUSES = {'pending', 'approved', 'executing'}
+ACTIVE_STATUSES = {'pending', 'approved', 'executing', 'submitted', 'partially_filled', 'unknown'}
 TERMINAL_STATUSES = {'rejected', 'expired', 'executed', 'failed', 'skipped'}
 
 _ALLOWED_TRANSITIONS = {
     'pending': {'approved', 'rejected', 'expired'},
     'approved': {'executing', 'rejected', 'expired'},
-    'executing': {'executed', 'failed', 'skipped', 'expired'},
+    'executing': {'executed', 'failed', 'skipped', 'expired', 'submitted', 'partially_filled', 'unknown'},
+    'submitted': {'partially_filled', 'executed', 'failed', 'unknown'},
+    'partially_filled': {'executed', 'failed', 'unknown'},
+    'unknown': {'submitted', 'partially_filled', 'executed', 'failed'},
 }
 
 
@@ -102,8 +105,7 @@ class ProposalStore:
         return True
 
     def expire_old(self, now: Optional[float] = None) -> int:
-        """把超过 TTL 仍未操作的“买入提案”标记为 expired；
-        卖出提案超时由卖出确认轮询自动执行（兜底）。"""
+        """所有未执行提案超时过期，不自动批准或下单。"""
         now = time.time() if now is None else now
         expired = 0
         with self._lock:
@@ -111,8 +113,6 @@ class ProposalStore:
         for pid in pids:
             item = self.get(pid)
             if not item:
-                continue
-            if item.get('side') == 'sell':
                 continue
             if item['status'] in ('pending', 'approved') and now > item.get('expires_at', now):
                 if self._transition(pid, 'expired', '超时未确认，自动过期'):
@@ -188,6 +188,12 @@ class ProposalStore:
             item = self._items.get(proposal_id)
             if not item:
                 return False
+            if target in ('approved', 'executing'):
+                if time.time() >= float(item.get('expires_at', 0)):
+                    item['status'] = 'expired'
+                    return False
+                if not self.llm_ready(item):
+                    return False
             current = item['status']
             allowed = _ALLOWED_TRANSITIONS.get(current, set())
             # 幂等：同状态重复标记不允许（避免重复下单）
@@ -198,6 +204,24 @@ class ProposalStore:
             if note:
                 item['note'] = note
             return True
+
+    def recover_order(self, order, status, env):
+        """重启恢复执行结果供页面查看，绝不恢复为可再次执行的批准状态。"""
+        with self._lock:
+            if order['id'] not in self._items:
+                self._items[order['id']] = dict(order.get('proposal') or {}, id=order['id'],
+                    stock_code=order['code'], side=order['side'], env=env,
+                    price=order['price'], quantity=order['qty'], status=status,
+                    created_at=order.get('created_at', time.time()), updated_at=time.time(),
+                    note=f"恢复订单：{order['status']}，已成交 {order.get('filled_qty', 0)}/{order['qty']}")
+
+    @staticmethod
+    def llm_ready(item) -> bool:
+        review = item.get('llm') or {}
+        return (isinstance(review, dict)
+                and review.get('verdict') in ('allow', 'delay', 'block', 'pass', 'watch', 'veto', 'hold', 'sell')
+                and bool(str(review.get('reason') or '').strip())
+                and not review.get('error'))
 
     def _code(self, proposal_id: str) -> str:
         with self._lock:

@@ -416,6 +416,7 @@ def analyze_score(
     atr_abs = atr_pct * entry
     stop_ref = entry * (1 - 0.05)
     risk = max(entry - stop_ref, 2.0 * atr_abs, entry * 0.001)
+    stop_ref = entry - risk
     bb_mid = float(closes.rolling(20).mean().iloc[-1]) if len(closes) >= 20 \
         else float(closes.mean())
     target = bb_mid if bb_mid > entry else None
