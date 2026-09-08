@@ -132,7 +132,11 @@ def make_option_evidence(code, view, now=None):
 # ============ 富途 I/O（真跑需要 OpenD，单测不依赖） ============
 
 def _futu_rows(symbol: str) -> list:
-    """从富途拉某标的近月 call/put 全链报价行（单测外使用）。"""
+    """从富途拉某标的期权报价行（快速版：近月单到期，每侧抽样若干档）。
+
+    为控制延迟，先取最近一个到期；对 call/put 各取约 20 档（围绕中位行权两侧）。
+    足够算 ATM IV / PCR 近似 / Max Pain 锚点。如需更全再放开多到期全量。
+    """
     import yaml
     from datetime import date as _date
     from futu import OpenQuoteContext, RET_OK, OptionType
@@ -154,39 +158,42 @@ def _futu_rows(symbol: str) -> list:
         future = [e for e in all_exp if e >= today]
         if not future:
             return []
+        exp_date = future[0]  # 只取最近到期
+
         rows = []
-        # 近月 + 次近月各拉 call/put 链并取报价
-        for exp_date in future[:2]:
-            for otype in (OptionType.CALL, OptionType.PUT):
-                ret_c, chain = ctx.get_option_chain(symbol, start=exp_date, end=exp_date,
-                                                    option_type=otype)
-                if ret_c != RET_OK or chain is None or len(chain) == 0:
-                    continue
-                codes = [str(c) for c in chain['code'].tolist()]
-                # 批量报价；每次最多 50 腿
-                for i in range(0, len(codes), 50):
-                    legs = []
-                    import futu.common.constant as _C
-                    import futu.quote.quote_query as _Q
-                    for cd in codes[i:i + 50]:
-                        leg = _Q.OptionStrategyLeg()
-                        leg.code = cd
-                        leg.action = _C.StrategyLegAction.BUY
-                        leg.quantity = 1
-                        legs.append(leg)
-                    ret_q, q = ctx.get_option_quote(legs)
-                    if ret_q != RET_OK or q is None or len(q) == 0:
-                        continue
-                    for _, r in q.iterrows():
-                        rows.append({
-                            'option_type': str(r.get('option_type', '')).upper(),
-                            'strike_price': r.get('strike_price'),
-                            'open_interest': r.get('open_interest'),
-                            'implied_volatility': r.get('implied_volatility'),
-                            'delta': r.get('delta'),
-                            'prob_of_profit': r.get('prob_of_profit'),
-                            'expiry_date': exp_date,
-                        })
+        for otype in (OptionType.CALL, OptionType.PUT):
+            ret_c, chain = ctx.get_option_chain(symbol, start=exp_date, end=exp_date,
+                                                option_type=otype)
+            if ret_c != RET_OK or chain is None or len(chain) == 0:
+                continue
+            codes = [str(c) for c in chain['code'].tolist()]
+            # 抽样：取中位数行权附近 20 档（两端各 10），覆盖 ATM + OI 集中区
+            n = len(codes)
+            lo = max(0, n // 2 - 10)
+            hi = min(n, n // 2 + 10)
+            sample = codes[lo:hi] or codes
+            import futu.common.constant as _C
+            import futu.quote.quote_query as _Q
+            legs = []
+            for cd in sample:
+                leg = _Q.OptionStrategyLeg()
+                leg.code = cd
+                leg.action = _C.StrategyLegAction.BUY
+                leg.quantity = 1
+                legs.append(leg)
+            ret_q, q = ctx.get_option_quote(legs)
+            if ret_q != RET_OK or q is None or len(q) == 0:
+                continue
+            for _, r in q.iterrows():
+                rows.append({
+                    'option_type': str(r.get('option_type', '')).upper(),
+                    'strike_price': r.get('strike_price'),
+                    'open_interest': r.get('open_interest'),
+                    'implied_volatility': r.get('implied_volatility'),
+                    'delta': r.get('delta'),
+                    'prob_of_profit': r.get('prob_of_profit'),
+                    'expiry_date': exp_date,
+                })
         return rows
 
 
@@ -196,12 +203,33 @@ def fetch_option_view(symbol: str) -> dict:
         rows = _futu_rows(symbol)
         if not rows:
             return {'error': '期权链无数据'}
-        # spot 取近月 ATM call 行权价近似 — 简化：用链中位行权价当现价锚
-        strikes = sorted({_f(r.get('strike_price')) for r in rows if _f(r.get('strike_price'))})
-        if not strikes:
-            return {'error': '行权价缺失'}
-        spot = strikes[len(strikes) // 2]
+        # spot：优先取标的真实现价（快照），失败退回抽样行权价中位
+        spot = _fetch_spot(symbol)
+        if spot is None:
+            strikes = sorted({_f(r.get('strike_price')) for r in rows if _f(r.get('strike_price'))})
+            if not strikes:
+                return {'error': '行权价缺失'}
+            spot = strikes[len(strikes) // 2]
         return compute_option_view(spot, rows)
     except Exception as e:
         logger.warning(f'期权视角拉取失败 {symbol}: {e}')
         return {'error': f'期权视角失败: {type(e).__name__}'}
+
+
+def _fetch_spot(symbol: str):
+    """取标的现价（富途快照），失败返回 None。"""
+    try:
+        import yaml
+        from futu import OpenQuoteContext, RET_OK
+        from pathlib import Path
+        cfg = yaml.safe_load((Path(__file__).resolve().parents[2] / 'config.yaml')
+                             .read_text(encoding='utf-8')) or {}
+        fc = cfg.get('futu') or {}
+        with OpenQuoteContext(host=str(fc.get('host', '127.0.0.1')),
+                              port=int(fc.get('port', 11111))) as ctx:
+            ret, snap = ctx.get_market_snapshot([symbol])
+            if ret == RET_OK and snap is not None and len(snap) > 0:
+                return float(snap.iloc[0]['last_price'])
+    except Exception as e:
+        logger.debug(f'期权 spot 获取失败 {symbol}: {e}')
+    return None

@@ -167,9 +167,13 @@ def run_selection(config, advisor, fetcher, now=None, dry_run=False):
         try:
             oview = ov.fetch_option_view(code)
             if oview and not oview.get('error'):
-                events = list(events) + [ov.make_option_evidence(code, oview, now=now)]
-        except Exception:
-            pass
+                opt_ev = ov.make_option_evidence(code, oview, now=now)
+                events = list(events) + [opt_ev]
+                logger.info(f"[期权视角] {code} 已并入: {ov.option_view_summary(oview)}")
+            else:
+                logger.warning(f"[期权视角] {code} 无数据/失败: {oview}")
+        except Exception as e:
+            logger.warning(f"[期权视角] {code} 异常，跳过（不影响选股）: {type(e).__name__}: {e}")
         p = build_packet_from_bars(code, bars_map.get(code), risk_group=risk_group.get(code),
                                    events=events, now=now)
         if p is not None:
