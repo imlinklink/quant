@@ -196,3 +196,74 @@ python3 -m pytest tests/unit -q
 - 本环境未安装 `flask` / `futu`，所有 `web/app.py` 改动仅做编译级验证；确认页/建议页的时效渲染需在有依赖环境打开页面冒烟。
 - 真实 SIMULATE 闭环、真实券商成交更正、样本外重放均依赖 OpenD + 模拟账户 + 历史行情，未在本轮跑通，属后续验收项。
 - 每项提交请走独立分支（如 `codex/decision-observability`）；保持 `trd_env=SIMULATE`，账户与密钥不提交。
+
+---
+
+# LLM 深度参与路线（F–J）进度
+
+对应 `docs/llm-expanded-role-roadmap.md`。原则：LLM 只做可归因、可回放、可撤销的建议，程序独占账户选择、数量/风险计算、止损底线、成交对账与事务。LLM 不生成最终订单参数，也不放宽程序保护。
+
+## 首个迭代：选股影子排序 ✅（已端到端验证）
+
+**目标**：为每日可交易基础池生成版本化 Evidence Packet，LLM 输出结构化 Top-N 研究排名，落版本化研究批次，页面与交易提案分开展示。
+
+### 改动文件
+
+| 文件 | 改动 |
+| --- | --- |
+| `decision_ledger/evidence_packet.py` | 新增：冻结 packet（身份/行情/策略/事件/基本面/账户/数据质量），事实可回源 |
+| `mutifactor/llm/selection_review.py` | 新增：selection schema + prompt + `validate_selection`（越权/引用校验） |
+| `scripts/live_trading/llm_selection.py` | 新增：`rank`（基础池内排序，失败/越权只记 error 无订单副作用） |
+| `decision_ledger/selection_outcomes.py` | 新增：固定窗口 1/3/5/10 会话收益/MFE/MAE、rank IC、Top-N 超额 |
+| `decision_ledger/counterfactual.py` | 新增：反事实冻结与分组（后续 H3 用） |
+| `llm_suggestions/store.py` | 改：版本化研究批次持久化（JSONL + 跨进程锁） |
+| `scripts/live_trading/run_daily_selection.py` | 新增：每日冻结基础池 + 调度 rank（`--dry-run` 只拉行情不调 LLM） |
+| `scripts/live_trading/run_selection_outcomes.py` | 新增：回填历史批次固定窗口结果 |
+| `web/app.py` + `suggestions.html` | 改：`/api/suggestions` 返回 `research`，页面紫色「研究候选（非交易信号）」区块 |
+
+### 验收清单
+
+- [x] 相同输入/模型/prompt 可重放（`packet_id` + `research_batch_id`）
+- [x] 基础池、未入选、空列表都保存（无幸存者偏差）
+- [x] LLM 不能加基础池外代码（`validate_selection` 越权拒绝）
+- [x] 事实引用有效，未来/陈旧/冲突/缺失显式标记
+- [x] 模型失败/超时不改观察池/扫描/订单
+- [x] 研究建议不产生 proposal/approval/order_intent
+- [x] 固定窗口结果按当时可得行情 + 统一价格规则
+- [x] 页面标「研究建议，不是交易信号」，与交易提案分开
+
+### 端到端验证记录（2026-09-08）
+
+- `run_daily_selection.py --dry-run`：8 只基础池全部拉到行情、生成 8 个 packet。
+- `run_daily_selection.py`：LLM（deepseek-chat）返回 8 只候选，`error=null`，引用/越权校验通过。
+- 修复过两个真实 bug：`BASE_DIR` 路径（`parents[1]`→`parents[2]`）；packet 缺可引用证据导致 LLM 误引 `packet_id`（现已生成「程序行情快照」证据，`evidence_` 前缀）。
+- 页面 `/suggestions` 紫色区块正常展示 8 只候选。
+
+### 日常使用
+
+```sh
+python3 ./run_daily_selection.py            # 冻结基础池 + LLM 排名 + 落批次
+python3 ./run_selection_outcomes.py         # 回填历史批次固定窗口结果
+```
+
+### 待评估（权限升级前）
+
+- 攒够样本后看 `rank_ic` 是否稳定为正、`topn_excess` 是否为正（门槛：≥100 规则通过候选、30 可比较执行样本、覆盖多市场状态、锁定样本外区间）。
+- 目前 packet 只有「程序行情快照」一条证据，`missing_information` 均如实标「fundamentals missing」——按 F2 先统计缺口再补财报/公告等事件源。
+
+## 第二个迭代：买入评审增强 🟡（核心已做，离散计划模板待评估）
+
+**已落地**：
+
+- `trade_review.py`：`REVIEW_SCHEMA` 加稳定原因码 `reasons`（event_risk / regime_conflict / weak_confirmation / stale_evidence / poor_asymmetry / data_gap），`defer`/`oppose_execute` 须给原因码或资料缺口。
+- `counterfactual.py`：`freeze` 冻结每个候选的规则计划/LLM/人工动作/行情/统一执行假设后续结果，`compare` 按 `human_action × recommendation` 分组统计，判断 defer/oppose 是否真的避开亏损。
+
+**待评估（不急于做）**：
+
+- 离散计划模板（标准入场/等待确认）与仓位档位 `0 / 0.5x / 1.0x`——属于「允许模型影响什么」的权限扩展，文档要求先影子记录、证明校准后才开放 `0.5x` 降档权，不开放加档权。建议等首个迭代攒够反事实样本后再评估。
+
+## 后续阶段（未开始）
+
+- 阶段 I：持仓 thesis ledger（`position_review.py` 从影子事件扩展为版本化逻辑状态机）。
+- 阶段 J：模型评测集、路由与权限治理。
+
