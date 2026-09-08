@@ -26,6 +26,9 @@
   .card.HK { border-left-color: #f59e0b; }
   .card.added { opacity: .6; }
   .card.ignored { opacity: .45; }
+  .card.research { border-left-color: #a78bfa; background: #191624; }
+  .card.research .dir { background: #312e81; color: #c4b5fd; }
+  .summary.research { border-left: 4px solid #a78bfa; }
   .row { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
   .mkt { font-size: 12px; padding: 2px 8px; border-radius: 10px; font-weight: 700; }
   .mkt.US { background: #0ea5e9; color: #fff; }
@@ -64,6 +67,7 @@
 </header>
 <main>
   <div class="summary" id="summary">加载中…</div>
+  <div class="summary research" id="research" style="display:none"></div>
   <div id="content"></div>
   <div class="tips">
     说明：建议来自宏观日报（盘前+盘后）→ 大模型推理。点「加入观察池」只把它加进监控列表，
@@ -91,10 +95,38 @@ function card(c) {
     (c.risks ? '<div class="field">风险：<b>' + esc(c.risks) + '</b></div>' : '') +
     buttons + '</div>';
 }
+function researchCard(c) {
+  const entry = {pullback:'回调买入', breakout:'突破', dip_buy:'抄底', none:'无建议'}[c.preferred_entry_mode] || c.preferred_entry_mode;
+  const conf = {low:'低', medium:'中', high:'高'}[c.confidence_bucket] || c.confidence_bucket;
+  return '<div class="card research">' +
+    '<div class="row"><span class="code">' + esc(c.code) + '</span>' +
+    '<span class="dir">#' + esc(c.rank) + '</span>' +
+    '<span class="dir">' + esc(entry) + '</span>' +
+    '<span class="status">信心桶 ' + esc(conf) + '（非胜率）· ' + esc(c.horizon || '-') + '</span></div>' +
+    '<div class="section">论点</div><div class="box">' + esc(c.thesis || '-') + '</div>' +
+    (c.watch_conditions && c.watch_conditions.length ? '<div class="field">观察条件：<b>' + esc(c.watch_conditions.join('；')) + '</b></div>' : '') +
+    (c.invalidators && c.invalidators.length ? '<div class="field">失效条件：<b>' + esc(c.invalidators.join('；')) + '</b></div>' : '') +
+    (c.missing_information && c.missing_information.length ? '<div class="field">资料缺口：<b>' + esc(c.missing_information.join('；')) + '</b></div>' : '') +
+    '</div>';
+}
+function renderResearch(research) {
+  const el = document.getElementById('research');
+  if (!research || !(research.candidates || []).length) {
+    el.style.display = 'none';
+    return;
+  }
+  const batch = (research.research_batch_id || '').slice(0, 12);
+  el.style.display = 'block';
+  el.innerHTML = '<b>🔬 LLM 研究候选（研究建议，不是交易信号）</b>' +
+    '<br><span class="muted">批次 ' + esc(batch) + ' · 模型 ' + esc(research.model || '-') +
+    ' · prompt ' + esc(research.prompt_version || '-') + ' · 基础池 ' + esc((research.universe || []).length) + ' 只</span>' +
+    research.candidates.map(researchCard).join('');
+}
 async function load() {
   try {
     const r = await fetch('/api/suggestions');
     const d = await r.json();
+    renderResearch(d.research);
     const data = d.data || {};
     const cs = data.candidates || [];
     const now = new Date().toLocaleString('zh-CN', { hour12: false });

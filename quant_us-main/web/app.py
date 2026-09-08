@@ -697,6 +697,7 @@ def api_suggestions():
     from scripts.live_trading.llm_suggestions import load_latest
     from scripts.live_trading.llm_suggestions import watchlist
     from scripts.live_trading.llm_suggestions.freshness import assess
+    from scripts.live_trading.llm_suggestions.store import load_latest_research_batch
 
     data = load_latest()
     # 时效阈值可配置；缺省用 freshness 模块默认值。GET 不触发模型刷新。
@@ -712,6 +713,8 @@ def api_suggestions():
     return jsonify({
         'ok': True,
         'data': data,
+        # 研究候选（LLM 排序，非交易信号）与可执行交易提案分开
+        'research': load_latest_research_batch(),
         'us_watch': watchlist.current_us_watch(),
         'hk_watch': watchlist.current_hk_watch(),
         'server_time': datetime.now().timestamp(),

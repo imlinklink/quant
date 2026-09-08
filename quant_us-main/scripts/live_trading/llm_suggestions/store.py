@@ -84,3 +84,40 @@ def update_item_status(suggestion_id: str, status: str) -> bool:
                 _atomic_write(data)
                 return True
     return False
+
+
+# ==================== 版本化研究批次（阶段 G）====================
+# 与建议清单分开：研究批次是版本化、可回放的 LLM 选股排序快照，
+# 含 research_batch_id / universe_hash / as_of / prompt_version / model。
+
+RESEARCH_BATCH_PATH = SHARED_DIR / 'us_research_batches.jsonl'
+
+
+def save_research_batch(batch: Dict[str, Any]) -> None:
+    """追加一条版本化研究批次（JSONL，每行一个批次）。"""
+    with _lock, _file_lock():
+        SHARED_DIR.mkdir(parents=True, exist_ok=True)
+        with open(RESEARCH_BATCH_PATH, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(batch, ensure_ascii=False) + '\n')
+
+
+def load_research_batches() -> List[Dict[str, Any]]:
+    """读取全部研究批次；损坏行跳过。"""
+    if not RESEARCH_BATCH_PATH.exists():
+        return []
+    out: List[Dict[str, Any]] = []
+    with open(RESEARCH_BATCH_PATH, encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                out.append(json.loads(line))
+            except Exception:
+                logger.warning('[LLM选股] 跳过损坏的研究批次行')
+    return out
+
+
+def load_latest_research_batch() -> Optional[Dict[str, Any]]:
+    batches = load_research_batches()
+    return batches[-1] if batches else None
