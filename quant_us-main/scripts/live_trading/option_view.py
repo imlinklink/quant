@@ -10,12 +10,52 @@
 LLM 只读摘要，不自行算 IV/Greeks。
 """
 import logging
+import threading
 import time
 
 logger = logging.getLogger(__name__)
 
 # 到期日距离阈值：≤ 此天数视为"近月"
 NEAR_DAYS = 10
+
+
+class _RateLimit:
+    """富途期权接口限流（实测额度）：chain 10次/30s, quote 60次/30s。
+
+    进程内全局共享（模块级单例），批量遍历多标的时统一排队，
+    避免每只单独拉时频繁撞限流。
+    """
+
+    def __init__(self, max_per_window: int, window: float = 30.0):
+        self.max = max_per_window
+        self.window = window
+        self._ts: list = []
+        self._lock = threading.Lock()
+
+    def wait(self):
+        while True:
+            with self._lock:
+                now = time.time()
+                self._ts = [t for t in self._ts if now - t < self.window]
+                if len(self._ts) < self.max:
+                    self._ts.append(now)
+                    return
+                wait = self.window - (now - self._ts[0])
+            if wait > 0:
+                time.sleep(min(wait, 2.0))  # 分片等待，避免一次睡满
+
+
+# 模块级共享：chain/quote 各自额度
+_chain_limiter = _RateLimit(max_per_window=10)
+_quote_limiter = _RateLimit(max_per_window=55)  # 留 5 余量给其它期权调用
+
+
+def _wait_chain():
+    _chain_limiter.wait()
+
+
+def _wait_quote():
+    _quote_limiter.wait()
 
 
 # ============ 纯计算（可测） ============
@@ -132,10 +172,10 @@ def make_option_evidence(code, view, now=None):
 # ============ 富途 I/O（真跑需要 OpenD，单测不依赖） ============
 
 def _futu_rows(symbol: str) -> list:
-    """从富途拉某标的期权报价行（快速版：近月单到期，每侧抽样若干档）。
+    """从富途拉某标的期权报价行（快速版：近月单到期，每侧抽样若干档，逐腿报价）。
 
-    为控制延迟，先取最近一个到期；对 call/put 各取约 20 档（围绕中位行权两侧）。
-    足够算 ATM IV / PCR 近似 / Max Pain 锚点。如需更全再放开多到期全量。
+    逐腿 get_option_quote（probe 已验证单腿可用；批量多腿在此环境不稳定）。
+    抽样：ATM 附近各约 8 档，够算 ATM IV / PCR 近似 / Max Pain 锚点。
     """
     import yaml
     from datetime import date as _date
@@ -149,8 +189,10 @@ def _futu_rows(symbol: str) -> list:
     port = int(futu_cfg.get('port', 11111))
 
     with OpenQuoteContext(host=host, port=port) as ctx:
+        _wait_quote()  # 到期接口走 quote 额度
         ret, exp = ctx.get_option_expiration_date(symbol)
         if ret != RET_OK or exp is None or len(exp) == 0:
+            logger.warning(f'[期权] {symbol} expiration 失败: {ret}')
             return []
         date_col = list(exp.columns)[0]
         all_exp = sorted({str(r[date_col])[:10] for _, r in exp.iterrows()})
@@ -162,38 +204,52 @@ def _futu_rows(symbol: str) -> list:
 
         rows = []
         for otype in (OptionType.CALL, OptionType.PUT):
+            _wait_chain()
             ret_c, chain = ctx.get_option_chain(symbol, start=exp_date, end=exp_date,
                                                 option_type=otype)
             if ret_c != RET_OK or chain is None or len(chain) == 0:
+                # 富途失败时 chain 里常带原始错误消息，一并记下来
+                err = chain if not hasattr(chain, 'empty') or getattr(chain, 'empty', True) else 'empty'
+                logger.warning(f'[期权] {symbol} {exp_date} chain({otype}) 失败: {ret_c} msg={err}')
                 continue
             codes = [str(c) for c in chain['code'].tolist()]
-            # 抽样：取中位数行权附近 20 档（两端各 10），覆盖 ATM + OI 集中区
+            # 抽样：ATM 中位数两侧各 6 档（够 ATM IV / PCR 近似 / Max Pain 锚点）
             n = len(codes)
-            lo = max(0, n // 2 - 10)
-            hi = min(n, n // 2 + 10)
-            sample = codes[lo:hi] or codes
+            lo = max(0, n // 2 - 6)
+            hi = min(n, n // 2 + 6)
+            sample = codes[lo:hi] or codes[:12]
             import futu.common.constant as _C
             import futu.quote.quote_query as _Q
-            legs = []
-            for cd in sample:
-                leg = _Q.OptionStrategyLeg()
-                leg.code = cd
-                leg.action = _C.StrategyLegAction.BUY
-                leg.quantity = 1
-                legs.append(leg)
-            ret_q, q = ctx.get_option_quote(legs)
-            if ret_q != RET_OK or q is None or len(q) == 0:
-                continue
-            for _, r in q.iterrows():
-                rows.append({
-                    'option_type': str(r.get('option_type', '')).upper(),
-                    'strike_price': r.get('strike_price'),
-                    'open_interest': r.get('open_interest'),
-                    'implied_volatility': r.get('implied_volatility'),
-                    'delta': r.get('delta'),
-                    'prob_of_profit': r.get('prob_of_profit'),
-                    'expiry_date': exp_date,
-                })
+            got = 0
+            fails = 0
+            for cd in sample:  # 逐腿报价（稳，每次先限流）
+                try:
+                    leg = _Q.OptionStrategyLeg()
+                    leg.code = cd
+                    leg.action = _C.StrategyLegAction.BUY
+                    leg.quantity = 1
+                    _wait_quote()
+                    ret_q, q = ctx.get_option_quote([leg])
+                    if ret_q != RET_OK or q is None or len(q) == 0:
+                        fails += 1
+                        if fails <= 2:
+                            logger.warning(f'[期权] {symbol} 腿报价失败 {cd}: ret={ret_q} msg={q}')
+                        continue
+                    r = q.iloc[0]
+                    rows.append({
+                        'option_type': str(r.get('option_type', '')).upper(),
+                        'strike_price': r.get('strike_price'),
+                        'open_interest': r.get('open_interest'),
+                        'implied_volatility': r.get('implied_volatility'),
+                        'delta': r.get('delta'),
+                        'prob_of_profit': r.get('prob_of_profit'),
+                        'expiry_date': exp_date,
+                    })
+                    got += 1
+                except Exception as e:
+                    logger.warning(f'[期权] {symbol} 单腿报价异常 {cd}: {type(e).__name__}: {e}')
+                    fails += 1
+            logger.info(f'[期权] {symbol} {exp_date} {otype}: 链 {len(sample)} 档, 报价成功 {got}, 失败 {fails}')
         return rows
 
 
