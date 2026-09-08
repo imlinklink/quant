@@ -1246,6 +1246,15 @@ class ChandelierExitManager:
         hit, reason, exit_price = self._evaluate_position(code, price)
         if hit:
             self._request_exit(code, exit_price, reason)
+        cfg = getattr(self, 'config', {}).get('llm_decision', {}).get('position_review', {})
+        if cfg.get('enabled', False):
+            try:
+                if not hasattr(self, '_position_reviewer'):
+                    from scripts.live_trading.position_review import PositionReviewScheduler
+                    self._position_reviewer = PositionReviewScheduler(REGISTRY, self.llm_advisor, cfg)
+                self._position_reviewer.schedule(code, price, event_reason=reason if hit else None)
+            except Exception:
+                logger.exception('影子持仓复核失败；保留原计划')
 
     def _sync_positions(self):
         if self._stop_event.is_set():
@@ -1578,6 +1587,28 @@ class ChandelierExitManager:
             mode = str((self.position_mgr._positions.get(code) or {}).get('mode', 'manual'))
         except Exception:
             pass
+        from scripts.live_trading.decision_ledger.workflow import candidate, enabled, start_review, prepare
+        decision = {}
+        position_context = {}
+        approved_plan = None
+        if enabled(self):
+            store = prepare(self)
+            rec = store.registry.get(code) or {}
+            with store.registry.transaction() as book:
+                active_orders = [o for o in book['orders'].values() if o['code'] == code and
+                                 o['status'] in ('submitting','submitted','partially_filled','unknown')]
+                trade = book.get('trades', {}).get(rec.get('trade_id'))
+            if rec.get('plan_id'):
+                approved_plan = store.events.get_snapshot('plan', rec['plan_id'], rec.get('plan_version', 1))
+            position_context = dict(original_plan=approved_plan, position=rec, trade=trade,
+                                    active_orders=active_orders, exit_trigger=reason, current_price=price,
+                                    current_protection=rec.get('exit_state'),
+                                    previous_review=store.events.get_snapshot('review', rec['review_id']) if rec.get('review_id') else None)
+            # One exit opportunity per cycle/trigger/TTL window, not one per tick.
+            decision = candidate(self, code, mode+'_exit',
+                datetime.fromtimestamp(int(now//ttl)*ttl, ZoneInfo('UTC')), True,
+                {'reason': reason, 'trade_id': rec.get('trade_id'), 'price': price}, timeframe='event')
+            decision['trade_id'] = rec.get('trade_id')
         created = self.approval_store.create(
             side='sell',
             priority=0 if reason == 'HARD_STOP' else 1,
@@ -1595,11 +1626,16 @@ class ChandelierExitManager:
                 f'浮盈 {pnl * 100:+.1f}%；超时 {int(ttl)} 秒未确认将过期，不执行卖出。'
             ),
             llm=None,
+            approved_plan=approved_plan,
+            position_context=position_context,
             position_cost=cost,
             pnl_pct=round(pnl, 5),
             expires_at=now + ttl,
+            **decision,
         )
-        if self.llm_advisor is not None and created and created.get('id'):
+        if enabled(self):
+            start_review(self, created)
+        elif self.llm_advisor is not None and created and created.get('id'):
             pid = created['id']
 
             def _ask_llm():

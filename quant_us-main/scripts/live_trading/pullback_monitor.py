@@ -24,8 +24,16 @@ class PullbackMonitor(TrendBreakoutMonitor):
         now=datetime.now(ZoneInfo('America/New_York'))
         daily=self._signal_data.get(code)
         intraday=self._signal_data.get(code,15)
+        def recorded(sig):
+            from .strategy_rules import completed_bars
+            from .decision_ledger.workflow import candidate
+            bars = completed_bars(intraday, now, 15)
+            if not bars.empty:
+                candidate(self, code, self.entry_mode, bars.iloc[-1]['bar_end'].isoformat(), bool(sig),
+                          dict(sig or {'outcome':'rule_not_met'}, price=float(bars.iloc[-1]['close'])))
+            return sig
         if self.entry_mode=='breakout_retest':
-            return breakout_retest_signal(daily,intraday,now,self.config.get('trend_breakout',{}))
+            return recorded(breakout_retest_signal(daily,intraday,now,self.config.get('trend_breakout',{})))
         group=self.config.get('risk_budget',{}).get('code_groups',{}).get(code)
         proxy=self.strategy_cfg.get('sector_proxies',{}).get(group)
         if not proxy:
@@ -35,9 +43,11 @@ class PullbackMonitor(TrendBreakoutMonitor):
         underlying=self._signal_data.get(source) if source else None
         if source and (underlying is None or underlying.empty):
             return None
-        return pullback_signal(daily,sector,intraday,now,self.strategy_cfg,underlying)
+        return recorded(pullback_signal(daily,sector,intraday,now,self.strategy_cfg,underlying))
 
     def _queue_proposal(self,code,sig,price):
+        from .decision_ledger.workflow import candidate, enabled, start_review
+        decision = candidate(self, code, self.entry_mode, sig['signal_time'], True, dict(sig, price=price))
         if self._proposed_signal_date.get(code)==sig['signal_id']:
             return False
         if self.shadow_only:
@@ -52,10 +62,16 @@ class PullbackMonitor(TrendBreakoutMonitor):
         quantity=int(size/price)
         if quantity<1:
             return False
-        self.approval_store.create(stock_code=code,stock_name=code,side='buy',market_type='US',env=self._env_label(),
+        if enabled(self):
+            from .decision_ledger.workflow import risk_preview
+            decision['risk_summary'] = risk_preview(self, code, price, sig['initial_stop'], size, quantity)
+            quantity = decision['risk_summary']['quantity']
+        created = self.approval_store.create(stock_code=code,stock_name=code,side='buy',market_type='US',env=self._env_label(),
             price=price,quantity=quantity,estimated_cost=price*quantity,per_stock_capital=size,
             entry_mode=self.entry_mode,trade_plan=sig,trigger_reason=self.entry_mode,
             reason=f"{self.entry_mode} 已收盘15分钟确认；初始止损 {sig['initial_stop']:.2f}",
-            llm=self._ask_llm_verdict(code,price,context_text=str(sig)),expires_at=time.time()+180)
+            llm=None if enabled(self) else self._ask_llm_verdict(code,price,context_text=str(sig)),
+            expires_at=time.time()+180, **decision)
+        start_review(self, created)
         self._proposed_signal_date[code]=sig['signal_id']
         return True

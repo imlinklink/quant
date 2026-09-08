@@ -54,6 +54,9 @@ def fetch_news(symbol: str, count: int = 5) -> List[Dict]:
                 'title': n.get('title'),
                 'publisher': n.get('publisher'),
                 'time': datetime.fromtimestamp(ts).strftime('%m-%d %H:%M') if ts else '',
+                'published_at': datetime.fromtimestamp(ts, ZoneInfo('UTC')).isoformat() if ts else None,
+                'observed_at': datetime.now(ZoneInfo('UTC')).isoformat(),
+                'url': n.get('link'),
             })
         return out
     except Exception as e:
@@ -94,6 +97,7 @@ def fetch_futu_news(symbol: str, count: int = 5) -> List[Dict]:
                 'publisher': f"{row.get('source') or '富途'}·{_SUB_TYPE_LABEL.get(kind, kind)}",
                 'time': time_txt,
                 'url': row.get('url'),
+                'observed_at': datetime.now(ZoneInfo('UTC')).isoformat(),
             })
         return out
     except Exception as e:

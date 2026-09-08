@@ -223,6 +223,16 @@ class TrendBreakoutMonitor:
             return None
         if not np.isfinite(hh):
             return None
+        from scripts.live_trading.decision_ledger.workflow import candidate
+        volume = row.get('vol_ratio')
+        passed = close > hh and (self.volume_ratio <= 1 or (
+            volume is not None and np.isfinite(float(volume)) and float(volume) >= self.volume_ratio))
+        candidate(self, code, 'donchian', sig_date, passed,
+                  {'signal_close': close, 'channel_high': hh, 'price': close,
+                   'initial_stop': max(close-2*float(row['atr']),close*.95) if pd.notna(row.get('atr')) else None,
+                   'breakout_level': hh, 'signal_atr':float(row['atr']) if pd.notna(row.get('atr')) else None,
+                   'max_chase_atr': float(self.config.get('trend_breakout',{}).get('max_chase_atr',.5)),
+                   'failure_sessions': int(self.config.get('trend_breakout',{}).get('failure_sessions',3))})
         if not (close > float(hh)):
             return None
         vr = row.get('vol_ratio')
@@ -297,6 +307,9 @@ class TrendBreakoutMonitor:
     def _queue_proposal(self, code: str, sig: Dict, price: float) -> bool:
         if self.approval_store is None:
             return False
+        from scripts.live_trading.decision_ledger.workflow import candidate, enabled, start_review
+        decision = candidate(self, code, 'donchian', sig['signal_date'], True,
+                             {'signal_close': float(sig['close']), 'channel_high': float(sig['channel_high'])})
         today = datetime.now().strftime('%Y-%m-%d')
         if self._approval_reject_date != today:
             self._approval_rejected_codes.clear()
@@ -328,19 +341,26 @@ class TrendBreakoutMonitor:
         ]
         if sig.get('vol_ratio') is not None:
             parts.append(f"放量 {sig['vol_ratio']:.2f}×")
-        parts.append(f"信号价约 ${price:.2f}，{qty}股，单票 ${size:.0f}")
+        parts.append(f"信号价约 ${price:.2f}，单票名义金额上限 ${size:.0f}，数量按风险预算核算")
         if suggested_stop:
             parts.append(f"初始参考止损 ≈ ${suggested_stop:.2f}（-5% 与 2×ATR 孰高，实盘由吊灯自动跟进）")
         reason = "；".join(parts)
 
         context_text = ''
+        signal_ctx = {}
         try:
             from scripts.live_trading import signal_context
-            context_text = signal_context.get_context_text(code)
+            signal_ctx = signal_context.fetch_signal_context(code)
+            context_text = signal_context.format_context(code, signal_ctx)
         except Exception:
             pass
 
-        self.approval_store.create(
+        from scripts.live_trading.decision_ledger.workflow import news_evidence
+        if enabled(self):
+            from scripts.live_trading.decision_ledger.workflow import risk_preview
+            decision['risk_summary'] = risk_preview(self, code, price, suggested_stop, size, qty)
+            qty = decision['risk_summary']['quantity']
+        created = self.approval_store.create(
             stock_code=code,
             stock_name=code,
             market_type='US',
@@ -358,9 +378,12 @@ class TrendBreakoutMonitor:
             kline_signal='donchian_breakout',
             reason=reason,
             context=context_text,
-            llm=self._ask_llm_verdict(code, price, context_text=context_text),
+            evidence_items=news_evidence(signal_ctx),
+            llm=None if enabled(self) else self._ask_llm_verdict(code, price, context_text=context_text),
             expires_at=time.time() + self.proposal_ttl_hours * 3600,
+            **decision,
         )
+        start_review(self, created)
         self._proposed_signal_date[code] = sig_date
         logger.warning(
             f"[突破线] {code} 推送待确认: {sig_date}收盘突破前{self.entry_n}日高 "
@@ -502,13 +525,13 @@ class TrendBreakoutMonitor:
                     return
             except Exception:
                 pass
+            sig = self._scan_signal(code)
+            if not sig:
+                return
             if self._get_position_count() >= self.max_positions:
                 return
             if self.one_position_per_code and self._has_position(code):
                 logger.info(f"[突破线] {code} 已持有（单代码一仓），跳过")
-                return
-            sig = self._scan_signal(code)
-            if not sig:
                 return
             price = self._get_current_price(code)
             if not price:

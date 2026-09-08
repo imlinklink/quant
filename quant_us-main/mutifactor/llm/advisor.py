@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import time
+import threading
 import urllib.error
 import urllib.request
 from typing import Any, Dict, Optional
@@ -57,6 +58,9 @@ class LLMAdvisor:
         self.model: str = config.get('model', 'deepseek-chat')
         self.timeout: int = config.get('timeout', 30)
         self.max_retries: int = config.get('max_retries', 2)
+        self._metadata = threading.local()
+        self.input_cost_per_million = config.get('input_cost_per_million')
+        self.output_cost_per_million = config.get('output_cost_per_million')
 
         if self.enabled and not self.api_key:
             logger.warning("⚠️ LLM 已启用但未配置 api_key（检查 config.yaml 或环境变量 DEEPSEEK_API_KEY），自动降级为禁用")
@@ -105,6 +109,7 @@ class LLMAdvisor:
         if not self.enabled:
             return None
 
+        self._metadata.value = {}
         system = system or DEFAULT_SYSTEM_PROMPT
         payload = {
             "model": self.model,
@@ -140,6 +145,7 @@ class LLMAdvisor:
                 logger.warning(f"[LLM] JSON 解析失败 (尝试 {attempt+1}): {e}")
                 last_error = e
             except Exception as e:
+                self._metadata.value['cost_uncertain'] = True
                 logger.warning(f"[LLM] 调用失败 (尝试 {attempt+1}): {type(e).__name__}: {e}")
                 last_error = e
 
@@ -170,6 +176,19 @@ class LLMAdvisor:
             raise RuntimeError(f"网络错误: {e.reason}") from e
 
         # 提取内容（兼容不同模型返回格式）
+        usage = data.get('usage')
+        cost = None
+        if usage and self.input_cost_per_million is not None and self.output_cost_per_million is not None:
+            cost = (float(usage.get('prompt_tokens', 0))*float(self.input_cost_per_million)
+                    + float(usage.get('completion_tokens', 0))*float(self.output_cost_per_million))/1000000
+        previous = getattr(self._metadata, 'value', {})
+        old_usage = previous.get('usage') or {}
+        totals = ({key: int(old_usage.get(key, 0))+int(usage.get(key, 0))
+                   for key in ('prompt_tokens','completion_tokens','total_tokens')} if usage else None)
+        self._metadata.value = {'usage': totals,
+            'cost_usd': (float(previous.get('cost_usd', 0))+cost
+                         if cost is not None and previous.get('cost_usd',0) is not None else None),
+            'cost_uncertain': previous.get('cost_uncertain',False) or not bool(usage)}
         choices = data.get('choices', [])
         if not choices:
             raise RuntimeError(f"API 返回无 choices: {data}")
@@ -178,6 +197,21 @@ class LLMAdvisor:
         if content is None:
             content = ''
         return content.strip()
+
+    @property
+    def last_metadata(self):
+        result = dict(getattr(self._metadata, 'value', {}))
+        if result.get('cost_uncertain'):
+            result['cost_usd'] = None
+        return result
+
+    def review_plan(self, snapshot, side='buy'):
+        """No trading tools, account secrets, or model-written order parameters."""
+        from mutifactor.llm.trade_review import SYSTEM, REVIEW_SCHEMA
+        self._metadata.value = {}
+        return self.chat(json.dumps({'decision_type': 'exit_review' if side == 'sell' else 'entry_review',
+                                    'input': snapshot, 'output_schema': REVIEW_SCHEMA}, ensure_ascii=False),
+                         system=SYSTEM)
 
     # ==================== 业务便捷接口 ====================
 

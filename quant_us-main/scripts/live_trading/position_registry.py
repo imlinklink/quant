@@ -17,15 +17,30 @@ class PositionRegistry:
         self.namespace = namespace
 
     @contextmanager
-    def transaction(self):
+    def transaction(self, approval=None):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         con = sqlite3.connect(str(self.path), timeout=15)
         try:
+            from .decision_ledger.event_store import migrate, insert_event
+            migrate(con, self.path)
             con.execute('CREATE TABLE IF NOT EXISTS books (namespace TEXT PRIMARY KEY, payload TEXT NOT NULL)')
             con.execute('BEGIN IMMEDIATE')
+            if approval is not None:
+                from .decision_ledger.event_store import canonical
+                row = con.execute('SELECT body FROM decision_proposals WHERE account_scope=? AND id=?',
+                                  (self.namespace, approval['id'])).fetchone()
+                if not row or canonical(json.loads(row[0])) != canonical(approval):
+                    raise ValueError('持久化批准凭据与执行请求不匹配')
+                from .decision_ledger.event_store import utc
+                for event in con.execute("SELECT body FROM decision_events WHERE account_scope=? AND event_type='material_evidence' AND observed_at>?",
+                                         (self.namespace, utc(approval['approved_at']))):
+                    if json.loads(event[0])['payload']['stock_code'] == approval['stock_code']:
+                        raise ValueError('批准后出现重大事件，必须重新评估和确认')
             row = con.execute('SELECT payload FROM books WHERE namespace=?', (self.namespace,)).fetchone()
             book = json.loads(row[0]) if row else {'positions': {}, 'orders': {}}
             yield book
+            for event in book.pop('_events', []):
+                insert_event(con, event)
             con.execute('INSERT OR REPLACE INTO books VALUES (?, ?)',
                         (self.namespace, json.dumps(book, allow_nan=False)))
             con.commit()

@@ -62,8 +62,12 @@ def run_portfolio(bars, signals, cfg, approval_delay_bars=1):
             for index, signal in candidates.iterrows():
                 if index in processed:continue
                 processed.add(index)
+                if pd.notna(signal.get('expires_at')) and timestamp>pd.Timestamp(signal['expires_at']):
+                    decisions.append(dict(code=code,status='expired'));continue
                 if code in positions:
                     decisions.append(dict(code=code,status='held'));continue
+                if len(positions) >= int(cfg.get('max_positions',3)):
+                    decisions.append(dict(code=code,status='position_limit'));continue
                 # 当前bar开盘是第一笔可交易报价；不凭之后的低点假定限价单成交。
                 price=float(row['open']); limit=float(signal.price)
                 if price>limit:

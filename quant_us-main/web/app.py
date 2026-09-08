@@ -481,6 +481,10 @@ def approvals_page():
 @app.route('/api/approvals')
 def api_approvals():
     items = approval_store.get_all() if approval_store is not None else []
+    from mutifactor.llm.trade_review import approval_binding
+    for item in items:
+        item['llm_ready'] = approval_store.llm_ready(item)
+        item['approval_binding'] = approval_binding(item) if item.get('plan_id') else None
     return jsonify({
         'ok': True,
         'enabled': approval_enabled,
@@ -508,15 +512,16 @@ def api_approval_action(proposal_id: str, action: str):
     if approval_store is None:
         return jsonify({'ok': False, 'error': '人工确认未启用'}), 400
 
-    note = ''
-    try:
-        body = request.get_json(silent=True) or {}
-        note = str(body.get('note', ''))
-    except Exception:
-        pass
+    body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict):
+        return jsonify({'ok': False, 'error': '请求必须为JSON对象'}), 400
+    note = str(body.get('note') or '').strip()
 
     if action == 'approve':
-        ok = approval_store.approve(proposal_id)
+        try:
+            ok = approval_store.approve(proposal_id, note, binding=body.get('binding'))
+        except ValueError as exc:
+            return jsonify({'ok': False, 'error': str(exc)}), 409
     elif action == 'reject':
         ok = approval_store.reject(proposal_id, note or '用户点击拒绝')
     else:
@@ -527,12 +532,47 @@ def api_approval_action(proposal_id: str, action: str):
         state = item['status'] if item else 'not_found'
         return jsonify({
             'ok': False,
-            'error': f'当前状态 {state} 不允许该操作，或LLM评估尚未完成、提案已过期',
+            'error': f'当前状态 {state} 不允许操作；请检查计划版本、评估有效期，反对/暂缓建议需填写覆盖理由',
             'status': state,
         }), 409
 
     item = approval_store.get(proposal_id)
     return jsonify({'ok': True, 'status': item['status'] if item else action})
+
+
+@app.route('/api/approvals/<proposal_id>/revise-plan', methods=['POST'])
+def api_revise_plan(proposal_id):
+    if approval_store is None:
+        return jsonify({'ok': False, 'error': '审批未启用'}), 400
+    body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict) or not isinstance(body.get('changes',{}), dict):
+        return jsonify({'ok': False, 'error': '修订必须为JSON对象'}), 400
+    try:
+        item = approval_store.revise_plan(proposal_id, body.get('changes') or {}, str(body.get('reason') or ''))
+        owner = exit_manager_ref if item.get('side') == 'sell' else (
+            dip_monitor_ref if item.get('entry_mode') == 'dip_buy' else trend_monitor_ref)
+        if owner is not None:
+            from scripts.live_trading.decision_ledger.workflow import start_review
+            start_review(owner, item)
+        return jsonify({'ok': True, 'item': item})
+    except (ValueError, TypeError, KeyError) as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 409
+
+
+@app.route('/api/approvals/<proposal_id>/input')
+def api_approval_input(proposal_id):
+    item = approval_store.get(proposal_id) if approval_store else None
+    if not item or not item.get('input_snapshot_id'):
+        return jsonify({'ok': False, 'error': '无结构化输入快照'}), 404
+    return jsonify({'ok': True, 'snapshot': approval_store.events.get_snapshot('input', item['input_snapshot_id'])})
+
+
+@app.route('/api/decision-report')
+def api_decision_report():
+    if approval_store is None:
+        return jsonify({'ok': False, 'error': '审批未启用'}), 400
+    from scripts.live_trading.decision_ledger.funnel_report import build_funnel
+    return jsonify({'ok': True, 'report': build_funnel(approval_store.events.events())})
 
 
 # ─── 临时开发接口：模拟提案（仅 DRY-RUN + 本机）────────────────────────

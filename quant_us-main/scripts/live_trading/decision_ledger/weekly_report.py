@@ -286,7 +286,15 @@ def main():
     parser.add_argument('--ledger', action='append', default=None,
                         help='账本 JSONL 路径（可多次指定；不指定则读本系统账本）')
     parser.add_argument('--no-save', action='store_true', help='只打印不保存文件')
+    parser.add_argument('--events-v1', help='读取新版统一事件导出，输出候选到成交报告（与旧数据分开）')
     args = parser.parse_args()
+
+    if args.events_v1:
+        from scripts.live_trading.decision_ledger.funnel_report import build_funnel
+        with open(args.events_v1, encoding='utf-8') as f:
+            events = [json.loads(line) for line in f if line.strip()]
+        print(json.dumps(build_funnel(events), ensure_ascii=False, indent=2))
+        return 0
 
     if args.ledger:
         paths = args.ledger

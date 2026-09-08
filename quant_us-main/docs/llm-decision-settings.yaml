@@ -1,0 +1,26 @@
+# 配置示例，不含凭证。合入现有 config.yaml 的同名节点，不替换整份配置。
+# 本轮未修改 config.yaml，也未启动/重启交易进程。
+llm_decision:
+  enabled: true                 # 代码默认 true；false 使用原 LLM + 人工逐笔审批入口
+  workers: 2                   # 进程内共享队列；首次初始化后固定
+  queue_capacity: 32
+  review_ttl_seconds: 180       # 同时受提案有效期限制
+  evidence_ttl_seconds:
+    rule: 86400
+    news: 86400
+    filing: 7776000
+  position_review:
+    enabled: false             # 只读影子复核，默认关闭
+    check_interval_seconds: 60
+    near_stop_pct: 0.01
+    near_target_pct: 0.01
+    dedup_seconds: 900
+
+# 沿用现有 llm.enabled/model/api_key/timeout/max_retries。
+# 若要统计调用金额，配置实际供应商的单价；不配置则成本为 unknown，不能视为免费。
+# llm:
+#   input_cost_per_million: <实际输入单价>
+#   output_cost_per_million: <实际输出单价>
+
+# 原 risk_budget、策略开关及人工审批参数全部沿用。
+# 模型超时、队列满、缺 jsonschema、引用验证失败均不满足审批门槛。

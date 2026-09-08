@@ -41,6 +41,7 @@
   .reason-box, .llm-box { background: #0f1117; border: 1px solid #2d3748; border-radius: 8px;
                            padding: 10px 12px; font-size: 13px; line-height: 1.55; }
   .llm-verdict { font-weight: 700; }
+  pre { overflow-wrap: anywhere; }
   .verdict-allow, .verdict-pass { color: #10b981; }
   .verdict-block, .verdict-veto { color: #ef4444; }
   .verdict-watch, .verdict-delay { color: #f59e0b; }
@@ -98,6 +99,18 @@ function llmHtml(llm, side) {
   if (!llm) {
     return '<div class="llm-box"><span class="muted">等待大模型评估完成，暂不能下单</span></div>';
   }
+  if (llm.schema_version === 'trade-review-v1') {
+    const recommendations = {support_execute:'支持本次执行', defer:'建议暂缓', oppose_execute:'建议不执行'};
+    const actions = {buy:'买入', hold:'持有', reduce:'建议减仓（需另行确认）', exit:'退出', revise_plan:'修订计划'};
+    const claims = [...(llm.facts || []).map(c => '事实：' + c.text), ...(llm.inferences || []).map(c => '推断：' + c.text)].slice(0,3);
+    return '<div class="llm-box"><b>' + esc(recommendations[llm.recommendation] || '等待评估') + '</b> · ' +
+      esc(actions[llm.proposed_action] || '') + ' · 状态 ' + esc(llm.status) +
+      claims.map(c => '<div>' + esc(c) + '</div>').join('') +
+      '<div>主要反对证据：' + esc((llm.counterevidence || []).map(c => c.text).slice(0,1).join('；') || '尚未取得') + '</div>' +
+      '<div>资料缺口：' + esc((llm.missing_information || []).join('；') || '未报告') + '</div>' +
+      '<div>评估有效至 ' + fmtTs(llm.expires_at) + '</div>' +
+      '<details><summary>完整评估与来源引用</summary><pre style="white-space:pre-wrap">' + esc(JSON.stringify(llm, null, 2)) + '</pre></details></div>';
+  }
   if (!llm.verdict) {
     return '<div class="llm-box"><span class="muted">本轮大模型无判定</span>'
          + (llm.reason ? '<div>说明：' + esc(llm.reason) + '</div>' : '')
@@ -112,11 +125,30 @@ function llmHtml(llm, side) {
   const label = (side === 'sell' ? sellLabels : buyLabels)[v] || v;
   const modeText = {shadow:'影子模式', real_veto:'真实否决'}[llm.mode] || llm.mode || '';
   return '<div class="llm-box"><div>大模型判定：<span class="llm-verdict ' + cls + '">' + esc(label) +
-         '</span> <span class="muted">(conf ' + conf + ', ' + esc(modeText) + ')</span></div>' +
+         '</span> <span class="muted">(模型自报信心 ' + conf + '，非胜率；' + esc(modeText) + ')</span></div>' +
          (llm.risk_level ? '<div>市场风险：' + esc(llm.risk_level) + '</div>' : '') +
          (llm.reason ? '<div>理由：' + esc(llm.reason) + '</div>' : '') +
          (llm.model ? '<div class="note">model: ' + esc(llm.model) + '</div>' : '') +
          '</div>';
+}
+let visibleItems = new Map();
+const inputSnapshots = new Map();
+function planHtml(item) {
+  const p = item.plan;
+  if (!p) return '';
+  return '<div class="reason-box"><b>交易计划 v' + esc(item.plan_version) + '</b> · ' + esc(p.profit_source) +
+    '<div>计划风险 R：$' + esc(p.risk.planned_r == null ? '不可计算' : p.risk.planned_r.toFixed(2)) +
+    '（报价与批准数量上限口径；非最大可能损失，实际数量仍受风险预算约束）</div>' +
+    (p.risk.account_risk ? '<div>预计资金占比 ' + esc((p.risk.account_risk.nav_fraction*100).toFixed(2)) +
+      '% · 含成本预算风险占净值 ' + esc((p.risk.account_risk.risk_nav_fraction*100).toFixed(2)) +
+      '% · 风险组 ' + esc(p.risk.account_risk.risk_group) + '</div>' : '') +
+    '<div>失效条件：' + esc(JSON.stringify(p.invalidation)) + '</div>' +
+    '<div>极端行情预案：' + esc(p.extreme_plan) + '</div>' +
+    '<div>批准仅限本次买卖；修订计划后必须重新评估与确认。</div>' +
+    '<details data-key="plan-' + esc(item.id) + '"><summary>完整计划与版本</summary><pre style="white-space:pre-wrap">' + esc(JSON.stringify(p, null, 2)) + '</pre></details>' +
+    '<details data-key="input-' + esc(item.id) + '"><summary>原始输入与证据快照</summary>' +
+    (inputSnapshots.has(item.input_snapshot_id) ? '<pre style="white-space:pre-wrap">' + esc(JSON.stringify(inputSnapshots.get(item.input_snapshot_id),null,2)) + '</pre>' :
+    '<button data-id="' + esc(item.id) + '" data-act="input">加载当时的输入</button>') + '</details></div>';
 }
 function card(item, now) {
   const id = esc(item.id);
@@ -126,10 +158,11 @@ function card(item, now) {
     ? '<span class="countdown">' + Math.ceil(left / 1000) + 's 后自动' +
       '过期，不自动下单' + '</span>' : '';
   const buttons = item.status === 'pending'
-    ? '<div class="actions"><button class="buy" data-id="' + id + '" data-act="approve" ' + ((!item.llm || !item.llm.verdict || !item.llm.reason) ? 'disabled title="等待LLM评估"' : '') + '>' +
+    ? '<div class="actions"><button class="buy" data-id="' + id + '" data-act="approve" ' + (!item.llm_ready ? 'disabled title="等待有效LLM评估"' : '') + '>' +
       (isSell ? '卖出' : '下单') + '</button>' +
       '<button class="reject" data-id="' + id + '" data-act="reject">' +
-      (isSell ? '继续持有' : '拒绝') + '</button></div>' : '';
+      (isSell ? '继续持有' : '拒绝') + '</button>' +
+      (item.plan_id ? '<button data-id="' + id + '" data-act="revise">补充/修订计划</button>' : '') + '</div>' : '';
   const kline = item.kline_score != null
     ? '<div>日内评分：<b>' + esc(item.kline_score) + '</b>（' + esc(item.kline_signal || '-') + '）</div>' : '';
   return '<div class="card ' + esc(item.status) + '">' +
@@ -146,7 +179,7 @@ function card(item, now) {
       (item.trade_plan.target ? ' · 反弹目标 <b>' + esc(item.trade_plan.target) + '</b>' : '') +
       ' · 实际买入数量受账户风险预算约束</div>' : '') +
     (kline ? '<div class="kv">' + kline + '</div>' : '') +
-    '<div class="section-title">规则触发理由</div>' +
+    planHtml(item) + '<div class="section-title">规则触发理由</div>' +
     '<div class="reason-box">' + esc(item.reason || '无') + '</div>' +
     (item.context ? '<div class="section-title">消息面上下文</div>' +
       '<div class="reason-box" style="white-space:pre-line">' + esc(item.context) + '</div>' : '') +
@@ -172,12 +205,15 @@ async function load() {
       (a.priority == null ? 1 : a.priority) - (b.priority == null ? 1 : b.priority) ||
       (order[a.status] == null ? 9 : order[a.status]) - (order[b.status] == null ? 9 : order[b.status]) ||
       (b.created_at || 0) - (a.created_at || 0));
+    visibleItems = new Map(items.map(i => [i.id, i]));
     const el = document.getElementById('content');
     if (!items.length) {
       el.innerHTML = '<div class="empty">暂无待确认的交易信号<br><span class="note">日内抄底 / 日线突破信号达到阈值时会出现在这里，点「下单」才真正执行。</span></div>';
       return;
     }
+    const expanded = new Set([...el.querySelectorAll('details[open][data-key]')].map(d => d.dataset.key));
     el.innerHTML = items.map(i => card(i, now)).join('');
+    el.querySelectorAll('details[data-key]').forEach(d => { d.open = expanded.has(d.dataset.key); });
   } catch (e) {
     document.getElementById('content').innerHTML =
       '<div class="empty">连接失败：' + esc(e.message || e) + '</div>';
@@ -188,8 +224,39 @@ document.addEventListener('click', async function (e) {
   if (!btn) return;
   btn.disabled = true;
   try {
+    const item = visibleItems.get(btn.dataset.id);
+    if (!item) return;
+    if (btn.dataset.act === 'input') {
+      const r = await fetch('/api/approvals/' + encodeURIComponent(item.id) + '/input');
+      const res = await r.json();
+      if (res.ok && res.snapshot) inputSnapshots.set(res.snapshot.input_snapshot_id, res.snapshot);
+      else alert(res.error || '输入快照不可用');
+      return;
+    }
+    let note = '';
+    if (btn.dataset.act === 'approve' && item.plan_id && item.llm.recommendation !== 'support_execute') {
+      note = prompt('模型建议暂缓或不执行。请填写仍执行本次买卖的理由：') || '';
+      if (!note.trim()) return;
+    }
+    if (btn.dataset.act === 'revise') {
+      const reason = prompt('填写补充资料或计划修订理由（旧批准将失效）：');
+      if (!reason || !reason.trim()) return;
+      const stop = prompt('初始止损价（留空保留；历史未知风险请勿编造）：', item.trade_plan?.initial_stop || '');
+      if (stop === null) return;
+      const tradePlan = {...(item.trade_plan || {})};
+      if (stop.trim()) {
+        if (!Number.isFinite(Number(stop)) || Number(stop) <= 0) { alert('止损价无效'); return; }
+        tradePlan.initial_stop = Number(stop);
+      }
+      const r = await fetch('/api/approvals/' + encodeURIComponent(item.id) + '/revise-plan', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({reason, changes:{trade_plan:tradePlan, context:reason}})});
+      const res = await r.json();
+      if (!res.ok) alert(res.error || '修订失败');
+      return;
+    }
     const r = await fetch('/api/approvals/' + encodeURIComponent(btn.dataset.id) + '/' + btn.dataset.act,
-      { method: 'POST' });
+      { method: 'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({note, binding:item.approval_binding}) });
     const res = await r.json();
     if (!res.ok) alert(res.error || '操作失败');
   } catch (err) {

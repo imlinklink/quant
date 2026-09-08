@@ -4,6 +4,7 @@ import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from .position_registry import REGISTRY
+from .decision_ledger.event_store import enqueue, stable_id, EventStore
 
 ACTIVE = {'intent', 'submitting', 'submitted', 'partially_filled', 'unknown'}
 TERMINAL = {'filled', 'cancelled', 'rejected'}
@@ -80,6 +81,7 @@ class ExecutionService:
     def reconcile(self):
         """只查询，不重发。每次执行前和每轮审批轮询执行。"""
         if self.dry_run:
+            EventStore(self.registry).export()
             return
         from futu import RET_OK
         with self.pool.get_trade_ctx() as ctx:
@@ -101,6 +103,7 @@ class ExecutionService:
                 reports = list(book['orders'].values())
             for order in reports:
                 self.publish(order)
+        EventStore(self.registry).export()
 
     def publish(self, order):
         if self.store is not None:
@@ -116,22 +119,70 @@ class ExecutionService:
         avg = float(report.get('dealt_avg_price') or 0)
         with self.registry.transaction() as book:
             order = book['orders'][pid]
-            if filled < order.get('filled_qty', 0) or filled > order['qty']:
+            if not math.isfinite(filled) or filled < order.get('filled_qty', 0) or filled > order['qty']:
                 raise ValueError('订单累计成交数量异常')
             delta = filled - order.get('filled_qty', 0)
-            if delta:
-                book.setdefault('fills', []).append(dict(order_id=pid, code=order['code'], side=order['side'],
-                    qty=delta, cumulative_qty=filled, cumulative_avg=avg, observed_at=time.time()))
+            if delta and order['status'] in TERMINAL:
+                raise ValueError('终结订单出现新增成交，需核对券商更正，禁止静默改写已冻结R0')
             if delta and not finite_positive(avg):
                 raise ValueError('成交均价缺失，保留订单等待对账')
+            previous_amount = float(order.get('filled_amount', order.get('filled_qty', 0)*order.get('avg_price', 0)))
+            amount = filled*avg if filled and avg else previous_amount
+            delta_amount = amount-previous_amount
+            if not math.isfinite(amount) or (delta and delta_amount <= 0) or (not delta and abs(delta_amount) > 1e-6):
+                raise ValueError('累计成交金额异常，等待对账')
+            fee = report.get('cumulative_fee')
+            if fee is not None:
+                fee = float(fee)
+                if not math.isfinite(fee) or fee < 0:
+                    raise ValueError('累计费用异常')
+            previous_fee = order.get('cumulative_fee')
+            fee_delta = (fee - (previous_fee or 0)) if fee is not None else 0
+            links = {k: order.get('proposal', {}).get(k) for k in ('signal_id','plan_id','plan_version','review_id')}
+            links.update(proposal_id=pid, order_intent_id=order.setdefault('order_intent_id', stable_id('intent', self.registry.namespace, pid)),
+                         broker_order_id=str(report.get('order_id') or order.get('order_id', '')))
             pos = book['positions'].get(order['code'])
+            if delta and order['side']=='sell' and pos and delta>float(pos['qty'])+1e-8:
+                raise ValueError('卖出增量超过本地持仓，等待完整对账')
+            trades = book.setdefault('trades', {})
+            if 'trade_id' not in order:
+                order['trade_id'] = ((pos or {}).get('trade_id') if order['side'] == 'sell' else None) or stable_id(
+                    'trade', self.registry.namespace, pid if order['side'] == 'buy' else [order['code'], (pos or {}).get('opened_at')])
+            tid = order['trade_id']
+            links['trade_id'] = tid
+            trade = trades.get(tid)
+            if trade is None and (delta or pos):
+                legacy = order['side'] == 'sell'
+                trade = dict(trade_id=tid, code=order['code'], direction=(pos or {}).get('direction', order['metadata'].get('direction','long')),
+                    entry_qty=float((pos or {}).get('qty', 0)) if legacy else 0,
+                    entry_amount=float((pos or {}).get('qty', 0))*float((pos or {}).get('entry_price',0)) if legacy else 0,
+                    exit_qty=0, exit_amount=0, fees=0, initial_r0=None, provisional_r=None,
+                    entry_terminal=legacy, legacy=legacy, fee_complete=False,
+                    basis_known=not legacy or bool(pos and finite_positive(pos.get('entry_price'))),
+                    initial_stop=order['metadata'].get('initial_stop') if not legacy else None,
+                    opened_at=time.time(), status='open')
+                trades[tid] = trade
+            if delta:
+                fill_id = stable_id('fill', self.registry.namespace, links['broker_order_id'] or pid, filled)
+                fill = dict(fill_id=fill_id, order_intent_id=links['order_intent_id'],
+                            broker_order_id=links['broker_order_id'], proposal_id=pid, trade_id=tid,
+                            code=order['code'], side=order['side'], qty=delta, amount=delta_amount,
+                            price=delta_amount/delta, cumulative_qty=filled, cumulative_amount=amount,
+                            fee_delta=fee_delta if fee is not None else None)
+                book.setdefault('fills', []).append(fill)
+                enqueue(book, self.registry.namespace, 'fill_received', fill_id, fill, fill_id=fill_id, **links)
+                prefix = 'entry' if order['side'] == 'buy' else 'exit'
+                trade[prefix+'_qty'] += delta
+                trade[prefix+'_amount'] += delta_amount
             if delta and order['side'] == 'buy':
                 meta = order['metadata']
                 if pos is None:
                     pos = dict(meta, code=order['code'], opened_at=time.time(), qty=0)
                     book['positions'][order['code']] = pos
                 pos.update(qty=filled, entry_price=avg, last_reconciled_at=time.time(),
-                           initial_risk=filled * (abs(avg-meta['initial_stop']) + order['cost_per_share']))
+                           trade_id=tid, initial_risk=filled * (abs(avg-meta['initial_stop']) + order['cost_per_share']))
+                if trade['initial_r0'] is None:
+                    trade['provisional_r'] = filled * abs(avg-meta['initial_stop'])
             elif delta and pos:
                 left = max(0, pos['qty'] - delta)
                 if left:
@@ -139,7 +190,9 @@ class ExecutionService:
                     pos['qty'] = left
                 else:
                     del book['positions'][order['code']]
-            order.update(filled_qty=filled, avg_price=avg, order_id=str(report.get('order_id') or order.get('order_id', '')),
+            previous_status = order['status']
+            order.update(filled_qty=filled, filled_amount=amount, avg_price=amount/filled if filled else 0,
+                         order_id=str(report.get('order_id') or order.get('order_id', '')),
                          updated_at=time.time())
             if status == 'FILLED_ALL' and filled == order['qty']:
                 order['status'] = 'filled'
@@ -151,6 +204,43 @@ class ExecutionService:
                 order['status'] = 'partially_filled'
             else:
                 order['status'] = 'submitted'
+            if previous_status in TERMINAL and not delta:
+                order['status'] = previous_status  # late acknowledgement cannot reopen an order
+            if fee is not None:
+                order['cumulative_fee'] = fee
+                if trade:
+                    trade['fees'] += fee_delta
+                if previous_fee != fee:
+                    order['fee_revision'] = int(order.get('fee_revision',0))+1
+                    enqueue(book, self.registry.namespace, 'fee_adjusted', [pid, order['fee_revision']],
+                            {'cumulative_fee': fee, 'delta': fee_delta}, **links)
+            if trade:
+                if order['side'] == 'buy' and order['status'] in TERMINAL:
+                    trade['entry_terminal'] = True
+                    if trade['initial_r0'] is None:
+                        trade['initial_r0'] = trade['provisional_r']
+                related = [o for o in book['orders'].values() if o.get('trade_id') == tid and o.get('filled_qty')]
+                trade['fee_complete'] = (not trade['legacy'] and all(o.get('cumulative_fee') is not None for o in related))
+                qty = trade['entry_qty']
+                basis = trade['entry_amount']/qty if qty else 0
+                sign = -1 if trade['direction'] == 'short' else 1
+                trade['gross_realized_pnl'] = sign*(trade['exit_amount']-basis*trade['exit_qty']) if trade.get('basis_known',True) else None
+                trade['net_realized_pnl'] = trade['gross_realized_pnl']-trade['fees'] if trade['fee_complete'] and trade['gross_realized_pnl'] is not None else None
+                trade['remaining_qty'] = qty-trade['exit_qty']
+                trade['remaining_initial_risk'] = (trade['initial_r0']*trade['remaining_qty']/qty
+                                                    if qty and trade['initial_r0'] is not None else None)
+                if trade['exit_qty'] and trade['remaining_qty'] == 0 and trade['status'] != 'closed':
+                    trade.update(status='closed', closed_at=time.time())
+                    enqueue(book, self.registry.namespace, 'trade_closed', tid, dict(trade), **links)
+                elif trade['exit_qty'] and trade['remaining_qty'] > 0:
+                    trade['status'] = 'partially_closed'
+                if delta or previous_status != order['status'] or previous_fee != fee and fee is not None:
+                    enqueue(book, self.registry.namespace, 'trade_accounted',
+                            [tid, pid, filled, order['status'], fee, order.get('fee_revision',0)], dict(trade), **links)
+            if previous_status != order['status'] or delta:
+                event_type = {'unknown':'order_unknown','rejected':'order_rejected'}.get(order['status'], 'order_submitted')
+                enqueue(book, self.registry.namespace, event_type, [pid, order['status'], filled],
+                        {'status': order['status'], 'filled_qty': filled, 'quantity': order['qty']}, **links)
             saved = dict(order)
         self.publish(saved)
 
@@ -182,8 +272,17 @@ class ExecutionService:
         fresh = self.store.get(item['id'])
         if not fresh or fresh['status'] != 'executing' or time.time() >= float(fresh['expires_at']):
             raise ValueError('审批已失效')
+        if fresh.get('plan_id'):
+            from mutifactor.llm.trade_review import approval_binding
+            if (not ProposalStore.llm_ready(fresh) or fresh.get('approved_binding') != approval_binding(fresh)
+                    or approval_binding(item) != approval_binding(fresh)):
+                raise ValueError('计划/评估版本与批准不匹配')
+            # Always execute the persisted, approved payload, never a caller copy.
+            item = fresh
         if not finite_positive(price):
             raise ValueError('最新报价无效')
+        if item.get('plan_id') and abs(price-float(item['price']))/float(item['price']) > float(item['max_price_drift_pct']):
+            raise ValueError('报价超出本次批准的价格容忍范围')
         self.reconcile()
         quote_fetched = time.time()
         day_volume = None
@@ -191,6 +290,8 @@ class ExecutionService:
             price, day_volume, quote_fetched = self.fresh_quote(item['stock_code'])
             drift = abs(price-float(item['price']))/float(item['price'])
             limit = float(self.config.get('trading', {}).get('live_trading', {}).get('human_approval', {}).get('max_price_drift_pct', .03))
+            if item.get('plan_id'):
+                limit = min(limit,float(item['max_price_drift_pct']))
             if drift > limit:
                 raise ValueError('最新报价偏离审批价，需重新确认')
         side = item.get('side', 'buy')
@@ -223,7 +324,14 @@ class ExecutionService:
                     equity = float(account.iloc[0]['total_assets'])
                     cash = float(account.iloc[0]['cash'])
         pid, code = item['id'], item['stock_code']
-        with self.registry.transaction() as book:
+        with self.registry.transaction(approval=item if item.get('plan_id') else None) as book:
+            if item.get('plan_id'):
+                if item['account_scope'] != self.registry.namespace:
+                    raise ValueError('审批账户不匹配')
+                # Durable credentials were checked under this same database writer lock.
+                from mutifactor.llm.trade_review import approval_binding
+                if item['approved_binding'] != approval_binding(item) or not ProposalStore.llm_ready(item):
+                    raise ValueError('批准或模型评估已经失效')
             if time.time()-quote_fetched > 30 or time.time() >= float(fresh['expires_at']):
                 raise ValueError('复核耗时过长，报价或审批已过期')
             if pid in book['orders']:
@@ -284,12 +392,22 @@ class ExecutionService:
                     raise ValueError('无可平仓数量')
                 meta['direction'] = direction
                 risk = 0
-            order = dict(proposal=dict(item), id=pid, code=code, side=side, price=price, qty=qty, risk=risk,
+            tid = stable_id('trade', self.registry.namespace, pid) if side == 'buy' else (book['positions'].get(code) or {}).get('trade_id')
+            meta.update({k: item[k] for k in ('signal_id','plan_id','plan_version','review_id','input_snapshot_id') if k in item})
+            order = dict(proposal=dict(item), id=pid, order_intent_id=stable_id('intent', self.registry.namespace, pid),
+                         code=code, side=side, price=price, qty=qty, risk=risk,
                          metadata=meta, status='submitting', filled_qty=0, cost_per_share=float(cfg.get('cost_per_share', .05)),
                          created_at=time.time())
+            if tid:
+                order['trade_id'] = tid
             book['orders'][pid] = order
+            enqueue(book, self.registry.namespace, 'order_intent_created', order['order_intent_id'],
+                    {'quantity': qty, 'price': price, 'planned_r': risk, 'side': side},
+                    proposal_id=pid, order_intent_id=order['order_intent_id'], trade_id=tid,
+                    **{k: item[k] for k in ('signal_id','plan_id','plan_version','review_id') if k in item})
         if self.dry_run:
-            self.apply_report(pid, dict(order_id='dry-'+pid, order_status='FILLED_ALL', dealt_qty=qty, dealt_avg_price=price))
+            self.apply_report(pid, dict(order_id='dry-'+pid, order_status='FILLED_ALL', dealt_qty=qty, dealt_avg_price=price,
+                                        cumulative_fee=qty*order['cost_per_share']))
             return 'filled'
         from futu import RET_OK, OrderType, TrdSide, TimeInForce
         try:
@@ -313,6 +431,9 @@ class ExecutionService:
             with self.registry.transaction() as book:
                 if book['orders'][pid]['status'] not in TERMINAL:
                     book['orders'][pid]['status'] = 'unknown'
+                    enqueue(book, self.registry.namespace, 'order_unknown', pid, {'status': 'unknown'},
+                            proposal_id=pid, order_intent_id=order['order_intent_id'], trade_id=tid,
+                            **{k: item[k] for k in ('signal_id','plan_id','plan_version','review_id') if k in item})
             raise
         with self.registry.transaction() as book:
             return book['orders'][pid]['status']
@@ -320,7 +441,8 @@ class ExecutionService:
 
 def service_for(owner):
     if not hasattr(owner, '_execution_service'):
-        owner._execution_service = ExecutionService(owner.pool, owner.config, owner.approval_store, owner.dry_run)
+        owner._execution_service = ExecutionService(owner.pool, owner.config, owner.approval_store, owner.dry_run,
+            registry=owner.approval_store.registry if owner.approval_store else None)
     return owner._execution_service
 
 

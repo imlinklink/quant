@@ -326,7 +326,7 @@ class DipBuyMonitor:
             iv_txt = f"，IV≈{float(op['avg_iv']) * 100:.0f}%" if op.get('avg_iv') is not None else ''
             pc_txt = f"，P/C OI={float(op['put_call_oi']):.2f}" if op.get('put_call_oi') is not None else ''
             reason += f"；期权: {op['label']}{iv_txt}{pc_txt}"
-        reason += f"；单票仓位 ${size_usd:.0f}，信号价约 {qty} 股"
+        reason += f"；单票名义金额上限 ${size_usd:.0f}，数量按账户风险预算核算"
         ig = result.get('index_gate') or {}
         if ig.get('action'):
             mode_txt = '影子' if not self.index_gate_enforce else '生效'
@@ -342,11 +342,18 @@ class DipBuyMonitor:
             if signal_ctx is not None:
                 context_text = signal_context.format_context(code, signal_ctx)
             else:
-                context_text = signal_context.get_context_text(code)
+                signal_ctx = signal_context.fetch_signal_context(code)
+                context_text = signal_context.format_context(code, signal_ctx)
         except Exception as e:
             logger.debug(f"消息面上下文失败 {code}: {e}")
 
-        self.approval_store.create(
+        from scripts.live_trading.decision_ledger.workflow import enabled, start_review, news_evidence
+        if enabled(self):
+            from scripts.live_trading.decision_ledger.workflow import risk_preview
+            summary = risk_preview(self, code, price, result.get('stop_ref'), size_usd, qty)
+            result['_decision']['risk_summary'] = summary
+            qty = summary['quantity']
+        created = self.approval_store.create(
             stock_code=code,
             stock_name=code,
             market_type='US',
@@ -358,14 +365,17 @@ class DipBuyMonitor:
             entry_mode='dip_buy',
             trade_plan={'initial_stop': result.get('stop_ref'), 'target': result.get('target_price'),
                         'min_rr': self.rr_min, 'time_exit_bars': int(self.config.get('dip_buy', {}).get('time_exit_bars', 8)),
-                        'signal_time': datetime.now(ZoneInfo('America/New_York')).isoformat()},
+                        'signal_time': result.get('signal_bar_end') or datetime.now(ZoneInfo('America/New_York')).isoformat()},
             trigger_reason='抄底评分 ≥ 阈值',
             kline_score=score,
             kline_signal=result.get('signal'),
             reason=reason,
             context=context_text,
-            llm=self._ask_llm_verdict(code, price, context_text=context_text),
+            evidence_items=news_evidence(signal_ctx),
+            llm=None if enabled(self) else self._ask_llm_verdict(code, price, context_text=context_text),
+            **result.get('_decision', {}),
         )
+        start_review(self, created)
         logger.warning(
             f"[人工确认] {code} 推送待确认: 评分={score}/{self.buy_threshold} "
             f"@{price:.2f} 约{qty}股 —— 请在确认页点「下单」"
@@ -856,6 +866,13 @@ class DipBuyMonitor:
         outcome 记录最终去向：below_threshold / blocked_* / passed。
         """
         score = float(result.get('score') or 0)
+        from scripts.live_trading.decision_ledger.workflow import candidate
+        if result.get('signal_bar_end'):
+            result['_decision'] = candidate(self, code, 'dip_buy', result['signal_bar_end'],
+                outcome in ('passed', 'queue_skipped', 'shadow_index_would_block'),
+                {'score': score, 'outcome': outcome, 'initial_stop': result.get('stop_ref'),
+                 'target': result.get('target_price'), 'price': price, 'min_rr': self.rr_min,
+                 'time_exit_bars': int(self.config.get('dip_buy',{}).get('time_exit_bars',8))})
         if self.eval_log_min_score > 0 and score < self.eval_log_min_score:
             return None
         try:
@@ -945,22 +962,6 @@ class DipBuyMonitor:
                 self._trend_gate_cache[code]['logged'] = trend_reason
                 logger.warning(f"  {code} {trend_reason}")
 
-            # 1. 检查冷却期
-            if not self._check_cooldown(code):
-                logger.info(f"⏭️  {code} 在冷却期内，跳过")
-                return
-
-            # 1.5 检查最大持仓数（避免无限加仓，整表缓存每20秒刷新一次）
-            pos_count = self._get_position_count()
-            if pos_count >= self.max_positions:
-                logger.info(f"⏭️  持仓已满({pos_count}/{self.max_positions})，跳过买入")
-                return
-
-            # 1.6 P0 单代码一仓：已持有该代码时不再重复抄底
-            if self.one_position_per_code and self._has_position(code):
-                logger.info(f"⏭️  {code} 已持有（单代码一仓），跳过重复抄底")
-                return
-
             # 2. 拉K线
             bars = self._get_kline_5m(code)
             if bars is None or len(bars) < self.min_bars:
@@ -977,6 +978,7 @@ class DipBuyMonitor:
             
             # 4. 分析
             result = self.analyzer.analyze(code, bars, price)
+            result['signal_bar_end'] = bars.iloc[-1]['bar_end'].isoformat()
             
             # 5. 判断是否买入（美股只一档阈值）
             if result['score'] >= self.buy_threshold:
@@ -1072,6 +1074,12 @@ class DipBuyMonitor:
                     except Exception as e:
                         logger.warning(f"[指数门] {code} 状态计算失败，放行: {e}")
 
+                self._log_scan(code, price, et_now, result, outcome='passed', env_score=env_score)
+                # Account/human occupancy must not erase the rule baseline opportunity.
+                if not self._check_cooldown(code) or self._get_position_count() >= self.max_positions:
+                    return
+                if self.one_position_per_code and self._has_position(code):
+                    return
                 if self.approval_enabled:
                     # 人工确认模式：只推送，不自动下单
                     acted = self._queue_approval(code, price, result, signal_ctx=signal_ctx)

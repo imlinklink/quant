@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "scope": "条件性对照；本报告不估算LLM因果贡献",
+  "candidates": 2,
+  "stages": {
+    "human_approved": 2,
+    "human_rejected": 0,
+    "llm_failed_or_stale": 0,
+    "llm_insufficient": 0,
+    "proposal_expired": 0,
+    "rule_passed": 2,
+    "unfilled_terminal_order": 0,
+    "unhandled": 0,
+    "unknown_order": 0,
+    "with_fill": 2,
+    "with_llm_result": 2,
+    "with_order": 2,
+    "with_proposal": 2
+  },
+  "cohorts": {
+    "DRY-RUN|dip_buy_exit|rules-v1:f9759a5ae46882ef|15m": 1,
+    "DRY-RUN|dip_buy|rules-v1:f9759a5ae46882ef|15m": 1
+  },
+  "legacy_unknown_events": 0,
+  "unique_events": 28,
+  "linkage": {
+    "complete": 10,
+    "total": 10,
+    "rate": 1
+  },
+  "latencies": {
+    "human_wait_seconds": {
+      "samples": 2,
+      "mean": 0.040353,
+      "max": 0.040489
+    },
+    "llm_seconds": {
+      "samples": 2,
+      "mean": 0.004461526870727539,
+      "max": 0.00453495979309082
+    },
+    "submit_to_first_fill_seconds": {
+      "samples": 2,
+      "mean": 0.0029059999999999997,
+      "max": 0.003022
+    }
+  },
+  "cross_groups": {
+    "support_execute|approved": 2
+  },
+  "rows": [
+    {
+      "signal_id": "signal_81f514bcdc33787d6e4b78ae9d350aeb",
+      "cohort": "DRY-RUN|dip_buy_exit|rules-v1:f9759a5ae46882ef|15m",
+      "llm": "support_execute",
+      "human": "approved",
+      "outcome": "filled"
+    },
+    {
+      "signal_id": "signal_e42adc3af29cfbe1cd2f73359050806b",
+      "cohort": "DRY-RUN|dip_buy|rules-v1:f9759a5ae46882ef|15m",
+      "llm": "support_execute",
+      "human": "approved",
+      "outcome": "filled"
+    }
+  ],
+  "actual": {
+    "open": 0,
+    "partially_closed": 0,
+    "closed": 1,
+    "net_expectancy_r": -0.02,
+    "r_samples": 1,
+    "net_pnl": -2,
+    "missing_fees": 0
+  },
+  "llm_cost": {
+    "known_usd": 0.02,
+    "unknown_calls": 0
+  },
+  "conclusion": "暂无法判断LLM是否提高收益；需要锁定实验版本、历史可得行情及受资金约束的样本外A/B/C/D重放。",
+  "data_source": "合成行情与模拟LLM：100买入20股，100卖出20股，每边费用1美元；不是真实交易"
+}
