@@ -96,7 +96,11 @@ def unapprovable_reason(item, now=None):
 
 
 def llm_state(events, llm_enabled):
-    """从事件账本推导 LLM 状态。区分「尚未调用 / 等待完成 / 成功 / 失败 / 资料不足」。"""
+    """从事件账本推导 LLM 状态。区分「尚未调用 / 排队未完成 / 成功 / 失败 / 资料不足」。
+
+    按 review_id 关联请求与结果：存在已请求但未完成/失败的请求时，即使历史有成功，
+    当前状态仍是 pending（有排队/未完成请求），不把旧成功当作本次已完成。
+    """
     requested = [e for e in events if e['event_type'] == 'llm_requested']
     completed = [e for e in events if e['event_type'] == 'llm_completed']
     failed = [e for e in events if e['event_type'] == 'llm_failed']
@@ -106,15 +110,24 @@ def llm_state(events, llm_enabled):
     last_insufficient = _latest(completed, lambda e: e.get('payload', {}).get('status') == 'insufficient_information')
     last_failure = _latest(failed, lambda e: True)
 
+    requested_ids = {e.get('review_id') for e in requested if e.get('review_id')}
+    done_ids = {e.get('review_id') for e in completed + failed if e.get('review_id')}
+    pending_ids = requested_ids - done_ids
+
     status = 'never_called'
     if last_request is not None:
-        status = 'pending'
-        candidates = [e for e in (last_success, last_insufficient, last_failure) if e is not None]
-        if candidates:
-            latest = max(candidates, key=lambda e: _iso(e.get('observed_at')))
-            status = ('failed' if latest is last_failure
-                      else 'insufficient_information' if latest is last_insufficient
-                      else 'success')
+        if pending_ids:
+            # 有未完成请求（可能乱序完成）：当前是排队/等待完成
+            status = 'pending'
+        else:
+            candidates = [e for e in (last_success, last_insufficient, last_failure) if e is not None]
+            if candidates:
+                latest = max(candidates, key=lambda e: _iso(e.get('observed_at')))
+                status = ('failed' if latest is last_failure
+                          else 'insufficient_information' if latest is last_insufficient
+                          else 'success')
+            else:
+                status = 'pending'
 
     def _at(e):
         return _iso(e.get('observed_at')) if e is not None else None
@@ -132,6 +145,7 @@ def llm_state(events, llm_enabled):
         'last_failure_at': _at(last_failure),
         'last_failure_reason': failure_reason,
         'request_count': len(requested),
+        'pending_count': len(pending_ids),
         'success_count': sum(1 for e in completed if e.get('payload', {}).get('status') == 'complete'),
         'insufficient_count': sum(1 for e in completed if e.get('payload', {}).get('status') == 'insufficient_information'),
         'failure_count': len(failed),

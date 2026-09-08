@@ -78,6 +78,22 @@ class EvidenceQualityContracts(unittest.TestCase):
         buckets = split_signals(events, '2026-02-01', '2026-04-01')
         self.assertEqual(buckets['unassigned'], ['s1'])
 
+    def test_split_signals_excludes_cross_boundary(self):
+        # 信号在 train（9/1），退出在 test（9/15，测试期始于 9/10）→ 跨界排除
+        events = [
+            {'event_type': 'rule_candidate', 'signal_id': 's1',
+             'payload': {'signal_bar_end': '2026-09-01T00:00:00+00:00'}},
+            {'event_type': 'fill_received', 'signal_id': 's1',
+             'payload': {'side': 'sell'}, 'observed_at': '2026-09-15T00:00:00+00:00'},
+        ]
+        buckets = split_signals(events, '2026-09-10', '2026-09-20')
+        self.assertEqual(buckets['excluded'], ['s1'])
+        self.assertEqual(buckets['train'], [])
+
+    def test_split_signals_rejects_unordered_boundaries(self):
+        with self.assertRaises(ValueError):
+            split_signals([], '2026-04-01', '2026-02-01')
+
     def test_effectiveness_report(self):
         self._proposal_and_review()
         report = build_effectiveness(self.store.events.events())

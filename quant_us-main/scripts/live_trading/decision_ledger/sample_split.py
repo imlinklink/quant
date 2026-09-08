@@ -9,28 +9,58 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-def _parse_date(value):
+def _parse_boundary(value):
+    """解析边界日期。允许纯日期（'YYYY-MM-DD'，按 UTC 当天 00:00）或带时区时间。"""
     if value is None:
         return None
     if isinstance(value, datetime):
         return value.astimezone(timezone.utc)
     try:
-        return datetime.fromisoformat(str(value).replace('Z', '+00:00')).astimezone(timezone.utc)
+        dt = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
     except (ValueError, TypeError):
         raise ValueError(f'无法解析日期: {value}')
+    if dt.tzinfo is None or dt.utcoffset() is None:
+        return dt.replace(tzinfo=timezone.utc)  # 纯日期 → UTC 当天
+    return dt.astimezone(timezone.utc)
+
+
+def _parse_timestamp(value):
+    """解析事件时间戳，必须带时区；无时区时间直接拒绝，不默认为 UTC。"""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError(f'时间必须带时区: {value}')
+        return value.astimezone(timezone.utc)
+    try:
+        dt = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+    except (ValueError, TypeError):
+        raise ValueError(f'无法解析日期: {value}')
+    if dt.tzinfo is None or dt.utcoffset() is None:
+        raise ValueError(f'时间必须带时区: {value}')
+    return dt.astimezone(timezone.utc)
 
 
 def split_signals(events, train_end, val_end, test_end=None):
-    """按 signal_bar_end 划分 signal_id 到 train/val/test。
+    """按「信号时间 + 退出时间」划分 signal_id 到 train/val/test。
 
-    划分依据用规则事件的 signal_bar_end（信号收盘时间，稳定不随后续事件漂移）。
-    返回 {train:[], val:[], test:[], unassigned:[]}。
+    标签窗口 = [信号时间, 退出时间]。跨边界的持仓（信号在 train 但退出在 val/test）
+    单独放进 excluded，不能把测试期收益混进训练标签；持仓未了结（无退出）也进 excluded。
+    拒绝无时区时间和乱序边界。
+
+    返回 {train:[], val:[], test:[], excluded:[], unassigned:[]}。
+    本函数只做「按信号时间分桶」，不宣称完成「重叠持仓不跨分」——跨界的明确排除。
     """
-    train_end = _parse_date(train_end)
-    val_end = _parse_date(val_end)
-    test_end = _parse_date(test_end) if test_end else None
+    train_end = _parse_boundary(train_end)
+    val_end = _parse_boundary(val_end)
+    test_end = _parse_boundary(test_end) if test_end else None
+    if not (train_end < val_end):
+        raise ValueError('train_end 必须早于 val_end')
+    if test_end is not None and not (val_end < test_end):
+        raise ValueError('val_end 必须早于 test_end')
 
     signal_date = {}
+    signal_exit = {}
     for e in events:
         sid = e.get('signal_id')
         if not sid:
@@ -38,23 +68,52 @@ def split_signals(events, train_end, val_end, test_end=None):
         if e['event_type'] in ('rule_candidate', 'rule_rejected'):
             bar = (e.get('payload') or {}).get('signal_bar_end')
             if bar:
-                signal_date.setdefault(sid, bar)
+                signal_date.setdefault(sid, str(bar))
+        # 退出时间：卖出成交或交易关闭事件的 observed_at（取最晚）
+        if e['event_type'] in ('fill_received', 'trade_closed'):
+            p = e.get('payload') or {}
+            is_exit = (e['event_type'] == 'trade_closed'
+                       or (e['event_type'] == 'fill_received' and p.get('side') == 'sell'))
+            if is_exit and e.get('observed_at'):
+                cur = signal_exit.get(sid, '')
+                if str(e['observed_at']) > cur:
+                    signal_exit[sid] = str(e['observed_at'])
 
-    buckets = {'train': [], 'val': [], 'test': [], 'unassigned': []}
+    buckets = {'train': [], 'val': [], 'test': [], 'excluded': [], 'unassigned': []}
     for sid, bar in sorted(signal_date.items()):
         try:
-            dt = datetime.fromisoformat(str(bar).replace('Z', '+00:00')).astimezone(timezone.utc)
-        except (ValueError, TypeError):
+            dt = _parse_timestamp(bar)
+        except ValueError:
             buckets['unassigned'].append(sid)
             continue
-        if dt < train_end:
-            buckets['train'].append(sid)
-        elif dt < val_end:
-            buckets['val'].append(sid)
-        elif test_end is None or dt < test_end:
-            buckets['test'].append(sid)
-        else:
+        exit_at = signal_exit.get(sid)
+        try:
+            exit_dt = _parse_timestamp(exit_at) if exit_at else None
+        except ValueError:
             buckets['unassigned'].append(sid)
+            continue
+
+        if exit_dt is not None:
+            # 有明确退出：标签窗口完整，检查是否跨边界
+            if dt < train_end:
+                buckets['excluded' if exit_dt >= train_end else 'train'].append(sid)
+            elif dt < val_end:
+                buckets['excluded' if exit_dt >= val_end else 'val'].append(sid)
+            elif test_end is None or dt < test_end:
+                buckets['test'].append(sid)
+            else:
+                buckets['unassigned'].append(sid)
+        else:
+            # 无退出（持仓中）：收益标签尚未实现，按信号时间分桶
+            if dt < train_end:
+                buckets['train'].append(sid)
+            elif dt < val_end:
+                buckets['val'].append(sid)
+            elif test_end is None or dt < test_end:
+                buckets['test'].append(sid)
+            else:
+                buckets['unassigned'].append(sid)
+
     return buckets
 
 

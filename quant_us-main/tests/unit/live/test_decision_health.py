@@ -88,6 +88,22 @@ class DecisionHealthContracts(unittest.TestCase):
         self.assertEqual(state['insufficient_count'], 1)
         self.assertEqual(state['failure_count'], 0)
 
+    def test_llm_pending_when_new_request_unfinished(self):
+        # 请求 A 完成、请求 B 未完成 → 当前 pending，不把旧成功当作本次已完成
+        events = [
+            {'event_type': 'llm_requested', 'review_id': 'r1',
+             'observed_at': '2026-09-04T10:00:00+00:00', 'payload': {}},
+            {'event_type': 'llm_completed', 'review_id': 'r1',
+             'observed_at': '2026-09-04T10:01:00+00:00',
+             'payload': {'status': 'complete'}},
+            {'event_type': 'llm_requested', 'review_id': 'r2',
+             'observed_at': '2026-09-04T10:02:00+00:00', 'payload': {}},
+        ]
+        state = llm_state(events, True)
+        self.assertEqual(state['status'], 'pending')
+        self.assertEqual(state['pending_count'], 1)
+        self.assertEqual(state['success_count'], 1)
+
     # ---------- 不可批准原因码 ----------
 
     def test_pending_review_reason(self):
