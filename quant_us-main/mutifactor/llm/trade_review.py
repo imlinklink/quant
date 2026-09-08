@@ -8,6 +8,9 @@ from scripts.live_trading.decision_ledger.event_store import digest, stable_id, 
 
 SCHEMA_VERSION = 'trade-review-v1'
 PROMPT_VERSION = 'trade-review-v1'
+# 稳定原因码（阶段 H1）：自然语言 reason 附属于原因码，不直接驱动程序
+REASONS = ('event_risk', 'regime_conflict', 'weak_confirmation',
+           'stale_evidence', 'poor_asymmetry', 'data_gap')
 CLAIM = {'type': 'object', 'required': ['text', 'evidence_ids'], 'additionalProperties': False,
          'properties': {'text': {'type': 'string', 'minLength': 1, 'maxLength': 1200},
                         'evidence_ids': {'type': 'array', 'items': {'type': 'string'}}}}
@@ -21,6 +24,7 @@ REVIEW_SCHEMA = {
         'recommendation': {'enum': ['support_execute', 'defer', 'oppose_execute']},
         'proposed_action': {'enum': ['buy', 'hold', 'reduce', 'exit', 'revise_plan']},
         'thesis_state': {'enum': ['unchanged', 'strengthened', 'weakened', 'invalidated', 'unknown']},
+        'reasons': {'type': 'array', 'items': {'enum': list(REASONS)}, 'maxItems': 4},
         'facts': {'type': 'array', 'items': CLAIM},
         'inferences': {'type': 'array', 'items': CLAIM},
         'counterevidence': {'type': 'array', 'items': CLAIM},
@@ -132,6 +136,8 @@ def validate_review(raw, snapshot, side, now=None, ttls=None):
         raise ValueError('有效评估必须提供依据')
     if not raw['counterevidence'] and not raw['missing_information']:
         raise ValueError('须提供反对证据或明确资料缺口')
+    if raw['recommendation'] in ('defer', 'oppose_execute') and not raw.get('reasons') and not raw['missing_information']:
+        raise ValueError('暂缓/反对须给出稳定原因码或资料缺口')
     expected = 'exit' if side == 'sell' else 'buy'
     if raw['recommendation'] == 'support_execute' and raw['proposed_action'] != expected:
         raise ValueError('支持执行的动作与订单方向不一致')
