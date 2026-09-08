@@ -104,10 +104,17 @@ async function load() {
     if (!data.generated_at) {
       s.innerHTML = '⚠️ 还没有生成建议。<br>先运行：<b>python scripts/live_trading/llm_suggestions/run_suggestions.py</b>';
     } else {
+      const gen = data._generated || {};
+      const srcPre = (data._sources || {}).pre || {};
+      const srcPost = (data._sources || {}).post || {};
+      const freshLabel = {fresh:'🟢 新鲜', stale:'🟡 陈旧', unknown_tz:'⚪ 时区未知',
+        future:'🔴 未来时间', missing:'⚪ 时间缺失', invalid:'⚪ 时间无效'}[data._freshness] || data._freshness || '-';
+      const srcTxt = (src) => src.status === 'missing' ? '无'
+        : esc(src.label || '-') + '（' + esc(src.fresh || src.status || '-') + '）';
       s.innerHTML = '<b>宏观结论：</b>' + esc(data.summary || '-') +
-        '<br><span class="muted">生成于 ' + esc(data.generated_at) +
-        ' · 盘前: ' + esc((data.reports || {}).pre ? '✓' : '无') +
-        ' · 盘后: ' + esc((data.reports || {}).post ? '✓' : '无') + '</span>';
+        '<br><span class="muted">生成于 ' + esc(data.generated_at) + '（' + esc(gen.label || '-') + '）· ' + esc(freshLabel) + '</span>' +
+        '<br><span class="muted">盘前来源: ' + srcTxt(srcPre) + ' · 盘后来源: ' + srcTxt(srcPost) +
+        '<br>来源时间只反映报告文件新旧，不代表其中行情/新闻已核实。</span>';
     }
     const el = document.getElementById('content');
     if (!cs.length) {

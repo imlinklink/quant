@@ -14,7 +14,7 @@ import argparse
 import logging
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parents[3]
@@ -143,10 +143,13 @@ def main():
     if dropped:
         logger.info(f'丢弃 {dropped} 条非{SELF_MARKET}市场候选（按市场分流）')
     payload = {
-        'generated_at': datetime.now().isoformat(timespec='seconds'),
+        'generated_at': datetime.now(timezone.utc).isoformat(timespec='seconds'),
         'reports': {
             'pre': str(pre_path) if pre_path else None,
             'post': str(post_path) if post_path else None,
+            # 来源报告时间 = 文件修改时间（与取得时间 generated_at 分开）
+            'pre_mtime': pre_path.stat().st_mtime if pre_path else None,
+            'post_mtime': post_path.stat().st_mtime if post_path else None,
         },
         'external_views': [
             {'source': v['source'], 'path': v.get('path')}
