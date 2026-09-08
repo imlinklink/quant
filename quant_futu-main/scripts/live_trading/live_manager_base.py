@@ -188,6 +188,7 @@ class LiveTradingManager(ABC):
         self.sell_approval_thread = None
         self._sell_processed_reject_ids: Set[str] = set()
         self._sell_reject_until: Dict[str, float] = {}
+        self._sell_expired_notified: Set[str] = set()
         self._positions_snapshot: Dict[str, Dict] = {}
         self._init_human_approval()
 
@@ -1297,7 +1298,8 @@ class LiveTradingManager(ABC):
             self.sell_approval_thread.start()
             logger.info(
                 f"{self.market_type}卖出确认线程已启动（LLM+人工，"
-                f"{int(float(self._sell_cfg().get('ttl_seconds', 300)))}s 超时自动卖出）"
+                f"{int(float(self._sell_cfg().get('ttl_seconds', 300)))}s 超时"
+                f"{'自动卖出' if self._sell_auto_execute_on_timeout() else '仅提示不执行'}）"
             )
 
         logger.info(f"{self.market_type}交易已启动（买入+持仓检查+卖出确认）")
@@ -2192,6 +2194,10 @@ class LiveTradingManager(ABC):
         except Exception:
             return {}
 
+    def _sell_auto_execute_on_timeout(self) -> bool:
+        """超时未确认是否自动市价卖出（默认 True；False=只提示不执行）。"""
+        return bool(self._sell_cfg().get('auto_execute_on_timeout', True))
+
     def sell_approval_enabled(self) -> bool:
         try:
             return (
@@ -2283,9 +2289,15 @@ class LiveTradingManager(ABC):
         market_ctx = ''
         if bool(self._sell_cfg().get('attach_market_context', True)):
             market_ctx = self._sell_market_context()
+        auto_execute = self._sell_auto_execute_on_timeout()
+        timeout_note = (
+            f'超时 {int(ttl)} 秒未确认将自动执行。'
+            if auto_execute else
+            f'超时 {int(ttl)} 秒未确认仅提示，不自动执行（需人工处理）。'
+        )
         reason_text = (
             f'【卖出确认】规则触发: {reason}；成本 {cost:.3f}，现价约 {price:.3f}，'
-            f'浮盈 {pnl * 100:+.1f}%；超时 {int(ttl)} 秒未确认将自动执行。'
+            f'浮盈 {pnl * 100:+.1f}%；{timeout_note}'
         )
         if market_ctx:
             reason_text += f'\n市场: {market_ctx}'
@@ -2346,10 +2358,12 @@ class LiveTradingManager(ABC):
                 name=f'{self.market_type}-Sell-LLM-{pid}',
             ).start()
 
-        logger.warning(
-            f"[卖出确认] {code} 推送卖出提案: {reason}（LLM=异步判定中，"
-            f"{int(ttl)}s 超时自动执行）—— 请到确认页点「卖出」或「继续持有」"
-        )
+            logger.warning(
+                f"[卖出确认] {code} 推送卖出提案: {reason}（LLM=异步判定中，"
+                f"{int(ttl)}s 超时"
+                f"{'自动执行' if auto_execute else '仅提示不执行'}）"
+                f"—— 请到确认页点「卖出」或「继续持有」"
+            )
         return True
 
     def _sell_market_open(self) -> bool:
@@ -2444,7 +2458,16 @@ class LiveTradingManager(ABC):
             if (item.get('side') == 'sell'
                     and item.get('status') == 'pending'
                     and now > float(item.get('expires_at') or 0)):
-                self._execute_sell_proposal(item['id'], auto=True)
+                pid = item.get('id')
+                if self._sell_auto_execute_on_timeout():
+                    self._execute_sell_proposal(pid, auto=True)
+                elif pid not in self._sell_expired_notified:
+                    self._sell_expired_notified.add(pid)
+                    logger.warning(
+                        f"[卖出确认] {item.get('stock_code')} 提案超时，"
+                        f"auto_execute_on_timeout=false：不自动卖出，"
+                        f"请在确认页人工处理（仍可点「卖出/继续持有」）"
+                    )
 
     def run_sell_approval_loop(self):
         interval = float(self._sell_cfg().get('poll_interval_sec', 10))
