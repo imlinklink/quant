@@ -108,7 +108,7 @@ class UnifiedSystem:
 
     def start(self):
         logger.info("=" * 60)
-        mode = "仅Web" if self.web_only else ("DRY-RUN" if self.dry_run else "REAL")
+        mode = "仅Web" if self.web_only else ("DRY-RUN" if self.dry_run else self.config.get('live_manager', {}).get('trd_env', 'SIMULATE'))
         logger.info(f"  🚀 美股交易系统启动  [{mode}]")
         logger.info("=" * 60)
 
@@ -225,14 +225,16 @@ def main():
 
     parser = argparse.ArgumentParser(description="美股交易系统统一入口")
     parser.add_argument("--dry-run", action="store_true", help="模拟模式（默认）")
-    parser.add_argument("--real", action="store_true", help="实盘模式")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--real", action="store_true", help="启用券商下单（环境取自配置）")
+    modes.add_argument("--simulate", action="store_true", help="连接模拟账户（要求配置为 SIMULATE）")
     parser.add_argument("--web-only", action="store_true", help="仅启动Web服务（调参用）")
     args = parser.parse_args()
 
     if args.web_only:
         mode = "web-only"
         dry_run = True
-    elif args.real:
+    elif args.real or args.simulate:
         mode = "real"
         dry_run = False
     else:
@@ -240,6 +242,8 @@ def main():
         dry_run = True
 
     system = UnifiedSystem(dry_run=dry_run, web_only=args.web_only)
+    if args.simulate and system.config.get('live_manager', {}).get('trd_env') != 'SIMULATE':
+        parser.error('--simulate 要求 live_manager.trd_env=SIMULATE')
 
     def signal_handler(sig, frame):
         system.shutdown()
