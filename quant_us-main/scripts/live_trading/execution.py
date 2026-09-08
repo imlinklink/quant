@@ -119,11 +119,17 @@ class ExecutionService:
         avg = float(report.get('dealt_avg_price') or 0)
         with self.registry.transaction() as book:
             order = book['orders'][pid]
-            if not math.isfinite(filled) or filled < order.get('filled_qty', 0) or filled > order['qty']:
+            if not math.isfinite(filled) or filled > order['qty']:
                 raise ValueError('订单累计成交数量异常')
+            if filled < order.get('filled_qty', 0):
+                # 累计数量倒退：进入待核对，不静默改写；券商更正由 apply_correction 应用
+                self._flag_reconciling(book, pid, '累计成交数量倒退')
+                return 'reconciling'
             delta = filled - order.get('filled_qty', 0)
             if delta and order['status'] in TERMINAL:
-                raise ValueError('终结订单出现新增成交，需核对券商更正，禁止静默改写已冻结R0')
+                # 终结订单新增成交：进入待核对，禁止静默改写已冻结 R0
+                self._flag_reconciling(book, pid, '终结订单出现新增成交')
+                return 'reconciling'
             if delta and not finite_positive(avg):
                 raise ValueError('成交均价缺失，保留订单等待对账')
             previous_amount = float(order.get('filled_amount', order.get('filled_qty', 0)*order.get('avg_price', 0)))
@@ -243,6 +249,114 @@ class ExecutionService:
                         {'status': order['status'], 'filled_qty': filled, 'quantity': order['qty']}, **links)
             saved = dict(order)
         self.publish(saved)
+
+    def _flag_reconciling(self, book, pid, reason):
+        """发现差异时标记待核对并记录事件；不静默修成表面一致。"""
+        order = book['orders'][pid]
+        order['status'] = 'reconciling'
+        order['reconcile_reason'] = reason
+        order['reconcile_flagged_at'] = time.time()
+        links = {k: order.get('proposal', {}).get(k) for k in ('signal_id', 'plan_id', 'plan_version', 'review_id')}
+        links.update(proposal_id=pid, order_intent_id=order.get('order_intent_id', ''))
+        enqueue(book, self.registry.namespace, 'correction_needed', [pid, reason],
+                {'reason': reason, 'status': 'reconciling'}, **links)
+
+    def apply_correction(self, pid, correction):
+        """人工对账确认后应用券商成交更正。事务一致，追加事件保留原记录。
+
+        correction: {correction_id, reason, dealt_qty?, dealt_avg_price?, cumulative_fee?}
+        - dealt_qty/dealt_avg_price: 更正后的累计成交数量/均价（终结订单新增成交或数量倒退）
+        - cumulative_fee: 更正后的累计费用（缺失后补齐 / 上调 / 下调 / 退款）
+        R0 一旦冻结不再被重写；更正只追加事件与修订计数。
+        """
+        cid = str(correction.get('correction_id') or '').strip()
+        reason = str(correction.get('reason') or '').strip()
+        if not cid or not reason:
+            raise ValueError('更正必须带 correction_id 与理由')
+        with self.registry.transaction() as book:
+            order = book['orders'].get(pid)
+            if not order:
+                raise ValueError('订单不存在')
+            applied = set(order.get('applied_corrections') or [])
+            if cid in applied:
+                return order['status']  # 幂等：同一 correction_id 重复回放不重复应用
+            links = {k: order.get('proposal', {}).get(k) for k in ('signal_id', 'plan_id', 'plan_version', 'review_id')}
+            links.update(proposal_id=pid, order_intent_id=order.get('order_intent_id', ''))
+            before = dict(filled_qty=order.get('filled_qty', 0), avg_price=order.get('avg_price', 0),
+                          cumulative_fee=order.get('cumulative_fee'), status=order['status'],
+                          fee_revision=order.get('fee_revision', 0))
+            trades = book.setdefault('trades', {})
+            trade = trades.get(order.get('trade_id'))
+
+            # ---- 数量更正：重算成交增量（终结订单新增成交 / 数量倒退） ----
+            if 'dealt_qty' in correction:
+                new_qty = float(correction['dealt_qty'])
+                if not math.isfinite(new_qty) or new_qty < 0 or new_qty > order['qty']:
+                    raise ValueError('更正数量非法')
+                old_qty = float(order.get('filled_qty', 0))
+                delta_qty = new_qty - old_qty
+                if delta_qty:
+                    new_avg = float(correction.get('dealt_avg_price') or order.get('avg_price', 0))
+                    if not finite_positive(new_avg):
+                        raise ValueError('成交均价缺失，无法应用数量更正')
+                    amount = new_qty * new_avg
+                    delta_amount = amount - float(order.get('filled_amount', old_qty * float(order.get('avg_price', 0))))
+                    fill_id = stable_id('fill', self.registry.namespace, order.get('order_id', '') or pid, new_qty)
+                    fill = dict(fill_id=fill_id, order_intent_id=links['order_intent_id'],
+                                broker_order_id=order.get('order_id', ''), proposal_id=pid,
+                                trade_id=order.get('trade_id'), code=order['code'], side=order['side'],
+                                qty=delta_qty, amount=delta_amount, price=delta_amount / delta_qty,
+                                cumulative_qty=new_qty, cumulative_amount=amount, fee_delta=None,
+                                correction_id=cid)
+                    book.setdefault('fills', []).append(fill)
+                    enqueue(book, self.registry.namespace, 'fill_received', fill_id, fill, fill_id=fill_id, **links)
+                    order.update(filled_qty=new_qty, filled_amount=amount, avg_price=new_avg, updated_at=time.time())
+                    pos = book['positions'].get(order['code'])
+                    if order['side'] == 'buy':
+                        if pos is None:
+                            pos = dict(order['metadata'], code=order['code'], opened_at=time.time(), qty=0)
+                            book['positions'][order['code']] = pos
+                        pos.update(qty=new_qty, entry_price=new_avg, trade_id=order.get('trade_id'))
+                    elif pos:
+                        left = max(0, float(pos['qty']) - delta_qty)
+                        if left:
+                            pos['qty'] = left
+                        else:
+                            del book['positions'][order['code']]
+                    if trade:
+                        prefix = 'entry' if order['side'] == 'buy' else 'exit'
+                        trade[prefix + '_qty'] = float(trade.get(prefix + '_qty', 0)) + delta_qty
+                        trade[prefix + '_amount'] = float(trade.get(prefix + '_amount', 0)) + delta_amount
+                        # 更正不得重写已冻结 R0，只记修订计数
+                        if trade.get('initial_r0') is not None:
+                            trade['r0_revision'] = int(trade.get('r0_revision', 0)) + 1
+                    order['status'] = 'filled' if new_qty == order['qty'] else 'partially_filled'
+
+            # ---- 费用更正 ----
+            if 'cumulative_fee' in correction:
+                new_fee = float(correction['cumulative_fee'])
+                if not math.isfinite(new_fee) or new_fee < 0:
+                    raise ValueError('更正费用非法')
+                fee_delta = new_fee - float(order.get('cumulative_fee') or 0)
+                order['cumulative_fee'] = new_fee
+                order['fee_revision'] = int(order.get('fee_revision', 0)) + 1
+                if trade:
+                    trade['fees'] = float(trade.get('fees', 0)) + fee_delta
+                enqueue(book, self.registry.namespace, 'fee_adjusted', [pid, order['fee_revision']],
+                        {'cumulative_fee': new_fee, 'delta': fee_delta, 'correction_id': cid}, **links)
+
+            # 记录已应用更正（幂等键，重复回放不重复应用）
+            applied.add(cid)
+            order['applied_corrections'] = list(applied)
+            # 追加更正事件（保留 before 快照，可审计；correction_id 幂等）
+            enqueue(book, self.registry.namespace, 'correction_applied', cid,
+                    {'correction_id': cid, 'reason': reason, 'before': before,
+                     'after': dict(filled_qty=order.get('filled_qty', 0), avg_price=order.get('avg_price', 0),
+                                   cumulative_fee=order.get('cumulative_fee'), status=order['status'])},
+                    **links)
+            saved = dict(order)
+        self.publish(saved)
+        return saved['status']
 
     def fresh_quote(self, code):
         import pandas as pd
@@ -470,3 +584,22 @@ def execute_approved_buy(owner, item):
             service.publish(order)
         else:
             owner.approval_store.mark(pid, 'failed', note=str(exc))
+
+
+def record_broker_sample(sample, path=None):
+    """留存脱敏券商字段样例：只保留字段名与值类型，不落敏感值/凭证。
+
+    在写/校准券商适配器前先留真实字段样例，供成交更正与费用补齐设计参考。
+    """
+    import json as _json
+    from pathlib import Path as _Path
+    out = {}
+    for k, v in (sample or {}).items():
+        if str(k).lower() in ('api_key', 'token', 'authorization', 'password', 'secret', 'cookie'):
+            continue
+        out[str(k)] = type(v).__name__
+    path = _Path(path or _Path(__file__).resolve().parents[1] / 'data' / 'broker_samples.jsonl')
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open('a', encoding='utf-8') as f:
+        f.write(_json.dumps({'ts': time.time(), 'fields': out}, ensure_ascii=False) + '\n')
+    return out
