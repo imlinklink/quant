@@ -49,19 +49,19 @@ class DailySelectionContracts(unittest.TestCase):
         from unittest.mock import patch
         from scripts.live_trading import signal_context as sc
 
-        fake_ctx = {
-            'earnings': {'date': '2026-09-20', 'eps_forecast': '1.2'},
-            'news': [
-                {'title': '公司发布业绩', 'publisher': 'test',
-                 'observed_at': '2026-09-08T10:00:00+00:00',
-                 'published_at': '2026-09-07T00:00:00+00:00'},
-            ],
-        }
-        with patch.object(sc, 'fetch_signal_context', return_value=fake_ctx):
+        fake_news = [
+            {'title': '公司发布业绩', 'publisher': '富途·公告', 'kind': 'filing',
+             'observed_at': '2026-09-08T10:00:00+00:00',
+             'published_at': '2026-09-07T00:00:00+00:00'},
+            {'title': '盘中资讯', 'publisher': '富途·资讯', 'kind': 'news',
+             'observed_at': '2026-09-08T10:00:00+00:00',
+             'published_at': '2026-09-08T09:00:00+00:00'},
+        ]
+        with patch.object(sc, 'fetch_futu_news', return_value=fake_news):
             ev = sc.fetch_event_evidence('US.A')
         self.assertTrue(all(e.get('evidence_id') for e in ev))
-        self.assertTrue(any(e['kind'] == 'filing' for e in ev))  # 财报
-        self.assertTrue(any(e['kind'] == 'news' for e in ev))    # 新闻
+        self.assertTrue(any(e['kind'] == 'filing' for e in ev))  # 公告
+        self.assertTrue(any(e['kind'] == 'news' for e in ev))    # 资讯
 
     def test_build_packet_includes_external_events(self):
         events = [{'summary': '公司发布业绩', 'source': 'filing',
