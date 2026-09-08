@@ -1,0 +1,45 @@
+# 合并至现有配置，不要用此片段覆盖完整config.yaml。
+risk_budget:
+  max_positions: 3
+  per_trade: 0.0025
+  total: 0.015
+  max_position_fraction: 0.15
+  cost_per_share: 0.05
+  dry_run_equity: 100000
+  group_limits:
+    semis: 0.0075
+    china: 0.005
+    speculative: 0.0025
+  code_groups:
+    US.SNDK: semis
+    US.MU: semis
+    US.MULL: semis
+    US.SOXL: semis
+    US.LITE: semis
+    US.AXTI: semis
+    US.YINN: china
+    US.RAM: speculative
+pullback:
+  enabled: false
+  shadow_only: true
+  check_interval: 60
+  max_stop_atr: 2.0
+  ma_buffer_atr: 0.5
+  min_rr: 1.5
+  underlying_sources:
+    US.SOXL: US.SOXX
+    US.MULL: US.MU
+    US.YINN: US.FXI
+  sector_proxies:
+    semis: US.SOXX
+    china: US.FXI
+    speculative: US.IWM
+breakout_retest:
+  enabled: false
+  shadow_only: true
+  check_interval: 60
+dip_buy:
+  time_exit_bars: 8
+trend_breakout:
+  max_chase_atr: 0.5
+  failure_sessions: 3
