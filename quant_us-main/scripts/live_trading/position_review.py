@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 from mutifactor.llm.trade_review import build_input, validate_review
 from .decision_ledger.event_store import EventStore, insert_event, make_event, stable_id, utc
+from .decision_ledger.thesis_ledger import ThesisLedger
 from .decision_ledger.workflow import review_queue
 
 
@@ -18,6 +19,7 @@ class PositionReviewScheduler:
         self.events = EventStore(registry)
         self.advisor = advisor
         self.config = config or {}
+        self.thesis = ThesisLedger(registry)
         self.last_check = {}
 
     def schedule(self, code, price, now=None, evidence_items=(), event_reason=None):
@@ -75,6 +77,17 @@ class PositionReviewScheduler:
                           raw_output=raw, plan_change_applied=False,
                           comparison='无新增独立证据，保持原批准计划' if not evidence_items else '建议需人工审阅并另行确认')
             self.events.record('position_reviewed',rid,review,**links)
+            # thesis ledger：仅有效评审更新逻辑状态（delta 由程序计算；无新证据不改状态）
+            if review.get('status') == 'complete' and review.get('thesis_state'):
+                try:
+                    self.thesis.record_review(
+                        trade_id=links.get('trade_id'), code=record['code'],
+                        plan_id=plan['plan_id'], plan_version=plan['plan_version'],
+                        review_id=rid, review=review,
+                        evidence_items=evidence_items, trigger=trigger)
+                except Exception:
+                    # thesis 记录失败不影响评审主流程
+                    pass
 
         try:
             review_queue(self.config).put(0 if trigger=='near_risk_boundary' else 2,run)
