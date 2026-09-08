@@ -158,10 +158,18 @@ def run_selection(config, advisor, fetcher, now=None, dry_run=False):
     bars_map = fetcher.fetch_multiple_stocks(universe, start, end) if fetcher else {}
 
     from scripts.live_trading import signal_context as sc
+    from scripts.live_trading import option_view as ov
     risk_group = (config.get('risk_budget', {}).get('code_groups') or {})
     packets = []
     for code in universe:
         events = sc.fetch_event_evidence(code)
+        # P1 期权市场视角：作为参考证据并入 packet（失败降级为空，不影响选股）
+        try:
+            oview = ov.fetch_option_view(code)
+            if oview and not oview.get('error'):
+                events = list(events) + [ov.make_option_evidence(code, oview, now=now)]
+        except Exception:
+            pass
         p = build_packet_from_bars(code, bars_map.get(code), risk_group=risk_group.get(code),
                                    events=events, now=now)
         if p is not None:
