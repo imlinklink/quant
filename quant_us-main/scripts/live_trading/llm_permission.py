@@ -42,8 +42,12 @@ def level_for(permission, config):
 
 
 def permits(permission, level):
-    """某项权限在 level 下是否允许其动作被执行（constrain 才真正改量）。"""
-    return level in (PermissionLevel.CONSTRAINED_ACTION, PermissionLevel.RECOMMEND)
+    """某项权限在 level 下是否允许其动作被执行。
+
+    仅 constrained_action 允许真正执行；recommend/shadow 只记录建议不执行。
+    语义默认拒绝：recommend 不代表可动作。
+    """
+    return level == PermissionLevel.CONSTRAINED_ACTION
 
 
 def allowed_scale(permission, level, proposed_scale):
@@ -58,19 +62,22 @@ def allowed_scale(permission, level, proposed_scale):
         return 1.0, False  # 1.0x = 现有上限，无变化；加档>1.0 永远不允许
     if proposed_scale < 0:
         return 1.0, False
-    # 只有 constrained_action 真正应用降档；recommend 只记录不应用
-    if level != PermissionLevel.CONSTRAINED_ACTION:
-        return 1.0, False
     return float(proposed_scale), True
 
 
 def eligibility_met(stats, thresholds):
-    """J3 门槛：stats={'independent_samples','market_phases','improved','data_leak_checked'}，
-    thresholds 对应最小值。全部满足才算可升级。"""
+    """J3 门槛（默认拒绝）：stats={'independent_samples','market_phases','improved','data_leak_checked'}。
+
+    必须显式提供 thresholds（min_samples / min_market_phases / require_improvement），
+    缺省或未通过数据泄漏检查 → 不满足（fail-closed），避免默认 0 门槛被误升级。
+    """
     thresholds = thresholds or {}
+    # 默认拒绝：缺关键门槛或未配置则视为不满足
+    if 'min_samples' not in thresholds or 'min_market_phases' not in thresholds:
+        return False, {'_config': 'missing_thresholds', 'eligible': False}
     checks = {
         'independent_samples': stats.get('independent_samples', 0) >= thresholds.get('min_samples', 0),
-        'market_phases': stats.get('market_phases', 0) >= thresholds.get('min_market_phases', 1),
+        'market_phases': stats.get('market_phases', 0) >= thresholds.get('min_market_phases', 0),
         'data_leak_checked': bool(stats.get('data_leak_checked', False)),
     }
     if thresholds.get('require_improvement', False):
@@ -79,7 +86,10 @@ def eligibility_met(stats, thresholds):
 
 
 def promote_candidate(permission, config, stats, thresholds):
-    """判断某项权限是否满足从 shadow 升到 recommend 的门槛（J3）。只读判定。"""
+    """判断某项权限是否满足从 shadow 升到 recommend 的门槛（J3）。只读判定。
+
+    门槛必须显式配置；未配置或未满足 → 不升级（默认拒绝）。
+    """
     current = level_for(permission, config)
     if current not in (PermissionLevel.SHADOW, PermissionLevel.RECOMMEND):
         return False

@@ -92,27 +92,40 @@ class ThesisLedger:
                       review, evidence_items, trigger, now=None):
         """把一次持仓评审写入 thesis 账本。
 
-        计算 delta（相对上一版引用证据）、状态转移（无新证据不改）、
-        追加 thesis_updated 事件（幂等：同 trade+version 不重复写）。
+        P1-4 收紧：只有「模型实际引用了本轮新增证据」才允许状态变化——
+        has_new_evidence = (delta.added ∩ 本轮输入证据 id) 非空；
+        并校验模型所有 cited_ids 都属于冻结输入（本轮 evidence_items）。
+        状态不变不写版本；追加 thesis_updated 事件（幂等）。
         """
         prev = self.load_updates(trade_id)
         prev_state = prev[-1].get('state') if prev else None
         prev_cited = prev[-1].get('cited_ids', []) if prev else []
 
         new_cited = sorted(cited_evidence_ids(review))
-        has_new_evidence = bool(evidence_items)
-        near_risk = trigger == 'near_risk_boundary'
+        delta = build_delta(prev_cited, new_cited)
 
+        # 冻结输入 = 本轮 evidence_items 的证据 id（可能是 dict 或 id 字符串）
+        input_ids = set()
+        for e in evidence_items or []:
+            if isinstance(e, dict) and e.get('evidence_id'):
+                input_ids.add(str(e['evidence_id']))
+            elif isinstance(e, str) and e:
+                input_ids.add(e)
+        # 校验：模型引用必须都在冻结输入内（不在则不计入“新增”，且记录越界引用）
+        cited_outside_input = sorted(set(new_cited) - input_ids) if input_ids else []
+        added_in_input = sorted(set(delta.get('added', [])) & input_ids) if input_ids else []
+
+        near_risk = trigger == 'near_risk_boundary'
+        # 状态变化条件：新增证据且被模型实际引用（delta.added ∩ 输入非空），或价格触保护线
+        has_new_evidence = bool(added_in_input)
         adopted, note = apply_transition(prev_state,
                                          (review or {}).get('thesis_state'),
                                          has_new_evidence, near_risk)
-        delta = build_delta(prev_cited, new_cited)
 
         version = (prev[-1].get('version', 0) + 1) if prev else 1
         # 只在状态真正变化时写新版本（首次建立 / 状态改变）；无变化不产生噪音版本。
         if prev_state is not None and adopted == prev_state:
             return None
-        # 版本仅在状态真正改变时递增；状态不变也记录一次观察（含 delta/触发）
         entry = {
             'version': version,
             'state': adopted,
@@ -122,10 +135,10 @@ class ThesisLedger:
             'review_id': review_id,
             'cited_ids': new_cited,
             'delta': delta,
+            'cited_outside_input': cited_outside_input,
             'note': note,
             'shadow_only': True,
         }
-        # 幂等写入：同 trade + version 不重复（EventStore.record 按 event_id 去重）
         self.events.record('thesis_updated', [trade_id, version],
                            dict(entry, code=code, plan_id=plan_id, trade_id=trade_id),
                            trade_id=trade_id, plan_id=plan_id,

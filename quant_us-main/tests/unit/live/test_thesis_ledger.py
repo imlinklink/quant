@@ -78,60 +78,79 @@ class ThesisLedgerStoreContracts(unittest.TestCase):
         self.registry = PositionRegistry(Path(self.tmp.name) / 'state.db', 'DRY-RUN')
         self.ledger = ThesisLedger(self.registry)
 
-    def _rec(self, thesis_state, cited=(), has_ev=False, trigger='session_close'):
+    def _rec(self, thesis_state, cited=(), provided=(), trigger='session_close'):
+        """evidence_items=本轮冻结输入；cited=模型引用。未被引用的新证据不应触发状态变化。"""
+        items = [{'evidence_id': x} for x in provided]
         return self.ledger.record_review(
             trade_id=TRADE, code='US.A', plan_id='p1', plan_version=1,
             review_id='r1', review=_review(thesis_state, cited),
-            evidence_items=['e1'] if has_ev else [], trigger=trigger)
+            evidence_items=items, trigger=trigger)
 
     def test_record_and_replay(self):
-        # 首次建立
-        self._rec('unchanged', cited=['a'])
-        # 无新证据 → weakened 不采纳，也不写新版本
-        self._rec('weakened', cited=['a'], has_ev=False)
-        # 有新证据 → strengthened
-        self._rec('strengthened', cited=['a', 'b'], has_ev=True)
-        # 有新证据 → invalidated
-        self._rec('invalidated', cited=['a', 'b', 'c'], has_ev=True, trigger='new_evidence')
+        # 首次建立（引用新证据 a）
+        self._rec('unchanged', cited=['a'], provided=['a'])
+        # 模型建议 weakened，但只引用旧 a，未引用本轮新证据 b → 不改
+        self._rec('weakened', cited=['a'], provided=['a', 'b'])
+        # 引用新证据 c → strengthened
+        self._rec('strengthened', cited=['a', 'c'], provided=['a', 'b', 'c'])
+        # 引用新证据 d → invalidated
+        self._rec('invalidated', cited=['a', 'c', 'd'], provided=['a', 'c', 'd'],
+                  trigger='new_evidence')
 
         updates = self.ledger.load_updates(TRADE)
         states = [u['state'] for u in updates]
         self.assertEqual(states, ['established', 'strengthened', 'invalidated'])
         self.assertEqual(self.ledger.current(TRADE), 'invalidated')
-        # delta：最后一步 added=c
-        self.assertEqual(updates[-1]['delta']['added'], ['c'])
+        # delta：最后一步 added=d
+        self.assertEqual(updates[-1]['delta']['added'], ['d'])
 
     def test_no_change_does_not_write(self):
-        self._rec('unchanged', cited=['a'])
+        self._rec('unchanged', cited=['a'], provided=['a'])
         self.assertEqual(len(self.ledger.load_updates(TRADE)), 1)
         # 无新证据、状态不变 → 不产生新版本
-        self._rec('unchanged', cited=['a'], has_ev=False)
+        self._rec('unchanged', cited=['a'], provided=['a'])
         self.assertEqual(len(self.ledger.load_updates(TRADE)), 1)
 
+    def test_uncited_new_evidence_does_not_change(self):
+        # 本轮提供新证据 b，但模型仍只引用旧 a → thesis 不得变化（P1-4）
+        self._rec('unchanged', cited=['a'], provided=['a'])
+        self._rec('invalidated', cited=['a'], provided=['a', 'b'])
+        updates = self.ledger.load_updates(TRADE)
+        self.assertEqual([u['state'] for u in updates], ['established'])
+
+    def test_cited_outside_input_is_rejected(self):
+        # 模型引用不在冻结输入里的 id → 不应触发状态变化（cataloged）
+        self._rec('unchanged', cited=['a'], provided=['a'])
+        self._rec('strengthened', cited=['zzz'], provided=['a'])
+        updates = self.ledger.load_updates(TRADE)
+        self.assertEqual([u['state'] for u in updates], ['established'])
+
     def test_delta_added_between_reviews(self):
-        self._rec('unchanged', cited=['a'], has_ev=True)
-        self._rec('strengthened', cited=['a', 'b'], has_ev=True, trigger='new_evidence')
+        self._rec('unchanged', cited=['a'], provided=['a'])
+        self._rec('strengthened', cited=['a', 'b'], provided=['a', 'b'],
+                  trigger='new_evidence')
         updates = self.ledger.load_updates(TRADE)
         self.assertEqual(updates[-1]['delta']['added'], ['b'])
 
     def test_mark_closed(self):
-        self._rec('unchanged', cited=['a'])
+        self._rec('unchanged', cited=['a'], provided=['a'])
         self.ledger.mark_closed(trade_id=TRADE, reason='time_exit')
         self.assertEqual(self.ledger.current(TRADE), 'closed')
 
     def test_version_sequence_and_idempotent(self):
         # 状态连续变化两次 → version 1,2
-        self._rec('unchanged', cited=['a'], has_ev=True)         # established v1
-        self._rec('invalidated', cited=['a', 'b'], has_ev=True)  # invalidated v2
+        self._rec('unchanged', cited=['a'], provided=['a'])          # established v1
+        self._rec('invalidated', cited=['a', 'b'], provided=['a', 'b'])  # invalidated v2
         updates = self.ledger.load_updates(TRADE)
         self.assertEqual([u['version'] for u in updates], [1, 2])
         # 重复相同 record_review 不再产生新版本
-        self._rec('unchanged', cited=['a'], has_ev=True)
+        self._rec('unchanged', cited=['a'], provided=['a'])
         self.assertEqual(len(self.ledger.load_updates(TRADE)), 2)
 
     def test_compare_actual_exit(self):
-        self._rec('unchanged', cited=['a'], has_ev=True)
-        self._rec('invalidated', cited=['a', 'b'], has_ev=True, trigger='new_evidence')
+        self._rec('unchanged', cited=['a'], provided=['a'])
+        self._rec('invalidated', cited=['a', 'b'], provided=['a', 'b'],
+                  trigger='new_evidence')
         # 造一个 trade_closed 事件（用 events.transaction 拿真实 con）
         ev = make_event(self.registry.namespace, 'trade_closed', 'k',
                         {'status': 'closed'}, trade_id=TRADE)

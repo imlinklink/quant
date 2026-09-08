@@ -1,35 +1,52 @@
 """固定窗口结果（阶段 G3）：为研究候选计算 1/3/5/10 会话收益/MFE/MAE，比较排序质量。
 
 纯函数，离线使用。不触发 LLM、不下单、不改交易状态。
+无前视约束：以「决策时点 as_of」为准，只允许使用在该时点已经收盘（bar_date+CLOSE_HOUR_UTC <= as_of）
+的日 K 作为决策基准；收益窗口从该基准 bar 之后的下一根已收盘 K 开始。
 """
 import math
 
 import numpy as np
 import pandas as pd
 
+# 与 run_daily_selection / evidence_packet 一致：日 K 收盘标记（UTC 22 点，覆盖美东冬/夏令时收盘）
+CLOSE_HOUR_UTC = 22.0
+
+
+def _utc(ts):
+    ts = pd.Timestamp(ts)
+    if ts.tzinfo is None:
+        ts = ts.tz_localize('UTC')
+    return ts.tz_convert('UTC')
+
 
 def compute_window_outcomes(bars, codes, as_of, horizons=(1, 3, 5, 10)):
     """对每个 code，从 as_of 起计算未来 N 会话的收益 / MFE / MAE。
 
     bars: DataFrame，含 code/date/open/high/low/close，date 为 UTC。
-    返回 {code: {horizon: {'return','mfe','mae','complete'}}}。
-    数据不足（未来不足 N 会话）标 complete=False，不伪造收益。
+    as_of: 决策时点（数据截止/生成时间）。只有 as_of 之前已收盘的日 K 可作决策基准；
+          收益窗口从基准 bar 的下一根已收盘 K 开始。数据不足标 complete=False。
     """
-    as_of = pd.Timestamp(as_of)
-    if as_of.tzinfo is None:
-        as_of = as_of.tz_localize('UTC')
+    as_of = _utc(as_of)
     out = {}
     for code in codes:
         df = bars[bars['code'] == code].sort_values('date')
-        prior = df[df['date'] <= as_of]
-        if prior.empty:
+        if df.empty:
             out[code] = {h: {'complete': False} for h in horizons}
             continue
-        base = float(prior['close'].iloc[-1])
+        # 决策基准 = 最后一根「在 as_of 时已收盘」的日 K（避免把盘中/未收盘价当决策价）
+        closed = df[df['date'] + pd.Timedelta(hours=CLOSE_HOUR_UTC) <= as_of]
+        if closed.empty:
+            out[code] = {h: {'complete': False} for h in horizons}
+            continue
+        base_row = closed.iloc[-1]
+        base = float(base_row['close'])
+        base_date = base_row['date']
         if not math.isfinite(base) or base <= 0:
             out[code] = {h: {'complete': False} for h in horizons}
             continue
-        future = df[df['date'] > as_of]
+        # 收益窗口：基准 bar 之后的所有 bar（下一可成交时点 = 下一交易日）
+        future = df[df['date'] > base_date]
         per = {}
         for h in horizons:
             win = future.head(h)

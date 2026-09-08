@@ -42,6 +42,32 @@ class SelectionOutcomesContracts(unittest.TestCase):
                                            as_of='2026-09-30', horizons=(10,))
         self.assertFalse(outcomes['US.A'][10]['complete'])
 
+    def test_intraday_as_of_does_not_use_unclosed_today_bar(self):
+        # P1-3：盘中 as_of 时，当日尚未收盘的 K 不得作为决策基准。
+        # 构造：09-04 当天有一根「暴涨收盘」bar，但 as_of=09-04 12:00（盘中）→ 基准应为 09-03，而非 9999。
+        rows = []
+        dates = pd.date_range('2026-08-24', periods=20, freq='B', tz='UTC')  # 到 09-18 附近
+        # 强制把最后一根放到 09-04，并给它离谱收盘 9999
+        for i, d in enumerate(dates):
+            if d.normalize() == pd.Timestamp('2026-09-04', tz='UTC'):
+                continue
+            px = 100.0 + i
+            rows.append({'code': 'US.A', 'date': d, 'open': px, 'high': px + 1,
+                         'low': px - 1, 'close': px})
+        rows.append({'code': 'US.A', 'date': pd.Timestamp('2026-09-04', tz='UTC'),
+                     'open': 120, 'high': 9999, 'low': 119, 'close': 9999})
+        bars = pd.DataFrame(rows).sort_values('date')
+        # 盘中：09-04 12:00 还没到 09-04 22:00 收盘标记 → 当日 bar 不可用
+        out = compute_window_outcomes(bars, ['US.A'], as_of='2026-09-04T12:00:00+00:00',
+                                      horizons=(1,))
+        self.assertTrue(out['US.A'][1]['complete'])
+        # 基准收益应从 09-03 收盘算，绝不会出现把 9999 当 base 的 -98% 假收益
+        self.assertGreater(out['US.A'][1]['return'], -0.5)
+        # 收盘后（09-04 23:00）当日 bar 已收盘 → base=9999，1 日后收益可负
+        out2 = compute_window_outcomes(bars, ['US.A'], as_of='2026-09-04T23:00:00+00:00',
+                                       horizons=(1,))
+        self.assertLess(out2['US.A'][1]['return'], -0.5) if out2['US.A'][1]['complete'] else None
+
     def test_rank_ic_perfect_and_reversed(self):
         ranked = ['US.A', 'US.B', 'US.C']
         good = {'US.A': {1: {'complete': True, 'return': 0.3}},

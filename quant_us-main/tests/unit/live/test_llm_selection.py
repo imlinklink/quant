@@ -29,7 +29,7 @@ def _candidate(code, catalyst=(), counter=()):
     return {'code': code, 'rank': 1, 'horizon': '1-5_sessions', 'thesis': 'x',
             'catalyst_evidence_ids': list(catalyst), 'counterevidence_ids': list(counter),
             'preferred_entry_mode': 'none', 'watch_conditions': [], 'invalidators': [],
-            'confidence_bucket': 'medium', 'missing_information': []}
+            'confidence_bucket': 'medium', 'missing_information': ['缺财报']}
 
 
 class SelectionContracts(unittest.TestCase):
@@ -74,6 +74,47 @@ class SelectionContracts(unittest.TestCase):
         self.assertNotIn('proposal_id', batch)
         self.assertNotIn('order_id', batch)
 
+    def test_batch_id_frozen_by_packet_content(self):
+        # P1-2：不同行情内容的 packet 必须产生不同 research_batch_id / packets_hash
+        import copy
+        p1 = _packet('US.A')
+        p2 = copy.deepcopy(p1)
+        p2['quote'] = dict(p1['quote'], price=9999.0)
+        b1 = rank(_FakeAdvisor(raw={'candidates': []}), ['US.A'], [p1])
+        b2 = rank(_FakeAdvisor(raw={'candidates': []}), ['US.A'], [p2])
+        self.assertNotEqual(b1['packets_hash'], b2['packets_hash'])
+        self.assertNotEqual(b1['research_batch_id'], b2['research_batch_id'])
+        self.assertIn('packets_hash', b1)
+        self.assertIn('packet_ids', b1)
+
+    def test_duplicate_code_rejected(self):
+        eid = self.packets[0]['events'][0]['evidence_id']
+        raw = {'candidates': [_candidate('US.A', catalyst=[eid]),
+                              _candidate('US.A', catalyst=[eid])]}
+        with self.assertRaisesRegex(ValueError, '重复代码'):
+            validate_selection(raw, self.universe, self.packets)
+
+    def test_duplicate_rank_rejected(self):
+        eid = self.packets[0]['events'][0]['evidence_id']
+        raw = {'candidates': [_candidate('US.A', catalyst=[eid]),
+                              _candidate('US.B', catalyst=[eid])]}  # 两个 rank 都=1
+        with self.assertRaisesRegex(ValueError, '重复 rank'):
+            validate_selection(raw, self.universe, self.packets)
+
+    def test_rank_gap_rejected(self):
+        eid = self.packets[0]['events'][0]['evidence_id']
+        c = _candidate('US.A', catalyst=[eid])
+        c['rank'] = 2  # 跳过 1 → 断裂
+        with self.assertRaisesRegex(ValueError, 'rank 断裂'):
+            validate_selection({'candidates': [c]}, self.universe, self.packets)
+
+    def test_no_support_evidence_rejected(self):
+        # P1-5：既无支持证据也无资料不足 → 拒绝
+        c = _candidate('US.A', catalyst=[], counter=[])
+        c['missing_information'] = []
+        with self.assertRaisesRegex(ValueError, '支持证据'):
+            validate_selection({'candidates': [c]}, self.universe, self.packets)
+
     def test_research_batch_persisted(self):
         import tempfile
         from pathlib import Path
@@ -89,6 +130,30 @@ class SelectionContracts(unittest.TestCase):
             batches = sstore.load_research_batches()
             self.assertEqual(len(batches), 2)
             self.assertEqual(sstore.load_latest_research_batch()['research_batch_id'], 'b2')
+
+    def test_research_batch_idempotent_and_conflict(self):
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        from scripts.live_trading.llm_suggestions import store as sstore
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        p = Path(tmp.name) / 'batches.jsonl'
+        b1 = {'research_batch_id': 'same', 'universe_hash': 'h1', 'packets_hash': 'p1',
+              'candidates': []}
+        with patch.object(sstore, 'RESEARCH_BATCH_PATH', p):
+            sstore.save_research_batch(b1)
+            sstore.save_research_batch(b1)  # 幂等：同 id 同内容 → 不重复
+            self.assertEqual(len(sstore.load_research_batches()), 1)
+            # 冲突：同 id 但 packets_hash 不同 → 抛 ValueError
+            b2 = dict(b1, packets_hash='p2')
+            with self.assertRaisesRegex(ValueError, '冲突'):
+                sstore.save_research_batch(b2)
+            # overwrite_conflict：人工修复允许覆盖
+            sstore.save_research_batch(b2, overwrite_conflict=True)
+            self.assertEqual(len(sstore.load_research_batches()), 1)
+            self.assertEqual(sstore.load_research_batches()[0]['packets_hash'], 'p2')
 
 
 if __name__ == '__main__':

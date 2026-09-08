@@ -22,17 +22,36 @@ def build_selection_prompt(universe, packets):
     }, ensure_ascii=False)
 
 
+def freeze_input(universe, packets):
+    """冻结模型输入：返回 (packet_ids, packets_hash)。
+
+    packets_hash 覆盖完整 evidence_packet 内容（含价格/事件/时间），
+    两组输入即使 code 相同、内容不同也会产生不同 hash；纳入批次 id，
+    使 research_batch_id 能唯一对应一组冻结输入。
+    """
+    universe = sorted(universe)
+    packet_ids = sorted(p['packet_id'] for p in packets)
+    packets_hash = digest({'universe': universe,
+                           'packets': [{k: p.get(k) for k in ('packet_id', 'quote', 'events', 'as_of')}
+                                       for p in packets]})
+    return packet_ids, packets_hash
+
+
 def rank(advisor, universe, packets, now=None):
     """调用 LLM 生成结构化 Top-N 研究排名。
 
-    返回研究批次 dict：research_batch_id / universe_hash / as_of /
-    prompt_version / schema_version / model / candidates / error。
+    返回研究批次 dict：research_batch_id / universe_hash / packets_hash /
+    packet_ids / as_of / prompt_version / schema_version / model / candidates / error。
+    research_batch_id 覆盖 packets_hash → 同 id 必然对应同组冻结输入。
     失败或校验失败只记录 error，不产生 proposal / approval / order。
     """
     now = now if now is not None else time.time()
     universe = list(universe)
+    packet_ids, packets_hash = freeze_input(universe, packets)
     base = {
         'universe_hash': digest(universe),
+        'packets_hash': packets_hash,
+        'packet_ids': packet_ids,
         'as_of': utc(now),
         'prompt_version': SELECTION_PROMPT_VERSION,
         'schema_version': SELECTION_SCHEMA_VERSION,

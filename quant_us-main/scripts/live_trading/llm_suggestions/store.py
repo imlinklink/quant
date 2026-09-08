@@ -93,29 +93,70 @@ def update_item_status(suggestion_id: str, status: str) -> bool:
 RESEARCH_BATCH_PATH = SHARED_DIR / 'us_research_batches.jsonl'
 
 
-def save_research_batch(batch: Dict[str, Any]) -> None:
-    """追加一条版本化研究批次（JSONL，每行一个批次）。"""
+def save_research_batch(batch: Dict[str, Any], overwrite_conflict: bool = False) -> None:
+    """追加一条版本化研究批次（JSONL）。
+
+    幂等：同一 research_batch_id 且内容一致 → 返回，不重复追加。
+    冲突：同 id 但内容不一致 → 抛 ValueError（除非 overwrite_conflict=True，人工修复时覆盖）。
+    """
+    bid = (batch or {}).get('research_batch_id')
     with _lock, _file_lock():
         SHARED_DIR.mkdir(parents=True, exist_ok=True)
-        with open(RESEARCH_BATCH_PATH, 'a', encoding='utf-8') as f:
-            f.write(json.dumps(batch, ensure_ascii=False) + '\n')
+        existing, _ = load_research_batches_report()
+        if bid:
+            same_id = [e for e in existing if e.get('research_batch_id') == bid]
+            if same_id:
+                if all(_same_content(e, batch) for e in same_id):
+                    return  # 幂等：已存在且内容一致
+                if not overwrite_conflict:
+                    raise ValueError(f'research_batch_id 冲突: {bid}（内容不一致）')
+                # overwrite_conflict：移除旧行后重写
+                existing = [e for e in existing if e.get('research_batch_id') != bid]
+        existing.append(batch)
+        _atomic_write_lines(existing)
+
+
+def _atomic_write_lines(rows: List[Dict[str, Any]]) -> None:
+    """整表原子重写：临时文件 + os.replace，避免写入中断留下半个 JSONL。"""
+    tmp = RESEARCH_BATCH_PATH.with_name(RESEARCH_BATCH_PATH.name + '.tmp')
+    with open(tmp, 'w', encoding='utf-8') as f:
+        for row in rows:
+            f.write(json.dumps(row, ensure_ascii=False) + '\n')
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, RESEARCH_BATCH_PATH)
+
+
+def _same_content(a, b):
+    """两个批次是否为同一输入/输出内容。"""
+    keys = ('research_batch_id', 'universe_hash', 'packets_hash', 'as_of', 'candidates', 'error')
+    return all(a.get(k) == b.get(k) for k in keys)
 
 
 def load_research_batches() -> List[Dict[str, Any]]:
-    """读取全部研究批次；损坏行跳过。"""
+    """读取全部研究批次；损坏行跳过（损坏行号经 load_research_batches_report 记录）。"""
+    ok, _ = load_research_batches_report()
+    return ok
+
+
+def load_research_batches_report() -> tuple:
+    """读取全部研究批次，返回 (有效列表, 损坏行号列表)。损坏不静默——报告行号。"""
     if not RESEARCH_BATCH_PATH.exists():
-        return []
+        return [], []
     out: List[Dict[str, Any]] = []
+    corrupt: List[int] = []
     with open(RESEARCH_BATCH_PATH, encoding='utf-8') as f:
-        for line in f:
+        for lineno, line in enumerate(f, 1):
             line = line.strip()
             if not line:
                 continue
             try:
                 out.append(json.loads(line))
             except Exception:
-                logger.warning('[LLM选股] 跳过损坏的研究批次行')
-    return out
+                corrupt.append(lineno)
+    if corrupt:
+        logger.warning(f'[LLM选股] 研究批次损坏行（行号）: {corrupt}')
+    return out, corrupt
 
 
 def load_latest_research_batch() -> Optional[Dict[str, Any]]:

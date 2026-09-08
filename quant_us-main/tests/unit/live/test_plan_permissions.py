@@ -99,6 +99,18 @@ class PermissionContracts(unittest.TestCase):
                                  {'min_samples': 100, 'min_market_phases': 2})
         self.assertFalse(ok2)
 
+    def test_eligibility_default_deny(self):
+        # 缺省 thresholds → 不满足（默认拒绝，避免 0 门槛误升级）
+        ok, _ = eligibility_met({'independent_samples': 999, 'market_phases': 9,
+                                 'data_leak_checked': True}, {})
+        self.assertFalse(ok)
+
+    def test_permits_only_constrained(self):
+        # recommend 只记录不动作；仅 constrained_action 允许执行
+        self.assertFalse(permits('entry_review', 'recommend'))
+        self.assertTrue(permits('entry_review', 'constrained_action'))
+        self.assertFalse(permits('entry_review', 'shadow'))
+
     def test_promote_candidate(self):
         cfg = {}
         # 门槛不够 → 不升级

@@ -14,8 +14,13 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pandas as pd
+
 BASE_DIR = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(BASE_DIR))
+
+# 日 K 收盘时点（UTC）：覆盖美东冬令时 21:00 / 夏令时 20:00 收盘后的安全标记
+CLOSE_HOUR_UTC = 22.0
 
 logger = logging.getLogger('run_daily_selection')
 
@@ -32,19 +37,61 @@ def build_universe(config):
     return codes
 
 
+def _is_daily_bar_closed(bar_date, as_of, close_hour_utc=CLOSE_HOUR_UTC):
+    """日 K 以交易日零点(UTC)表示；该交易日收盘约在 UTC 21-22 点（对应美东 16-17 点）。
+    判断某根日 K 在 as_of 时点是否已收盘（避免把当日在途 K 当已完成）。
+    """
+    bar_dt = pd.Timestamp(bar_date)
+    if bar_dt.tzinfo is None:
+        bar_dt = bar_dt.tz_localize('UTC')
+    as_of_dt = pd.Timestamp(as_of)
+    if as_of_dt.tzinfo is None:
+        as_of_dt = as_of_dt.tz_localize('UTC')
+    return as_of_dt >= bar_dt + pd.Timedelta(hours=close_hour_utc)
+
+
 def build_packet_from_bars(code, bars, *, name=None, sector=None, risk_group=None, events=None, now=None):
-    """从日 K 生成 evidence_packet。行情指标由程序计算，LLM 只解释。数据不足返回 None。"""
+    """从日 K 生成 evidence_packet。行情指标由程序计算，LLM 只解释。数据不足返回 None。
+
+    只使用 as_of 前「已收盘」的日 K：先按 now 截断、再剔除当日在途未收盘 K。
+    observed_at 取最后一根已完成 K 线的自身时间（而非执行时间），
+    并保存 data_cutoff_at（数据截止时间），避免旧行情被标成刚取得。
+    """
     import numpy as np
+    import pandas as pd
 
     from scripts.live_trading.decision_ledger.event_store import utc
     from scripts.live_trading.decision_ledger.evidence_packet import build_evidence_packet
 
     if bars is None or len(bars) < 2:
         return None
+    now_dt = pd.Timestamp(now, unit='s') if isinstance(now, (int, float)) else pd.Timestamp(now)
+    if now_dt.tzinfo is None:
+        now_dt = now_dt.tz_localize('UTC')
+    else:
+        now_dt = now_dt.tz_convert('UTC')
+
+    # 1) 只保留不晚于 now 的 K（历史重放安全）；2) 只保留已收盘的日 K（剔除当日在途）
+    bars = bars.copy()
+    bars['date'] = pd.to_datetime(bars['date'])
+    if bars['date'].dt.tz is None:
+        bars['date'] = bars['date'].dt.tz_localize('UTC')
+    else:
+        bars['date'] = bars['date'].dt.tz_convert('UTC')
+    bars = bars[bars['date'] <= now_dt]
+    bars = bars[[_is_daily_bar_closed(d, now_dt) for d in bars['date']]].reset_index(drop=True)
+    if len(bars) < 2:
+        return None
+
     closes = bars['close'].values.astype(float)
     price = float(closes[-1])
     if not np.isfinite(price) or price <= 0:
         return None
+    # 会话收盘标记：日 K 以交易日零点表示，收盘约在 UTC 22 点（覆盖美东冬/夏令时收盘）。
+    # observed_at 存「收盘后」时点，避免盘中运行把当日未收盘价当已完成。
+    bar_date = bars['date'].iloc[-1]
+    bar_end = bar_date + pd.Timedelta(hours=CLOSE_HOUR_UTC)   # D 22:00 UTC = 已收盘
+    bar_end_iso = utc(bar_end)
 
     def ret(n):
         if len(closes) > n and closes[-1 - n] > 0:
@@ -65,7 +112,10 @@ def build_packet_from_bars(code, bars, *, name=None, sector=None, risk_group=Non
 
     quote = {
         'price': price,
-        'observed_at': utc(now),
+        'observed_at': bar_end_iso,          # 行情自身时间 = 最后一根已完成 K 的收盘后时点
+        'data_cutoff_at': utc(now_dt),       # 数据截止（执行）时间
+        'bar_date': str(bars['date'].iloc[-1]),
+        'bar_end': bar_end_iso,
         'ret_1d': ret(1),
         'ret_5d': ret(5),
         'ret_20d': ret(20),
@@ -82,15 +132,15 @@ def build_packet_from_bars(code, bars, *, name=None, sector=None, risk_group=Non
     def _fmt(v):
         return 'N/A' if v is None else f'{v:.4f}' if isinstance(v, float) else str(v)
 
-    summary = (f'程序行情快照：最新价 {price:.2f}；1日收益 {_fmt(ret(1))}；'
-               f'5日收益 {_fmt(ret(5))}；20日收益 {_fmt(ret(20))}；'
-               f'ATR {_fmt(atr)}；趋势 {trend or "N/A"}')
-    snapshot_evidence = evidence(summary, 'internal:quote-snapshot', utc(now), kind='rule')
+    summary = (f'程序行情快照：最新价 {price:.2f}（bar_end {bar_end_iso}）；'
+               f'1日收益 {_fmt(ret(1))}；5日收益 {_fmt(ret(5))}；'
+               f'20日收益 {_fmt(ret(20))}；ATR {_fmt(atr)}；趋势 {trend or "N/A"}')
+    snapshot_evidence = evidence(summary, 'internal:quote-snapshot', bar_end_iso, kind='rule')
 
     # 程序行情快照 + 外部事件证据（财报/公告/新闻），让 LLM 有真实事件可引用
     all_events = [snapshot_evidence] + list(events or [])
     return build_evidence_packet(code, name=name, sector=sector, risk_group=risk_group,
-                                 quote=quote, events=all_events, now=now)
+                                 quote=quote, events=all_events, now=bar_end_iso)
 
 
 def run_selection(config, advisor, fetcher, now=None, dry_run=False):
