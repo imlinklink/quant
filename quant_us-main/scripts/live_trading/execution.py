@@ -528,6 +528,32 @@ class ExecutionService:
                     atr=float(meta.get('signal_atr') or 0)
                     if atr <= 0 or (price-float(meta['breakout_level']))/atr > float(meta.get('max_chase_atr', .5)):
                         raise ValueError('突破追价超过ATR上限')
+                # 阶段 H2/J3：仓位档位影子接入。默认 shadow → 不改变数量；
+                # 仅当 llm_permissions.position_scale = constrained_action 且模型建议降档才真正缩量。
+                # 加档(>1.0)永远不允许。
+                try:
+                    from scripts.live_trading.llm_permission import level_for, allowed_scale
+                    review = (item.get('llm') or {})
+                    proposed = review.get('position_scale')
+                    level = level_for('position_scale', self.config)
+                    final_scale, applied = allowed_scale('position_scale', level, proposed)
+                    if applied and proposed is not None and 0 <= float(proposed) < 1.0:
+                        import math as _m
+                        scaled_qty = int(_m.floor(qty * float(proposed)))
+                        if scaled_qty < 1:
+                            raise ValueError(f'模型降档 {proposed}x 后数量不足一手')
+                        risk = risk * scaled_qty / qty
+                        qty = scaled_qty
+                    if proposed is not None and not applied:
+                        # 影子：仅记录（review 里已带建议，写入 note 供审计）
+                        meta['position_scale'] = float(proposed)
+                        meta['position_scale_applied'] = False
+                        meta['position_scale_level'] = str(level)
+                except ValueError:
+                    raise
+                except Exception:
+                    # 影子接入失败不能阻塞交易（权限默认关闭）
+                    pass
             else:
                 pos = book['positions'].get(code)
                 if self.dry_run:

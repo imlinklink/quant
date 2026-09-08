@@ -14,6 +14,9 @@ REASONS = ('event_risk', 'regime_conflict', 'weak_confirmation',
 CLAIM = {'type': 'object', 'required': ['text', 'evidence_ids'], 'additionalProperties': False,
          'properties': {'text': {'type': 'string', 'minLength': 1, 'maxLength': 1200},
                         'evidence_ids': {'type': 'array', 'items': {'type': 'string'}}}}
+# 离散计划模板 / 仓位档位（阶段 H2）：模型只能在程序预计算的集合里选
+PLAN_TEMPLATES = ('standard', 'wait_for_confirmation')
+ALLOWED_POSITION_SCALES = (0.0, 0.5, 1.0)
 REVIEW_SCHEMA = {
     'type': 'object', 'additionalProperties': False,
     'required': ['status', 'recommendation', 'proposed_action', 'thesis_state', 'facts',
@@ -25,6 +28,8 @@ REVIEW_SCHEMA = {
         'proposed_action': {'enum': ['buy', 'hold', 'reduce', 'exit', 'revise_plan']},
         'thesis_state': {'enum': ['unchanged', 'strengthened', 'weakened', 'invalidated', 'unknown']},
         'reasons': {'type': 'array', 'items': {'enum': list(REASONS)}, 'maxItems': 4},
+        'plan_template': {'enum': list(PLAN_TEMPLATES)},
+        'position_scale': {'enum': list(ALLOWED_POSITION_SCALES)},
         'facts': {'type': 'array', 'items': CLAIM},
         'inferences': {'type': 'array', 'items': CLAIM},
         'counterevidence': {'type': 'array', 'items': CLAIM},
@@ -145,6 +150,12 @@ def validate_review(raw, snapshot, side, now=None, ttls=None):
         raise ValueError('买入评估含卖出动作')
     if side == 'sell' and raw['proposed_action'] == 'buy':
         raise ValueError('卖出评估含买入动作')
+    # 阶段 H2：仓位档位只允许降档（模型不得加档/提量）。
+    # plan_template 若给出必须合法；position_scale 必须落在 {0,0.5,1.0}。
+    if 'plan_template' in raw and raw['plan_template'] not in PLAN_TEMPLATES:
+        raise ValueError(f'非法计划模板: {raw["plan_template"]}')
+    if 'position_scale' in raw and raw['position_scale'] not in ALLOWED_POSITION_SCALES:
+        raise ValueError(f'非法仓位档位: {raw["position_scale"]}')
     return copy.deepcopy(raw)
 
 
