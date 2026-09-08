@@ -239,6 +239,12 @@ python3 -m pytest tests/unit -q
 - 修复过两个真实 bug：`BASE_DIR` 路径（`parents[1]`→`parents[2]`）；packet 缺可引用证据导致 LLM 误引 `packet_id`（现已生成「程序行情快照」证据，`evidence_` 前缀）。
 - 页面 `/suggestions` 紫色区块正常展示 8 只候选。
 
+### F2 数据源补充（✅，含一次修正）
+
+- `signal_context.fetch_event_evidence`：富途资讯/公告转不可变 evidence（`evidence_id`/`content_hash`/`kind`），公告/评级=`filing`、资讯=`news`，可被 LLM 引用。
+- `run_daily_selection`：每只股票拉富途事件并入 packet（不再只有行情快照）。端到端验证：LLM 的 `catalyst_evidence_ids` 已引用真实富途事件（Bernstein/Evercore 评级、财报等），部分候选带 counterevidence。
+- **修正**：初版复用 `fetch_signal_context` 会串行拉 Yahoo 财报（404）/FINRA 空头（403），每只超时拖慢；改为只用富途源。
+
 ### 日常使用
 
 ```sh
@@ -249,7 +255,7 @@ python3 ./run_selection_outcomes.py         # 回填历史批次固定窗口结�
 ### 待评估（权限升级前）
 
 - 攒够样本后看 `rank_ic` 是否稳定为正、`topn_excess` 是否为正（门槛：≥100 规则通过候选、30 可比较执行样本、覆盖多市场状态、锁定样本外区间）。
-- 目前 packet 只有「程序行情快照」一条证据，`missing_information` 均如实标「fundamentals missing」——按 F2 先统计缺口再补财报/公告等事件源。
+- 候选普遍缺「基本面财务数据」（`missing_information` 如实标出）——按 F2「先统计缺口再补」，下一批可考虑估值/财务字段。
 
 ## 第二个迭代：买入评审增强 🟡（核心已做，离散计划模板待评估）
 
@@ -262,8 +268,34 @@ python3 ./run_selection_outcomes.py         # 回填历史批次固定窗口结�
 
 - 离散计划模板（标准入场/等待确认）与仓位档位 `0 / 0.5x / 1.0x`——属于「允许模型影响什么」的权限扩展，文档要求先影子记录、证明校准后才开放 `0.5x` 降档权，不开放加档权。建议等首个迭代攒够反事实样本后再评估。
 
-## 后续阶段（未开始）
+## 第三个迭代：持仓 thesis ledger ✅（影子版）
 
-- 阶段 I：持仓 thesis ledger（`position_review.py` 从影子事件扩展为版本化逻辑状态机）。
-- 阶段 J：模型评测集、路由与权限治理。
+**目标**：把持仓期的 LLM 判断记录成版本化、可回放的 thesis 账本，供后续与程序退出逐笔对比；不参与任何交易决策。
+
+### 改动文件
+
+| 文件 | 改动 |
+| --- | --- |
+| `decision_ledger/thesis_ledger.py` | 新增：版本化状态机 `established→strengthened/unchanged/weakened→invalidated→closed`；`apply_transition`（无新证据不改状态）；`build_delta`（程序算新增/撤销证据引用）；`record_review` / `mark_closed` / `load_updates` / `current`；`chain_report` / `compare_actual_exit` |
+| `scripts/live_trading/position_review.py` | 改：有效评审（`status=complete` 且含 `thesis_state`）后写入 thesis 账本；纯影子不改持仓 |
+| `tests/unit/live/test_thesis_ledger.py` | 新增：13 用例 |
+
+### 关键约束（文档 I2）
+
+- 无新增证据且未触及保护线 → 模型建议的状态变化不采纳（保持原状态）。
+- `invalidated` 为终态，不回改；`closed` 由实际平仓驱动。
+- delta 由程序计算（本次引用证据集 vs 上一版），不依赖 LLM 自述。
+- 状态未变化的评审不产生噪音版本（只写真正变化）。
+
+### 待评估
+
+- 需真实持仓跑起来后，用 `compare_actual_exit` 对比「LLM 判 invalidated 时点」vs「程序实际退出」，判断 LLM 是否提前识别风险。
+
+## 第四个迭代：权限评估 ⬜（未开始）
+
+依赖前三迭代攒够影子样本 + 真实 SIMULATE 闭环验证通过后，用锁定样本外数据分别评估选股/买入/卖出增量价值，只升级通过门槛的单项权限；不整体切换成「LLM 自动交易」。
+
+## 阶段 J（未开始）
+
+模型评测集（J1）、多模型按任务路由（J2）、权限治理门槛（J3）。
 
