@@ -1114,7 +1114,15 @@ class DipBuyMonitor:
                         break
                     self._check_one(code)
                     time.sleep(0.5)  # 避免限频
-                
+
+                # 心跳：记录本轮扫描完成（决策健康面板据此区分扫描时间与信号事件时间）
+                if self.approval_store is not None:
+                    try:
+                        from scripts.live_trading.decision_ledger.decision_health import record_scan_heartbeat
+                        record_scan_heartbeat(self.approval_store.events)
+                    except Exception:
+                        pass
+
                 # 等待下一轮
                 self._stop_event.wait(self.check_interval)
                 

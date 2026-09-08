@@ -46,7 +46,9 @@ def build_funnel(events):
         expired = [e for e in evs if e['event_type'] == 'proposal_expired']
         orders = [e for e in evs if e['event_type'] in ('order_submitted','order_unknown','order_rejected')]
         rec = reviews[-1]['payload'].get('recommendation') if reviews else 'missing'
-        action = humans[-1]['payload'].get('status') if humans else 'unhandled'
+        # 规则拒绝（无提案）不应显示为「人工未处理」；只有规则通过、有提案但无人点单才算 unhandled。
+        action = (humans[-1]['payload'].get('status') if humans
+                  else 'rule_rejected' if not p['passed'] else 'unhandled')
         execution = orders[-1]['payload']['status'] if orders else 'order_pending_or_unfilled'
         outcome = (execution if fills and execution=='filled' else execution+'_with_fill' if fills else
                    execution if intents else 'expired' if expired else action)

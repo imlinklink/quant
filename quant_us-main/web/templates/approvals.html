@@ -77,6 +77,7 @@
   <span id="clock" class="muted"></span>
 </header>
 <div id="brief" class="brief" style="display:none"></div>
+<div id="health" class="brief" style="display:none"></div>
 <main>
   <div id="content"><div class="empty">加载中…</div></div>
 </main>
@@ -184,6 +185,7 @@ function card(item, now) {
     (item.context ? '<div class="section-title">消息面上下文</div>' +
       '<div class="reason-box" style="white-space:pre-line">' + esc(item.context) + '</div>' : '') +
     '<div class="section-title">大模型判定</div>' + llmHtml(item.llm, item.side) +
+    (item.unapprovable_reason ? '<div class="note">⚠️ 暂不能下单：' + esc(item.unapprovable_reason_label || item.unapprovable_reason) + '</div>' : '') +
     (item.note ? '<div class="note">备注：' + esc(item.note) + '</div>' : '') +
     buttons + '</div>';
 }
@@ -280,10 +282,38 @@ async function loadBrief() {
       '</b>' + (b.risk_note ? '<br>' + esc(b.risk_note) : '');
   } catch (e) { }
 }
+async function loadHealth() {
+  try {
+    const r = await fetch('/api/decision-health');
+    const d = await r.json();
+    if (!d.ok || !d.health) return;
+    const h = d.health;
+    const llm = h.llm || {};
+    const llmStatus = {
+      never_called: '尚未调用', pending: '调用中', success: '评估成功',
+      failed: '评估失败', insufficient_information: '资料不足'
+    }[llm.status] || llm.status || '-';
+    const scan = h.scan || {};
+    const lastScan = scan.last_heartbeat_at || scan.last_signal_at;
+    const scanLabel = scan.last_heartbeat_at ? '' : '（信号事件时间，非心跳）';
+    const prop = h.proposals || {};
+    const el = document.getElementById('health');
+    el.style.display = 'block';
+    el.innerHTML = '📊 决策健康：LLM <b>' + esc(llmStatus) + '</b>' +
+      (llm.enabled ? '' : '（未启用）') +
+      ' · 请求 ' + esc(llm.request_count) + ' 次 / 成功 ' + esc(llm.success_count) +
+      ' / 失败 ' + esc(llm.failure_count) + ' / 资料不足 ' + esc(llm.insufficient_count) +
+      '<br>最近扫描 ' + (lastScan ? esc(lastScan) : '暂无') + esc(scanLabel) +
+      ' · 规则通过 ' + esc(scan.rule_passed) + ' / 拒绝 ' + esc(scan.rule_rejected) +
+      ' · 提案 ' + esc(prop.total) + '（评估中 ' + esc(prop.in_review) + '）';
+  } catch (e) { }
+}
 load();
 loadBrief();
+loadHealth();
 setInterval(load, 2000);
 setInterval(loadBrief, 30000);
+setInterval(loadHealth, 5000);
 </script>
 </body>
 </html>

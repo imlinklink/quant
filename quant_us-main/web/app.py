@@ -482,9 +482,13 @@ def approvals_page():
 def api_approvals():
     items = approval_store.get_all() if approval_store is not None else []
     from mutifactor.llm.trade_review import approval_binding
+    from scripts.live_trading.decision_ledger.decision_health import unapprovable_reason
     for item in items:
         item['llm_ready'] = approval_store.llm_ready(item)
         item['approval_binding'] = approval_binding(item) if item.get('plan_id') else None
+        code, label = unapprovable_reason(item)
+        item['unapprovable_reason'] = code
+        item['unapprovable_reason_label'] = label
     return jsonify({
         'ok': True,
         'enabled': approval_enabled,
@@ -493,6 +497,21 @@ def api_approvals():
         'server_time': datetime.now().timestamp(),
         'items': items,
     })
+
+
+@app.route('/api/decision-health')
+def api_decision_health():
+    """只读决策健康摘要：不触发 LLM 请求、批准或下单。"""
+    if approval_store is None:
+        return jsonify({'ok': False, 'error': '审批未启用'}), 400
+    from scripts.live_trading.decision_ledger.decision_health import build_health
+    health = build_health(
+        approval_store.events.events(),
+        llm_enabled=approval_llm_enabled,
+        proposals=approval_store.get_all(),
+        scope=approval_store.events.scope,
+    )
+    return jsonify({'ok': True, 'health': health, 'server_time': datetime.now().timestamp()})
 
 
 @app.route('/api/market-brief')
@@ -677,8 +696,19 @@ def suggestions_page():
 def api_suggestions():
     from scripts.live_trading.llm_suggestions import load_latest
     from scripts.live_trading.llm_suggestions import watchlist
+    from scripts.live_trading.llm_suggestions.freshness import assess
 
     data = load_latest()
+    # 时效阈值可配置；缺省用 freshness 模块默认值。GET 不触发模型刷新。
+    fresh_cfg = {}
+    try:
+        config_path = os.path.join(BASE_DIR, 'config.yaml')
+        with open(config_path, 'r', encoding='utf-8') as f:
+            _cfg = yaml.safe_load(f) or {}
+        fresh_cfg = _cfg.get('llm_suggestions', {}) or {}
+    except Exception:
+        pass
+    data = assess(data, fresh_cfg)
     return jsonify({
         'ok': True,
         'data': data,

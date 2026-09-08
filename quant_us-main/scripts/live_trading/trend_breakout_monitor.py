@@ -559,6 +559,13 @@ class TrendBreakoutMonitor:
                 break
             self._check_one(code)
             time.sleep(0.5)
+        # 心跳：记录本轮扫描完成（决策健康面板据此区分扫描时间与信号事件时间）
+        if self.approval_store is not None:
+            try:
+                from scripts.live_trading.decision_ledger.decision_health import record_scan_heartbeat
+                record_scan_heartbeat(self.approval_store.events)
+            except Exception:
+                pass
 
     def _monitor_loop(self):
         logger.info(f"[突破线] 监控循环启动：点击处理每30s，信号扫描每 {self.check_interval}s")
