@@ -80,13 +80,22 @@ def _current_schema(con):
 
 
 def migrate(con, path):
-    """Serialize first migration across processes; back up before touching schema."""
+    """Serialize first migration across processes; back up before touching schema.
+
+    决策事件 schema（v1）一旦就绪即不再重跑；投影 schema（v2）幂等确保，
+    因此旧库（已是 v1）每次打开也会补齐投影表。
+    """
     if _current_schema(con):
+        _ensure_projection_schema(con)
+        con.commit()
         return
     with open(str(path)+'.migration.lock','a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         if not _current_schema(con):
             _migrate(con, path)
+        else:
+            _ensure_projection_schema(con)
+            con.commit()
 
 
 def _migrate(con, path):
@@ -129,7 +138,76 @@ def _migrate(con, path):
             PRIMARY KEY(account_scope,id));
     ''')
     con.execute('INSERT OR IGNORE INTO decision_schema VALUES (?)', (SCHEMA_VERSION,))
+    _ensure_projection_schema(con)
     con.commit()
+
+
+# 投影 schema 版本（独立于决策事件 schema v1）
+PROJECTION_SCHEMA_VERSION = 1
+
+_PROJECTION_DDL = '''
+    CREATE TABLE IF NOT EXISTS decision_projection_schema(
+        version INTEGER PRIMARY KEY);
+    CREATE TABLE IF NOT EXISTS llm_decision_runs (
+        account_scope TEXT NOT NULL,
+        decision_id TEXT NOT NULL,
+        role TEXT NOT NULL,
+        subject_type TEXT NOT NULL,
+        subject_id TEXT NOT NULL,
+        as_of TEXT NOT NULL,
+        status TEXT NOT NULL,
+        input_snapshot_id TEXT NOT NULL,
+        prompt_version TEXT NOT NULL,
+        output_schema_version TEXT NOT NULL,
+        feature_version TEXT NOT NULL,
+        rule_version TEXT NOT NULL,
+        permission_version TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        model_id TEXT NOT NULL,
+        selected_attempt_id TEXT,
+        effective_action TEXT,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (account_scope, decision_id));
+    CREATE INDEX IF NOT EXISTS llm_decision_role_time
+        ON llm_decision_runs(account_scope, role, as_of);
+    CREATE TABLE IF NOT EXISTS llm_model_attempts (
+        account_scope TEXT NOT NULL,
+        attempt_id TEXT NOT NULL,
+        decision_id TEXT NOT NULL,
+        started_at TEXT NOT NULL,
+        completed_at TEXT,
+        status TEXT NOT NULL,
+        raw_response TEXT,
+        parsed_response TEXT,
+        validation_errors TEXT,
+        latency_ms INTEGER,
+        input_tokens INTEGER,
+        output_tokens INTEGER,
+        PRIMARY KEY (account_scope, attempt_id));
+    CREATE INDEX IF NOT EXISTS llm_attempt_decision
+        ON llm_model_attempts(account_scope, decision_id);
+    CREATE TABLE IF NOT EXISTS decision_outcomes_v2 (
+        account_scope TEXT NOT NULL,
+        decision_id TEXT NOT NULL,
+        horizon TEXT NOT NULL,
+        label_as_of TEXT NOT NULL,
+        return_pct REAL,
+        benchmark_return_pct REAL,
+        excess_return_pct REAL,
+        mfe_pct REAL,
+        mae_pct REAL,
+        realized_r REAL,
+        data_quality TEXT NOT NULL,
+        body TEXT NOT NULL,
+        PRIMARY KEY (account_scope, decision_id, horizon));
+'''
+
+
+def _ensure_projection_schema(con):
+    """幂等确保投影 schema 存在（每次连接时调用，兼容旧库与新库）。"""
+    con.executescript(_PROJECTION_DDL)
+    con.execute('INSERT OR IGNORE INTO decision_projection_schema(version) VALUES (?)',
+                (PROJECTION_SCHEMA_VERSION,))
 
 
 class EventStore:
