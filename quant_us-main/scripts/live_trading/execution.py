@@ -415,6 +415,81 @@ class ExecutionService:
             raise ValueError('报价过期')
         return float(row['last_price']), float(row.get('volume') or 0), time.time()
 
+    def submit_system_exit(self, *, exit_id, code, qty, price, reason, category='hard_risk'):
+        """系统硬退出（PR1）：不依赖 proposal/llm_ready/人工确认，直达真实卖单。
+
+        只用于 hard_risk 类退出（固定/移动止损、组合熔断、券商风险）。仍执行
+        账户作用域、持仓数量、活跃卖单、交易时段、幂等与对账校验。
+        DRY-RUN 直接按可成交价冲正；真实环境走常规时段市价/可成交限价。
+        """
+        if not finite_positive(price):
+            raise ValueError('硬退出报价无效')
+        if not finite_positive(qty):
+            raise ValueError('硬退出数量无效')
+        side = 'sell'
+        cfg = self.config.get('risk_budget', {})
+        with self.registry.transaction() as book:
+            pos = book['positions'].get(code)
+            if not pos or float(pos.get('qty', 0)) <= 0:
+                raise ValueError('无可退出持仓')
+            if exit_id in book['orders']:
+                return book['orders'][exit_id]['status']
+            # 活跃卖单占用：不超卖
+            if any(o['code'] == code and o['side'] == 'sell' and o['status'] in ACTIVE
+                   for o in book['orders'].values()):
+                raise ValueError('该股票已有活跃卖单，禁止重复硬退出')
+            direction = pos.get('direction', 'long')
+            sell_qty = min(float(qty), float(pos.get('qty', 0)))
+            if sell_qty <= 0:
+                raise ValueError('可退出数量为 0')
+            tid = pos.get('trade_id') or exit_id
+            meta = dict(pos.get('metadata') or {})
+            meta.update(direction=direction, hard_exit=True, category=category, reason=reason)
+            order = dict(proposal={}, id=exit_id, order_intent_id=stable_id('intent', self.registry.namespace, exit_id),
+                         code=code, side=side, price=price, qty=sell_qty, risk=0.0,
+                         metadata=meta, status='submitting', filled_qty=0,
+                         cost_per_share=float(cfg.get('cost_per_share', .05)),
+                         trade_id=tid, created_at=time.time())
+            book['orders'][exit_id] = order
+            enqueue(book, self.registry.namespace, 'hard_exit_intent_created', exit_id,
+                    {'code': code, 'qty': sell_qty, 'price': price, 'reason': reason,
+                     'category': category},
+                    proposal_id=exit_id, order_intent_id=order['order_intent_id'], trade_id=tid)
+        if self.dry_run:
+            self.apply_report(exit_id, dict(order_id='dry-' + exit_id, order_status='FILLED_ALL',
+                                            dealt_qty=sell_qty, dealt_avg_price=price,
+                                            cumulative_fee=0.0))
+            return 'filled'
+        from futu import RET_OK, OrderType, TrdSide, TimeInForce
+        try:
+            with self.pool.get_trade_ctx() as ctx:
+                args = self.account(ctx)
+                et = datetime.now(ZoneInfo('America/New_York'))
+                if et.weekday() >= 5 or not (570 <= et.hour * 60 + et.minute < 960):
+                    with self.registry.transaction() as book:
+                        book['orders'][exit_id]['status'] = 'rejected'
+                    raise ValueError('硬退出仅支持美股常规时段')
+                trd_side = TrdSide.SELL
+                # 硬退出用可成交限价（市价附近偏移），保证盘中即时成交又不过度滑点
+                ret, data = ctx.place_order(
+                    price=round(price, 2), qty=sell_qty, code=code, trd_side=trd_side,
+                    order_type=OrderType.NORMAL, time_in_force=TimeInForce.DAY,
+                    fill_outside_rth=False, remark=exit_id, **args)
+            if ret != RET_OK or data is None or data.empty:
+                raise RuntimeError('硬退出提交结果不确定，等待券商对账')
+            self.apply_report(exit_id, data.iloc[0].to_dict())
+        except Exception:
+            with self.registry.transaction() as book:
+                if book['orders'][exit_id]['status'] not in TERMINAL:
+                    book['orders'][exit_id]['status'] = 'unknown'
+                    enqueue(book, self.registry.namespace, 'order_unknown', exit_id,
+                            {'status': 'unknown'},
+                            proposal_id=exit_id, order_intent_id=order['order_intent_id'],
+                            trade_id=tid)
+            raise
+        with self.registry.transaction() as book:
+            return book['orders'][exit_id]['status']
+
     def submit(self, item, price, cap=None):
         from .approval.proposal_store import ProposalStore
         if not self.store or not item or item.get('status') != 'executing' or not ProposalStore.llm_ready(item):

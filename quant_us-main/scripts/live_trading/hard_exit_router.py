@@ -61,58 +61,38 @@ class HardExitRouter:
                dry_run: bool = True) -> Dict:
         """提交一次硬退出。
 
-        Returns:
-            {'status': 'no_position'|'active_sell_exists'|'duplicate'|'filled'|'submitted',
-             'exit_id': str}
+        委托 ExecutionService.submit_system_exit 完成真实下单（含 DRY-RUN 冲正）。
+        幂等 exit_id 保证同一触发只产生一个订单意图。
         """
         category = classify_exit_reason(reason, self.config)
         exit_id = stable_id('hard_exit', self.registry.namespace, trade_id, code, reason)
+        if self.execution is None:
+            # 无执行服务：纯路由记录，不落订单
+            return {'status': 'no_execution_service', 'exit_id': exit_id,
+                    'category': category}
 
+        # 校验持仓存在、可卖数量，且无活跃卖单（交给 submit_system_exit，先在此预检）
         with self.registry.transaction() as book:
             pos = book['positions'].get(code)
-            if not pos:
+            if not pos or float(pos.get('qty', 0)) <= 0:
                 return {'status': 'no_position', 'exit_id': exit_id}
-            # 已有同代码活跃卖单：不超卖
+            qty = float(pos.get('qty', 0))
+            if exit_id in book['orders']:
+                return {'status': 'duplicate', 'exit_id': exit_id,
+                        'order_status': book['orders'][exit_id]['status']}
             from .execution import ACTIVE
             if any(o['code'] == code and o['side'] == 'sell' and o['status'] in ACTIVE
                    for o in book['orders'].values()):
                 return {'status': 'active_sell_exists', 'exit_id': exit_id}
-            if exit_id in book['orders']:
-                return {'status': 'duplicate', 'exit_id': exit_id,
-                        'order_status': book['orders'][exit_id]['status']}
+        price = float(market_price) if market_price else float(pos.get('entry_price', 0))
 
-            qty = float(pos.get('qty', 0))
-            if qty <= 0:
-                return {'status': 'no_position', 'exit_id': exit_id}
-            price = float(market_price) if market_price else float(pos.get('entry_price', 0))
-
-            # 构造卖出 intent（与人工提案分开，独立 id）
-            trade_id_meta = pos.get('trade_id') or trade_id
-            order = {
-                'id': exit_id, 'code': code, 'side': 'sell', 'qty': qty,
-                'price': price, 'status': 'submitting', 'filled_qty': 0,
-                'cost_per_share': 0.0, 'created_at': time.time(),
-                'trade_id': trade_id_meta,
-                'metadata': {'direction': pos.get('direction', 'long'),
-                             'hard_exit': True, 'category': category, 'reason': reason},
-            }
-            book['orders'][exit_id] = order
-            order_intent_id = stable_id('intent', self.registry.namespace, exit_id)
-            enqueue(book, self.registry.namespace, 'hard_exit_intent_created', exit_id,
-                    {'code': code, 'qty': qty, 'price': price, 'reason': reason,
-                     'category': category},
-                    proposal_id=exit_id, order_intent_id=order_intent_id,
-                    trade_id=trade_id_meta)
-
-        # DRY-RUN：直接按 FILLED_ALL 冲正（成交价 = 可成交价/市价）
-        if dry_run and self.execution is not None:
-            self.execution.apply_report(
-                exit_id,
-                dict(order_id='dry-' + exit_id, order_status='FILLED_ALL',
-                     dealt_qty=qty, dealt_avg_price=price,
-                     cumulative_fee=0.0))
-            return {'status': 'filled', 'exit_id': exit_id,
-                    'category': category, 'fill_price': price}
-
-        logger.info(f"[HardExit] {code} {reason} -> {category} (dry_run={dry_run}) exit_id={exit_id}")
-        return {'status': 'submitted', 'exit_id': exit_id, 'category': category}
+        try:
+            status = self.execution.submit_system_exit(
+                exit_id=exit_id, code=code, qty=qty, price=price,
+                reason=reason, category=category)
+        except Exception as e:
+            logger.warning(f"[HardExit] {code} {reason} 提交异常: {type(e).__name__}: {e}")
+            return {'status': 'failed', 'exit_id': exit_id,
+                    'category': category, 'error': str(e)}
+        return {'status': status, 'exit_id': exit_id,
+                'category': category, 'fill_price': price if status == 'filled' else None}

@@ -1245,6 +1245,28 @@ class ChandelierExitManager:
             return
         hit, reason, exit_price = self._evaluate_position(code, price)
         if hit:
+            # PR1 硬退出路由：hard_risk（固定/移动止损/熔断/券商风险）且配置开启时，
+            # 不经人工/LLM 确认直接提交真实卖单；否则走原有确认台提案。
+            he_cfg = (getattr(self, 'config', {}) or {}).get('hard_exit') or {}
+            if he_cfg.get('enabled', False):
+                from scripts.live_trading.hard_exit_router import HardExitRouter, classify_exit_reason
+                if classify_exit_reason(reason, self.config) == 'hard_risk':
+                    from scripts.live_trading.execution import service_for
+                    router = HardExitRouter(registry=REGISTRY, config=self.config,
+                                            execution=service_for(self))
+                    qty = 0
+                    try:
+                        qty, _ = self._position_qty_cost(code)
+                    except Exception:
+                        pass
+                    if qty > 0:
+                        res = router.submit(trade_id='', code=code, reason=reason,
+                                            market_price=price,
+                                            dry_run=self.dry_run)
+                        logger.warning(f"[HardExit] {code} {reason} -> {res}")
+                        if res.get('status') in ('filled', 'submitted'):
+                            # 已由执行层成交/占位；跳过确认台
+                            return
             self._request_exit(code, exit_price, reason)
         cfg = getattr(self, 'config', {}).get('llm_decision', {}).get('position_review', {})
         if cfg.get('enabled', False):
