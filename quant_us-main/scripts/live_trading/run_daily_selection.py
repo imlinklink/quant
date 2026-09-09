@@ -163,12 +163,17 @@ def run_selection(config, advisor, fetcher, now=None, dry_run=False):
     packets = []
     opt_ok = 0
     opt_fail = 0
+    option_cfg = config.get('option_view') or {}
     for code in universe:
         events = sc.fetch_event_evidence(code)
         # P1 期权市场视角：作为参考证据并入 packet（失败降级为空，不影响选股）
         try:
-            oview = ov.fetch_option_view(code)
-            if oview and not oview.get('error'):
+            oview = (ov.fetch_option_view(
+                code, cache_seconds=int(option_cfg.get('cache_seconds', 300)),
+                quality_config=option_cfg.get('quality'))
+                if option_cfg.get('enabled', True) else {'error': '配置已关闭'})
+            quality_status = ((oview or {}).get('quality') or {}).get('status')
+            if oview and not oview.get('error') and quality_status != 'unusable':
                 opt_ev = ov.make_option_evidence(code, oview, now=now)
                 events = list(events) + [opt_ev]
                 opt_ok += 1

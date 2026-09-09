@@ -122,18 +122,35 @@ function researchCard(c) {
     (c.missing_information && c.missing_information.length ? '<div class="field">资料缺口：<b>' + esc(c.missing_information.join('；')) + '</b></div>' : '') +
     '</div>';
 }
+function exclusionCard(c) {
+  const effect = {
+    supportive:'期权偏支持', cautionary:'期权偏谨慎',
+    neutral:'期权中性', unavailable:'期权不可用'
+  }[c.option_view_effect] || c.option_view_effect || '未说明';
+  return '<div class="card research" style="opacity:.88">' +
+    '<div class="row"><span class="code">' + esc(c.code) + '</span>' +
+    '<span class="dir">未入选</span><span class="status">' + esc(effect) + '</span></div>' +
+    '<div class="section">排除原因</div><div class="box">' + esc(c.reason || '-') + '</div>' +
+    '</div>';
+}
 function renderResearch(research) {
   const el = document.getElementById('research');
-  if (!research || !(research.candidates || []).length) {
+  if (!research) {
     el.style.display = 'none';
     return;
   }
+  const candidates = research.candidates || [];
+  const exclusions = research.exclusions || [];
   const batch = (research.research_batch_id || '').slice(0, 12);
   el.style.display = 'block';
   el.innerHTML = '<b>🔬 LLM 研究候选（研究建议，不是交易信号）</b>' +
     '<br><span class="muted">批次 ' + esc(batch) + ' · 模型 ' + esc(research.model || '-') +
     ' · prompt ' + esc(research.prompt_version || '-') + ' · 基础池 ' + esc((research.universe || []).length) + ' 只</span>' +
-    research.candidates.map(researchCard).join('');
+    (!candidates.length ? '<div class="box" style="margin-top:12px"><b>本批次无候选：</b>' +
+      esc(research.no_candidate_reason || research.error || '模型未提供原因（旧版批次）') + '</div>' : '') +
+    candidates.map(researchCard).join('') +
+    (exclusions.length ? '<div class="section" style="margin-top:14px">未入选股票</div>' +
+      exclusions.map(exclusionCard).join('') : '');
 }
 async function load() {
   try {

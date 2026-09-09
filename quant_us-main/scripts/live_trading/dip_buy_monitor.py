@@ -324,7 +324,8 @@ class DipBuyMonitor:
         op = result.get('option_pressure') or {}
         if op.get('label') and op['label'] != 'no_data':
             iv_txt = f"，IV≈{float(op['avg_iv']) * 100:.0f}%" if op.get('avg_iv') is not None else ''
-            pc_txt = f"，P/C OI={float(op['put_call_oi']):.2f}" if op.get('put_call_oi') is not None else ''
+            sample_pc = op.get('sample_put_call_oi')
+            pc_txt = f"，ATM样本 P/C OI={float(sample_pc):.2f}" if sample_pc is not None else ''
             reason += f"；期权: {op['label']}{iv_txt}{pc_txt}"
         reason += f"；单票名义金额上限 ${size_usd:.0f}，数量按账户风险预算核算"
         ig = result.get('index_gate') or {}
@@ -733,7 +734,7 @@ class DipBuyMonitor:
         """
         从 signal_context 已拉取的数据里提取两个结构化影子字段：
           result['flow_quality']   资金流：主力(超大+大单)净流入/流出方向
-          result['option_pressure']期权：近月ATM 平均IV + put/call OI 压力
+          result['option_pressure']期权：近月ATM附近样本 IV + put/call OI 结构
         仅用于确认页展示与 dip_scans 归因，不参与评分与拦截。
         """
         ctx = signal_ctx or {}
@@ -799,7 +800,9 @@ class DipBuyMonitor:
         result['option_pressure'] = {
             'label': label,
             'avg_iv': round(avg_iv, 4) if avg_iv is not None else None,
-            'put_call_oi': round(put_call, 2) if put_call is not None else None,
+            # signal_context 只带 ATM 附近腿，不能冒充完整链 PCR。
+            'sample_put_call_oi': round(put_call, 2) if put_call is not None else None,
+            'chain_scope': 'near_atm_sample',
             'expiry': opt.get('expiry'),
         }
 
@@ -910,7 +913,8 @@ class DipBuyMonitor:
                 flow_main_net=fq.get('main_net'),
                 option_label=op.get('label'),
                 avg_iv=op.get('avg_iv'),
-                put_call_oi=op.get('put_call_oi'),
+                sample_put_call_oi=op.get('sample_put_call_oi'),
+                option_chain_scope=op.get('chain_scope'),
                 option_expiry=op.get('expiry'),
                 daily_gate_reason=trend_cache.get('reason'),
                 index_proxy=ig.get('proxy'),

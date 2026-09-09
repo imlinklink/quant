@@ -60,20 +60,24 @@ def rank(advisor, universe, packets, now=None):
     }
 
     if advisor is None or not getattr(advisor, 'enabled', False):
-        return dict(base, candidates=[], error='llm_disabled',
+        return dict(base, candidates=[], no_candidate_reason='', exclusions=[],
+                    error='llm_disabled',
                     research_batch_id=stable_id('research_batch', base, 'llm_disabled'))
 
     raw = advisor.chat(build_selection_prompt(universe, packets), system=SELECTION_SYSTEM)
     if raw is None:
-        return dict(base, candidates=[], error='llm_failed',
+        return dict(base, candidates=[], no_candidate_reason='', exclusions=[], error='llm_failed',
                     research_batch_id=stable_id('research_batch', base, 'llm_failed'))
 
     try:
         candidates = validate_selection(raw, universe, packets)
     except Exception as exc:
-        return dict(base, candidates=[], error=f'validate_failed: {exc}',
+        return dict(base, candidates=[], no_candidate_reason='', exclusions=[],
+                    error=f'validate_failed: {exc}',
                     research_batch_id=stable_id('research_batch', base, 'validate_failed', str(exc)))
 
-    batch = dict(base, candidates=candidates, error=None)
+    batch = dict(base, candidates=candidates,
+                 no_candidate_reason=str(raw.get('no_candidate_reason') or '').strip(),
+                 exclusions=list(raw.get('exclusions') or []), error=None)
     batch['research_batch_id'] = stable_id('research_batch', batch)
     return batch

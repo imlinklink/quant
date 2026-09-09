@@ -86,12 +86,18 @@ def build_evidence_packet(code, *, name=None, market=None, sector=None, risk_gro
     evidence_items = []
     for e in events:
         if isinstance(e, dict) and e.get('evidence_id'):
-            evidence_items.append(e)
+            item = dict(e)
         else:
-            evidence_items.append(evidence(
+            item = evidence(
                 str(e.get('summary', '')), str(e.get('source', 'internal:rule')),
                 e.get('observed_at', now), e.get('published_at'),
-                e.get('cluster_id'), str(e.get('kind', 'rule'))))
+                e.get('cluster_id'), str(e.get('kind', 'rule')))
+        # 同一条宏观/模板证据可能同时进入多只股票。selection 的引用必须
+        # 绑定当前 packet 股票，避免相同原始 evidence_id 被跨股票误引用。
+        source_evidence_id = item.get('evidence_id')
+        item['source_evidence_id'] = source_evidence_id
+        item['evidence_id'] = stable_id('evidence', str(code), source_evidence_id)
+        evidence_items.append(item)
 
     data_quality = build_data_quality(quote, evidence_items, fundamentals, now)
 

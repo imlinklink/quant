@@ -1,7 +1,7 @@
 """LLM 选股影子排序（首个迭代）回归：越权/引用/失败/空列表/无订单副作用。"""
 import unittest
 
-from mutifactor.llm.selection_review import validate_selection
+from mutifactor.llm.selection_review import SELECTION_SYSTEM, validate_selection
 from scripts.live_trading.decision_ledger.evidence_packet import build_evidence_packet
 from scripts.live_trading.llm_selection import rank
 
@@ -32,24 +32,37 @@ def _candidate(code, catalyst=(), counter=()):
             'confidence_bucket': 'medium', 'missing_information': ['缺财报']}
 
 
+def _excluded(code, evidence=(), effect='neutral'):
+    return {'code': code, 'reason': '当前证据不足以进入候选',
+            'evidence_ids': list(evidence), 'option_view_effect': effect}
+
+
+def _raw(candidates, exclusions=(), reason='当前没有满足条件的候选'):
+    return {'candidates': list(candidates), 'no_candidate_reason': reason,
+            'exclusions': list(exclusions)}
+
+
 class SelectionContracts(unittest.TestCase):
     def setUp(self):
         self.universe = ['US.A', 'US.B']
         self.packets = [_packet(c) for c in self.universe]
 
+    def test_prompt_forbids_reversing_pcr_direction(self):
+        self.assertIn('不得把 >1 写成看涨或把 <1 写成看空', SELECTION_SYSTEM)
+
     def test_validate_selection_rejects_out_of_universe(self):
-        raw = {'candidates': [_candidate('US.OUT')]}
+        raw = _raw([_candidate('US.OUT')])
         with self.assertRaisesRegex(ValueError, '越权'):
             validate_selection(raw, self.universe, self.packets)
 
     def test_validate_selection_rejects_bad_reference(self):
-        raw = {'candidates': [_candidate('US.A', catalyst=['unknown-id'])]}
+        raw = _raw([_candidate('US.A', catalyst=['unknown-id'])])
         with self.assertRaisesRegex(ValueError, '引用'):
             validate_selection(raw, self.universe, self.packets)
 
     def test_validate_selection_accepts_valid_reference(self):
         eid = self.packets[0]['events'][0]['evidence_id']
-        raw = {'candidates': [_candidate('US.A', catalyst=[eid])]}
+        raw = _raw([_candidate('US.A', catalyst=[eid])], [_excluded('US.B')], reason='')
         self.assertEqual(len(validate_selection(raw, self.universe, self.packets)), 1)
 
     def test_rank_llm_failed_records_error(self):
@@ -62,13 +75,16 @@ class SelectionContracts(unittest.TestCase):
         self.assertEqual(batch['error'], 'llm_disabled')
 
     def test_rank_empty_candidates_ok(self):
-        batch = rank(_FakeAdvisor(raw={'candidates': []}), self.universe, self.packets)
+        raw = _raw([], [_excluded('US.A'), _excluded('US.B')])
+        batch = rank(_FakeAdvisor(raw=raw), self.universe, self.packets)
         self.assertIsNone(batch['error'])
         self.assertEqual(batch['candidates'], [])
+        self.assertEqual(len(batch['exclusions']), 2)
+        self.assertTrue(batch['no_candidate_reason'])
         self.assertIsNotNone(batch['research_batch_id'])
 
     def test_rank_out_of_universe_no_order_side_effect(self):
-        raw = {'candidates': [_candidate('US.OUT')]}
+        raw = _raw([_candidate('US.OUT')])
         batch = rank(_FakeAdvisor(raw=raw), self.universe, self.packets)
         self.assertIn('validate_failed', batch['error'])
         self.assertNotIn('proposal_id', batch)
@@ -80,8 +96,9 @@ class SelectionContracts(unittest.TestCase):
         p1 = _packet('US.A')
         p2 = copy.deepcopy(p1)
         p2['quote'] = dict(p1['quote'], price=9999.0)
-        b1 = rank(_FakeAdvisor(raw={'candidates': []}), ['US.A'], [p1])
-        b2 = rank(_FakeAdvisor(raw={'candidates': []}), ['US.A'], [p2])
+        raw = _raw([], [_excluded('US.A')])
+        b1 = rank(_FakeAdvisor(raw=raw), ['US.A'], [p1])
+        b2 = rank(_FakeAdvisor(raw=raw), ['US.A'], [p2])
         self.assertNotEqual(b1['packets_hash'], b2['packets_hash'])
         self.assertNotEqual(b1['research_batch_id'], b2['research_batch_id'])
         self.assertIn('packets_hash', b1)
@@ -89,15 +106,15 @@ class SelectionContracts(unittest.TestCase):
 
     def test_duplicate_code_rejected(self):
         eid = self.packets[0]['events'][0]['evidence_id']
-        raw = {'candidates': [_candidate('US.A', catalyst=[eid]),
-                              _candidate('US.A', catalyst=[eid])]}
+        raw = _raw([_candidate('US.A', catalyst=[eid]),
+                    _candidate('US.A', catalyst=[eid])])
         with self.assertRaisesRegex(ValueError, '重复代码'):
             validate_selection(raw, self.universe, self.packets)
 
     def test_duplicate_rank_rejected(self):
         eid = self.packets[0]['events'][0]['evidence_id']
-        raw = {'candidates': [_candidate('US.A', catalyst=[eid]),
-                              _candidate('US.B', catalyst=[eid])]}  # 两个 rank 都=1
+        raw = _raw([_candidate('US.A', catalyst=[eid]),
+                    _candidate('US.B', catalyst=[eid])], reason='')  # 两个 rank 都=1
         with self.assertRaisesRegex(ValueError, '重复 rank'):
             validate_selection(raw, self.universe, self.packets)
 
@@ -106,14 +123,27 @@ class SelectionContracts(unittest.TestCase):
         c = _candidate('US.A', catalyst=[eid])
         c['rank'] = 2  # 跳过 1 → 断裂
         with self.assertRaisesRegex(ValueError, 'rank 断裂'):
-            validate_selection({'candidates': [c]}, self.universe, self.packets)
+            validate_selection(_raw([c]), self.universe, self.packets)
 
     def test_no_support_evidence_rejected(self):
         # P1-5：既无支持证据也无资料不足 → 拒绝
         c = _candidate('US.A', catalyst=[], counter=[])
         c['missing_information'] = []
         with self.assertRaisesRegex(ValueError, '支持证据'):
-            validate_selection({'candidates': [c]}, self.universe, self.packets)
+            validate_selection(_raw([c]), self.universe, self.packets)
+
+    def test_empty_candidates_requires_reason_and_complete_exclusions(self):
+        with self.assertRaisesRegex(ValueError, 'no_candidate_reason'):
+            validate_selection(_raw([], [_excluded('US.A'), _excluded('US.B')], reason=''),
+                               self.universe, self.packets)
+        with self.assertRaisesRegex(ValueError, '完整覆盖'):
+            validate_selection(_raw([], [_excluded('US.A')]), self.universe, self.packets)
+
+    def test_exclusion_reference_must_belong_to_same_stock(self):
+        eid_a = self.packets[0]['events'][0]['evidence_id']
+        raw = _raw([], [_excluded('US.A'), _excluded('US.B', [eid_a])])
+        with self.assertRaisesRegex(ValueError, '排除项引用不存在'):
+            validate_selection(raw, self.universe, self.packets)
 
     def test_research_batch_persisted(self):
         import tempfile
