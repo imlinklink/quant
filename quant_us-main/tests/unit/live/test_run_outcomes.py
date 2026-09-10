@@ -53,6 +53,20 @@ class RunOutcomesTests(unittest.TestCase):
                 (self.registry.namespace, 'batch1', '1d')).fetchall()
         self.assertEqual(sorted(r[0] for r in rows), ['US.A', 'US.B'])
 
+    def test_v2_decision_id_and_pending_horizons(self):
+        short = self.bars[self.bars['date'] <= pd.Timestamp('2026-01-12', tz='UTC')]
+        batch = {'universe': ['US.A'], 'as_of': self.as_of,
+                 'research_batch_id': 'batch1', 'decision_id': 'decision1'}
+        self.assertEqual(run(self.registry, [batch], short), 5)
+        settlement = OutcomeSettlement(self.registry)
+        with settlement.events.transaction() as con:
+            rows = con.execute(
+                'SELECT horizon,data_quality FROM decision_outcomes_v2 '
+                'WHERE account_scope=? AND decision_id=? ORDER BY horizon',
+                (self.registry.namespace, 'decision1')).fetchall()
+        self.assertEqual(len(rows), 5)
+        self.assertIn(('5d', 'pending_future_bars'), rows)
+
     def test_settle_entry_and_position(self):
         from mutifactor.llm.contracts.entry_v2 import build_entry_templates
         settlement = OutcomeSettlement(self.registry)

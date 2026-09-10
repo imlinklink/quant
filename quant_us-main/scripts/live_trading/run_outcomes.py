@@ -23,7 +23,8 @@ from scripts.live_trading.decision_ledger.selection_outcomes import CLOSE_HOUR_U
 HORIZONS = (1, 3, 5, 10, 20)
 
 
-def code_close_series(bars: pd.DataFrame, code: str, as_of, max_bars: int = 21):
+def code_close_series(bars: pd.DataFrame, code: str, as_of, max_bars: int = 21,
+                      require_future: bool = True):
     """从 bars（含 code/date/close，date=UTC）提取该股票自决策基准收盘价起的一段 close 序列。
 
     返回 [base_close, future_close_1, ...]；序列不足 2 根（无未来数据）返回 []。
@@ -45,7 +46,7 @@ def code_close_series(bars: pd.DataFrame, code: str, as_of, max_bars: int = 21):
     base = float(closed.iloc[-1]['close'])
     future = df[df['date'] > base_date]
     closes = [base] + [float(c) for c in future['close'].head(max_bars - 1).tolist()]
-    return closes if len(closes) >= 2 else []
+    return closes if len(closes) >= (2 if require_future else 1) else []
 
 
 def settle_selection_batch(batch: dict, bars: pd.DataFrame, settlement: OutcomeSettlement,
@@ -54,19 +55,33 @@ def settle_selection_batch(batch: dict, bars: pd.DataFrame, settlement: OutcomeS
     """结算一个研究批次：universe 每只股票写 1/3/5/10/20d outcome。返回写入条数。"""
     universe = list(batch.get('universe') or [])
     as_of = batch.get('as_of')
-    decision_id = batch.get('research_batch_id') or batch.get('decision_id')
+    # v2 决策必须以 DecisionRun ID 为外键；旧批次才退回 research_batch_id。
+    decision_id = batch.get('decision_id') or batch.get('research_batch_id')
     if not universe or not as_of or not decision_id:
         return 0
     n = 0
     for code in universe:
-        closes = code_close_series(bars, code, as_of)
+        closes = code_close_series(bars, code, as_of, require_future=False)
         if not closes:
             continue
         bench = None
         if benchmark_bars is not None:
-            bench = code_close_series(benchmark_bars, benchmark_code, as_of)
-        n += settlement.settle_selection(decision_id, code, closes,
-                                         benchmark_closes=bench, data_quality='good')
+            bench = code_close_series(benchmark_bars, benchmark_code, as_of,
+                                      require_future=False)
+        written = settlement.settle_selection(decision_id, code, closes,
+                                               benchmark_closes=bench, data_quality='good')
+        n += written
+        completed = {f'{h}d' for h in HORIZONS if len(closes) > h}
+        for horizon in (f'{h}d' for h in HORIZONS):
+            if horizon in completed:
+                continue
+            settlement.write_outcome(decision_id, {
+                'horizon': horizon, 'data_quality': 'pending_future_bars',
+                'body': {'code': code, 'decision_id': decision_id,
+                         'available_future_bars': max(0, len(closes) - 1),
+                         'status': 'pending'},
+            }, subject_key=code)
+            n += 1
     return n
 
 
@@ -130,9 +145,13 @@ def main():
             from datetime import timedelta
             start = (pd.Timestamp(as_of) - timedelta(days=40)).strftime('%Y-%m-%d')
             end = (pd.Timestamp(as_of) + timedelta(days=30)).strftime('%Y-%m-%d')
-            bars_map.update(fetcher.fetch_multiple_stocks(universe, start, end))
+            bars_map.update(fetcher.fetch_multiple_stocks(list(dict.fromkeys(universe + ['US.SPY'])), start, end))
         bars = merge_bars(bars_map)
-        total = run(REGISTRY, batches, bars)
+        benchmark_bars = bars[bars['code'] == 'US.SPY'] if not bars.empty else bars
+        runtime_cfg = (config.get('llm_decision', {}).get('engine_v2') or {})
+        from scripts.live_trading.position_registry import PositionRegistry
+        registry = PositionRegistry(namespace=runtime_cfg.get('account_scope', 'DRY-RUN'))
+        total = run(registry, batches, bars, benchmark_bars=benchmark_bars)
     finally:
         fetcher.disconnect()
     print(f'settled {total} outcomes')

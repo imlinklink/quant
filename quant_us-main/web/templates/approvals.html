@@ -308,6 +308,10 @@ async function loadHealth() {
     const lastScan = scan.last_heartbeat_at || scan.last_signal_at;
     const scanLabel = scan.last_heartbeat_at ? '' : '（信号事件时间，非心跳）';
     const prop = h.proposals || {};
+    const engine = h.decision_engine || {};
+    const engineLabel = engine.status === 'insufficient_sample'
+      ? '样本不足（' + esc(engine.sample_size || 0) + '/' + esc(engine.minimum_sample_size || 10) + '）'
+      : engine.status === 'abnormal' ? '动作分布异常' : engine.status === 'ok' ? '动作分布正常' : '-';
     const el = document.getElementById('health');
     el.style.display = 'block';
     el.innerHTML = '📊 决策健康：LLM <b>' + esc(llmStatus) + '</b>' +
@@ -316,7 +320,9 @@ async function loadHealth() {
       ' / 失败 ' + esc(llm.failure_count) + ' / 资料不足 ' + esc(llm.insufficient_count) +
       '<br>最近扫描 ' + (lastScan ? esc(lastScan) : '暂无') + esc(scanLabel) +
       ' · 规则通过 ' + esc(scan.rule_passed) + ' / 拒绝 ' + esc(scan.rule_rejected) +
-      ' · 提案 ' + esc(prop.total) + '（评估中 ' + esc(prop.in_review) + '）';
+      ' · 提案 ' + esc(prop.total) + '（评估中 ' + esc(prop.in_review) + '）' +
+      '<br>Decision Engine：' + engineLabel +
+      ' · 独立决策 ' + esc(engine.independence_group_count || 0);
   } catch (e) { }
 }
 load();

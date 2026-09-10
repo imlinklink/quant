@@ -35,6 +35,18 @@ class ReviewSchedulerTests(unittest.TestCase):
         self.assertLess(self.scheduler.position_priority('hard_exit_post'),
                         self.scheduler.position_priority('scheduled_close'))
 
+    def test_outcome_due_and_daily_claim_are_idempotent(self):
+        registry = self.scheduler.events.registry
+        self.scheduler = ReviewScheduler(registry, {
+            'llm_decision': {'outcomes': {'enabled': True, 'time': '17:30'}}})
+        tz = ZoneInfo('America/New_York')
+        self.assertIsNone(self.scheduler.outcome_due(
+            datetime(2026, 9, 9, 17, 29, tzinfo=tz)))
+        day = self.scheduler.outcome_due(datetime(2026, 9, 9, 18, 0, tzinfo=tz))
+        self.assertEqual(day, '2026-09-09')
+        self.assertTrue(self.scheduler.claim_daily_job('selection_outcomes', day))
+        self.assertFalse(self.scheduler.claim_daily_job('selection_outcomes', day))
+
 
 if __name__ == '__main__':
     unittest.main()

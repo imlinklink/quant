@@ -137,13 +137,16 @@ class ProjectDecisionMetrics:
 
     # ---------- 健康 ----------
 
-    def health(self) -> Dict[str, Any]:
+    def health(self, min_action_sample: int = 10) -> Dict[str, Any]:
         """运行健康（§21）：连续相同动作、数据质量、outcome 覆盖。"""
         with self.events.transaction() as con:
             actions = con.execute(
-                "SELECT body FROM decision_events WHERE account_scope=? "
-                "AND event_type='decision_effective_action' ORDER BY observed_at DESC LIMIT 10",
-                (self.scope,)).fetchall()
+                "SELECT e.body,r.subject_id FROM decision_events e "
+                "LEFT JOIN llm_decision_runs r ON r.account_scope=e.account_scope "
+                "AND r.decision_id=json_extract(e.body,'$.decision_id') "
+                "WHERE e.account_scope=? AND e.event_type='decision_effective_action' "
+                "ORDER BY e.observed_at DESC LIMIT ?",
+                (self.scope, int(min_action_sample))).fetchall()
             validated = con.execute(
                 'SELECT COUNT(*) FROM llm_decision_runs WHERE account_scope=? AND status=?',
                 (self.scope, 'validated')).fetchone()[0]
@@ -152,11 +155,20 @@ class ProjectDecisionMetrics:
                 (self.scope,)).fetchone()[0]
         import json as _json
         last_effective = []
-        for (body,) in actions:
+        groups = set()
+        for body, subject_id in actions:
             p = _json.loads(body).get('payload', {})
             last_effective.append(p.get('effective_action'))
-        all_same = len(set(last_effective)) <= 1 if last_effective else False
+            groups.add(subject_id or p.get('decision_id'))
+        sample_size = len(last_effective)
+        enough = sample_size >= min_action_sample and len(groups) >= min_action_sample
+        all_same = len(set(last_effective)) == 1 if enough else None
         return {
             'all_same_action': all_same,
+            'all_same_action_alert': bool(all_same) if enough else False,
+            'status': ('abnormal' if all_same else 'ok') if enough else 'insufficient_sample',
+            'sample_size': sample_size,
+            'independence_group_count': len(groups),
+            'minimum_sample_size': int(min_action_sample),
             'outcome_coverage': {'validated': int(validated), 'settled': int(outcomes)},
         }

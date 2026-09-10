@@ -515,6 +515,8 @@ def api_decision_health():
         proposals=approval_store.get_all(),
         scope=approval_store.events.scope,
     )
+    from scripts.live_trading.project_decision_metrics import ProjectDecisionMetrics
+    health['decision_engine'] = ProjectDecisionMetrics(_decision_registry()).health()
     return jsonify({'ok': True, 'health': health, 'server_time': datetime.now().timestamp()})
 
 

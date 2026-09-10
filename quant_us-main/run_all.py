@@ -58,6 +58,7 @@ class UnifiedSystem:
         self.flask_thread = None
         self.flask_app = None
         self.running = True
+        self.outcome_scheduler = None
 
         # 加载配置
         config_path = os.path.join(BASE_DIR, "config.yaml")
@@ -186,6 +187,12 @@ class UnifiedSystem:
             except Exception:
                 pass
 
+            # 收盘后补算 Selection 1/3/5/10/20d outcome；仅写决策账本。
+            from scripts.live_trading.outcome_scheduler import OutcomeSchedulerThread
+            self.outcome_scheduler = OutcomeSchedulerThread(
+                self.config, os.path.join(BASE_DIR, 'config.yaml'))
+            self.outcome_scheduler.start()
+
         logger.info("\n💡 Ctrl+C 优雅退出")
         logger.info(f"🌐 http://127.0.0.1:{WEB_PORT}")
 
@@ -209,6 +216,8 @@ class UnifiedSystem:
         logger.info("\n🛑 收到退出信号...")
         self.running = False
         if not self.web_only:
+            if self.outcome_scheduler:
+                self.outcome_scheduler.stop()
             for monitor in getattr(self, 'pullback_monitors', []):
                 monitor.stop()
             if hasattr(self, "dip_monitor"):

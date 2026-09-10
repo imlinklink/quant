@@ -95,8 +95,12 @@ def fetch_daily_data(codes: List[str], start: str, end: str) -> Dict[str, pd.Dat
     return out
 
 
-def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """为单只股票一次性计算所有变体共用的指标（全部只用当日及之前数据）。"""
+def add_indicators(df: pd.DataFrame, channels=(20, 55)) -> pd.DataFrame:
+    """为单只股票一次性计算所有变体共用的指标（全部只用当日及之前数据）。
+
+    channels 指定额外需要的唐奇安通道长度（参数敏感性扫描用）；默认仍保证
+    hh20/hh55/ll10/ll20 存在，向后兼容。
+    """
     d = df.copy()
     high = d["high"]
     low = d["low"]
@@ -104,8 +108,8 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     vol = d["volume"].astype(float)
 
     # 唐奇安通道：以“此前 N 日”的最高/最低为基准（shift(1)，不含当日）
-    d["hh20"] = high.shift(1).rolling(20).max()
-    d["hh55"] = high.shift(1).rolling(55).max()
+    for n in sorted(set(list(channels) + [20, 55])):
+        d[f"hh{n}"] = high.shift(1).rolling(n).max()
     d["ll10"] = low.shift(1).rolling(10).min()
     d["ll20"] = low.shift(1).rolling(20).min()
 
@@ -178,8 +182,13 @@ VARIANT_DEFS = [
 ]
 
 
-def run_variant(df: pd.DataFrame, vdef: Dict) -> List[Dict]:
-    """单股票单变体回测。返回交易 dict 列表。"""
+def run_variant(df: pd.DataFrame, vdef: Dict, entry_allowed=None) -> List[Dict]:
+    """单股票单变体回测。返回交易 dict 列表。
+
+    entry_allowed: 可选回调 (signal_row, arr, i) -> bool，在**信号日**判定是否允许开仓
+    （市场状态/regime 过滤）。必须在信号日已知的信息上判断，不得使用未来数据。
+    返回 False 则跳过该信号继续扫描，等价于「空仓等待」。默认 None = 不限制。
+    """
     trades: List[Dict] = []
     arr = df.reset_index(drop=True)
     n = len(arr)
@@ -188,6 +197,8 @@ def run_variant(df: pd.DataFrame, vdef: Dict) -> List[Dict]:
     vol_ratio_min = vdef["vol_ratio"]
     ma_filter = vdef["ma_filter"]
     exit_mode = vdef["exit"]
+    # ATR 止损倍数可按变体覆盖（参数敏感性扫描用）；缺省沿用模块常量 2.0
+    stop_mult = float(vdef.get("stop_mult", STOP_MULT))
 
     i = 0
     while i < n:
@@ -212,6 +223,11 @@ def run_variant(df: pd.DataFrame, vdef: Dict) -> List[Dict]:
                 i += 1
                 continue
 
+        # 市场状态（regime）过滤：信号日不允许开仓则跳过该信号，继续扫描
+        if entry_allowed is not None and not entry_allowed(row, arr, i):
+            i += 1
+            continue
+
         # 信号日 = i，次日开盘入场（无前视）
         if i + 1 >= n:
             i += 1
@@ -229,7 +245,7 @@ def run_variant(df: pd.DataFrame, vdef: Dict) -> List[Dict]:
         else:  # reverse: 经典海龟，初始 2×ATR(信号日) 波动止损
             atr_entry = row["atr"]  # 入场开盘只能使用信号日已完成ATR
             stop = (
-                entry_px - STOP_MULT * atr_entry
+                entry_px - stop_mult * atr_entry
                 if np.isfinite(atr_entry)
                 else entry_px * (1 - FIXED_STOP_PCT)
             )
@@ -267,7 +283,7 @@ def run_variant(df: pd.DataFrame, vdef: Dict) -> List[Dict]:
                 highest = max(highest, float(bar["high"]))
                 atr_j = bar.get("atr")
                 if np.isfinite(atr_j):
-                    stop = max(stop, highest - STOP_MULT * float(atr_j))
+                    stop = max(stop, highest - stop_mult * float(atr_j))
 
             # 检查“次日”是否触发止损
             if j + 1 >= n:

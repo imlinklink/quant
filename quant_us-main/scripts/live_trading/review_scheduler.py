@@ -50,6 +50,35 @@ class ReviewScheduler:
                 return slot
         return None
 
+    def outcome_due(self, now: Optional[datetime] = None,
+                    tz: str = DEFAULT_TZ) -> Optional[str]:
+        """收盘后到达配置时刻即返回交易日；调用方用 claim_daily_job 保证每日一次。"""
+        now = now or datetime.now(ZoneInfo(tz))
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=ZoneInfo(tz))
+        now = now.astimezone(ZoneInfo(tz))
+        if now.weekday() >= 5:
+            return None
+        cfg = self.config.get('llm_decision', {}).get('outcomes', {})
+        if not cfg.get('enabled', False):
+            return None
+        hh, mm = (int(x) for x in str(cfg.get('time', '17:30')).split(':')[:2])
+        if (now.hour, now.minute) < (hh, mm):
+            return None
+        return now.date().isoformat()
+
+    def claim_daily_job(self, job_type: str, session_date: str) -> bool:
+        """原子领取日任务；同 scope/job/date 只允许一个进程成功。"""
+        key = stable_id('daily_job', self.scope, job_type, session_date)
+        event_id = stable_id('event', self.scope, 'daily_job_claimed', key)
+        with self.events.transaction() as con:
+            if con.execute('SELECT 1 FROM decision_events WHERE event_id=?', (event_id,)).fetchone():
+                return False
+            from .decision_ledger.event_store import insert_event, make_event
+            insert_event(con, make_event(self.scope, 'daily_job_claimed', key,
+                                         {'job_type': job_type, 'session_date': session_date}))
+        return True
+
     # ---------- Entry（§14.2） ----------
 
     def entry_key(self, signal_id: str, plan_version) -> str:
