@@ -119,6 +119,8 @@ def build_entry_packet(*, signal: Dict[str, Any], plan: Dict[str, Any],
                        quality_uses=('rank', 'entry'),
                        expires_at: str = '2999-01-01T00:00:00+00:00',
                        review_triggers=(),
+                       setup_snapshot: Optional[Dict[str, Any]] = None,
+                       selection_context: Optional[Dict[str, Any]] = None,
                        market_session: str = 'regular') -> Dict[str, Any]:
     """构造 §8.1 EntryPacket（程序先算好模板）。"""
     versions = versions or {'packet_schema': 'entry-v2', 'prompt': 'entry-v2',
@@ -136,7 +138,8 @@ def build_entry_packet(*, signal: Dict[str, Any], plan: Dict[str, Any],
     return {
         'context': context,
         'signal': signal,
-        'selection_context': {},
+        'selection_context': selection_context or {},
+        'setup_snapshot': setup_snapshot or {},
         'plan': plan,
         'templates': templates,
         'evidence': [evidence_item(e, plan.get('stock_code')) for e in evidence],

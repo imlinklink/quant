@@ -81,6 +81,8 @@ class DipBuyMonitor:
         self.buy_threshold = dip_cfg.get('buy_threshold', dip_cfg.get('strong_buy_threshold', 8))
         self.min_bars = dip_cfg.get('min_bars', 30)  # 最少K线根数
         self.max_positions = dip_cfg.get('max_positions', 3)
+        buy_v2 = config.get('buy_strategy_v2', {}) or {}
+        self.standalone_enabled = bool(buy_v2.get('standalone_dip_buy', True))
         
         # 仓位配置
         self.position_size_usd = dip_cfg.get('position_size_usd', 4000)  # 单只仓位（美元）
@@ -284,6 +286,9 @@ class DipBuyMonitor:
     def _queue_approval(self, code: str, price: float, result: Dict,
                         signal_ctx: Optional[Dict] = None) -> bool:
         """把抄底信号推送到确认页（不自动下单）"""
+        if not self.standalone_enabled:
+            logger.info('[影子基线] %s dip_buy 命中，但 standalone_dip_buy=false，不生成提案', code)
+            return False
         if self.approval_store is None:
             return False
 

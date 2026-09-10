@@ -12,13 +12,15 @@ logger = logging.getLogger(__name__)
 
 
 class OutcomeSchedulerThread:
-    def __init__(self, config: dict, config_path: str, stop_event=None, runner=None):
+    def __init__(self, config: dict, config_path: str, stop_event=None, runner=None,
+                 setup_runner=None):
         engine = config.get('llm_decision', {}).get('engine_v2', {})
         self.registry = PositionRegistry(namespace=engine.get('account_scope', 'DRY-RUN'))
         self.scheduler = ReviewScheduler(self.registry, config)
         self.config_path = str(config_path)
         self.stop_event = stop_event or threading.Event()
         self.runner = runner or self._run
+        self.setup_runner = setup_runner or self._run_setups
         self.thread = None
 
     def _run(self):
@@ -26,10 +28,24 @@ class OutcomeSchedulerThread:
         return subprocess.run([sys.executable, str(script), '--config', self.config_path],
                               check=False, timeout=1800).returncode
 
+    def _run_setups(self):
+        script = Path(__file__).with_name('run_daily_setups.py')
+        return subprocess.run([sys.executable, str(script), '--config', self.config_path,
+                               '--json'], check=False, timeout=1800).returncode
+
     def tick(self, now=None):
+        ran = False
+        setup_date = self.scheduler.setup_due(now)
+        if setup_date and self.scheduler.claim_daily_job('daily_setup_shadow', setup_date):
+            ran = True
+            try:
+                code = self.setup_runner()
+                logger.info('Daily setup shadow 完成: session=%s exit=%s', setup_date, code)
+            except Exception:
+                logger.exception('Daily setup shadow 失败: session=%s', setup_date)
         session_date = self.scheduler.outcome_due(now)
         if not session_date or not self.scheduler.claim_daily_job('selection_outcomes', session_date):
-            return False
+            return ran
         try:
             code = self.runner()
             logger.info('Selection Outcome 日任务完成: session=%s exit=%s', session_date, code)

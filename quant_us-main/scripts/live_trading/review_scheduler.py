@@ -67,6 +67,21 @@ class ReviewScheduler:
             return None
         return now.date().isoformat()
 
+    def setup_due(self, now: Optional[datetime] = None,
+                  tz: str = DEFAULT_TZ) -> Optional[str]:
+        """收盘后 Daily setup shadow 的到期交易日。"""
+        now = now or datetime.now(ZoneInfo(tz))
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=ZoneInfo(tz))
+        now = now.astimezone(ZoneInfo(tz))
+        if now.weekday() >= 5:
+            return None
+        cfg = self.config.get('buy_strategy_v2', {})
+        if not cfg.get('enabled', False) or cfg.get('mode') != 'shadow':
+            return None
+        hh, mm = (int(x) for x in str(cfg.get('schedule_time', '16:30')).split(':')[:2])
+        return now.date().isoformat() if (now.hour, now.minute) >= (hh, mm) else None
+
     def claim_daily_job(self, job_type: str, session_date: str) -> bool:
         """原子领取日任务；同 scope/job/date 只允许一个进程成功。"""
         key = stable_id('daily_job', self.scope, job_type, session_date)

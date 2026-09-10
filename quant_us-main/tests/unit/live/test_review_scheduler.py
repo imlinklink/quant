@@ -47,6 +47,17 @@ class ReviewSchedulerTests(unittest.TestCase):
         self.assertTrue(self.scheduler.claim_daily_job('selection_outcomes', day))
         self.assertFalse(self.scheduler.claim_daily_job('selection_outcomes', day))
 
+    def test_daily_setup_shadow_due_after_close(self):
+        registry = self.scheduler.events.registry
+        self.scheduler = ReviewScheduler(registry, {
+            'buy_strategy_v2': {'enabled': True, 'mode': 'shadow',
+                                'schedule_time': '16:30'}})
+        tz = ZoneInfo('America/New_York')
+        self.assertIsNone(self.scheduler.setup_due(
+            datetime(2026, 9, 9, 16, 29, tzinfo=tz)))
+        self.assertEqual(self.scheduler.setup_due(
+            datetime(2026, 9, 9, 16, 31, tzinfo=tz)), '2026-09-09')
+
 
 if __name__ == '__main__':
     unittest.main()

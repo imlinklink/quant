@@ -315,17 +315,26 @@ def replay_stock(code, df, cfg, threshold, time_exit_bars, entry_gate=None):
 
         state = PositionExitState(entry_px, 'long', **exit_kw)
         exit_px, exit_reason, exit_time, j = None, None, None, entry_idx
+        mfe_pct, mae_pct = 0.0, 0.0
+        reached_breakeven = reached_trailing = reached_atr = False
         while j < n:
             b = df.iloc[j]
             atr = atr_vals[j]
-            if np.isfinite(atr) and atr > 0:
-                state.recompute(float(atr), float(b['close']))
+            mfe_pct = max(mfe_pct, (float(b['high']) / entry_px - 1.0) * 100.0)
+            mae_pct = min(mae_pct, (float(b['low']) / entry_px - 1.0) * 100.0)
+            # 先用上一根已生效的保护线检查当前 bar。不能先用本 bar 收盘更新止损，
+            # 再回头拿同一 bar 的历史 low 检查，否则引入 bar 内前视。
             should, reason, stop_px = state.check_exit(float(b['low']))
             if should:
                 # 跳空：开盘已在止损之外则按开盘成交
                 exit_px = min(float(b['open']), float(stop_px)) if stop_px else float(b['open'])
                 exit_reason, exit_time = reason, b['time_key']
                 break
+            if np.isfinite(atr) and atr > 0:
+                state.recompute(float(atr), float(b['close']))
+                reached_breakeven = reached_breakeven or state._breakeven_moved
+                reached_trailing = reached_trailing or state._trailing_activated
+                reached_atr = reached_atr or state._atr_mode_active
             if j - entry_idx + 1 >= time_exit_bars:
                 exit_px, exit_reason, exit_time = float(b['close']), 'TIME_EXIT', b['time_key']
                 break
@@ -341,6 +350,9 @@ def replay_stock(code, df, cfg, threshold, time_exit_bars, entry_gate=None):
             'entry_date': str(entry_time), 'exit_date': str(exit_time),
             'entry_price': round(entry_px, 4), 'exit_price': round(exit_px, 4),
             'reason': exit_reason, 'score': int(res.get('score', 0)),
+            'mfe_pct': round(mfe_pct, 3), 'mae_pct': round(mae_pct, 3),
+            'reached_breakeven': reached_breakeven,
+            'reached_trailing': reached_trailing, 'reached_atr': reached_atr,
             'gross_pnl_pct': round(gross_pct, 3), 'net_pnl_pct': round(net_pct, 3),
             'net_pnl_usd': round(net_pct / 100.0 * POSITION_USD, 2),
             'open': exit_reason == '期末未平仓',

@@ -167,6 +167,19 @@ class NoLookaheadTests(unittest.TestCase):
 
 
 class ExitBehaviourTests(unittest.TestCase):
+    def test_new_stop_does_not_apply_to_earlier_low_in_same_bar(self):
+        df = make_bars(n=100)
+        df.loc[70, 'close'] = SENTINEL_CLOSE
+        # 入场 bar 先下探 99、后收 105。旧保护线为 95；收盘生成的新 trailing
+        # 不能回头作用于该 bar 的 low。
+        df.loc[71, ['open', 'high', 'low', 'close']] = [100.0, 105.5, 99.0, 105.0]
+        df.loc[72, ['open', 'high', 'low', 'close']] = [103.0, 103.5, 103.0, 103.0]
+        with patch('scripts.run_dip_buy_backtest.analyze_score', stub_score()):
+            trades = replay_stock('US.SYN', df, CFG, threshold=7, time_exit_bars=2)
+        self.assertEqual(trades[0]['reason'], 'TIME_EXIT')
+        self.assertEqual(trades[0]['exit_date'], str(df.loc[72, 'time_key']))
+        self.assertTrue(trades[0]['reached_trailing'])
+
     def test_time_exit_after_n_bars(self):
         df = make_bars(n=100)
         df.loc[70, 'close'] = SENTINEL_CLOSE
