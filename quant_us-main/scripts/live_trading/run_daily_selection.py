@@ -143,7 +143,7 @@ def build_packet_from_bars(code, bars, *, name=None, sector=None, risk_group=Non
                                  quote=quote, events=all_events, now=bar_end_iso)
 
 
-def run_selection(config, advisor, fetcher, now=None, dry_run=False):
+def run_selection(config, advisor, fetcher, now=None, dry_run=False, registry=None):
     """执行每日选股：冻结基础池 → 拉行情 → 生成 packet → LLM 排名 → 返回研究批次。"""
     from scripts.live_trading.llm_selection import rank
     from scripts.live_trading.llm_suggestions.store import save_research_batch
@@ -195,7 +195,60 @@ def run_selection(config, advisor, fetcher, now=None, dry_run=False):
         return {'dry_run': True, 'universe': universe, 'packet_count': len(packets),
                 'codes_with_data': [p['code'] for p in packets]}
 
-    batch = rank(advisor, universe, packets, now=now)
+    from scripts.live_trading.decision_runtime import DecisionRuntime, engine_v2_config
+    runtime_cfg = engine_v2_config(config)
+    mode = str(runtime_cfg.get('selection', 'legacy')).lower()
+    if mode == 'shadow':
+        from scripts.live_trading.decision_bridge import (
+            build_selection_packet, selection_legacy_projection, stocks_from_packets,
+        )
+        from scripts.live_trading.llm_selection import freeze_input
+        from scripts.live_trading.decision_ledger.event_store import digest, stable_id, utc
+        from scripts.live_trading.position_registry import PositionRegistry
+
+        packet_ids, packets_hash = freeze_input(universe, packets)
+        # context.as_of 覆盖本次冻结输入中的最新行情/事件时间，防止把本轮刚取得的
+        # 新闻和期权证据误判为相对上一交易日收盘的“未来证据”。这些时间均属于
+        # 冻结 packet 内容，因此相同输入重跑仍会得到稳定批次键。
+        input_times = []
+        for p in packets:
+            input_times.extend([p.get('as_of'), (p.get('quote') or {}).get('data_cutoff_at'),
+                                (p.get('quote') or {}).get('observed_at')])
+            for e in p.get('events', []):
+                input_times.extend([e.get('effective_at'), e.get('observed_at'),
+                                    e.get('published_at')])
+        as_of = max((str(x) for x in input_times if x), default='') or utc(now)
+        batch_id = stable_id('research_batch',
+                             runtime_cfg.get('account_scope', 'DRY-RUN'),
+                             digest(universe), packets_hash, as_of)
+        scope = runtime_cfg.get('account_scope') or (
+            registry.namespace if registry is not None else 'DRY-RUN')
+        decision_registry = registry or PositionRegistry(namespace=scope)
+        try:
+            packet = build_selection_packet(
+                batch_id=batch_id, account_scope=decision_registry.namespace,
+                discovery_codes=universe, stocks=stocks_from_packets(packets), as_of=as_of,
+                model={'provider': 'configured', 'model_id': getattr(advisor, 'model', ''),
+                       'temperature': 0.0, 'timeout_seconds': 60})
+        except Exception:
+            if bool(runtime_cfg.get('fallback_before_call', True)):
+                logger.exception('Selection v2 输入桥接失败，模型调用前回退 legacy')
+                batch = rank(advisor, universe, packets, now=now)
+            else:
+                raise
+        else:
+            # 从这里开始不得再回退旧模型，避免同一业务决策发生两次模型调用。
+            result = DecisionRuntime(decision_registry, advisor, config).engine().decide_selection(packet)
+            base = {
+                'research_batch_id': batch_id,
+                'universe_hash': digest(universe), 'packets_hash': packets_hash,
+                'packet_ids': packet_ids, 'as_of': as_of,
+                'prompt_version': 'selection-v4.2', 'schema_version': 'selection-v4.2',
+                'model': getattr(advisor, 'model', ''), 'universe': universe,
+            }
+            batch = dict(base, **selection_legacy_projection(result))
+    else:
+        batch = rank(advisor, universe, packets, now=now)
     save_research_batch(batch)
     return batch
 

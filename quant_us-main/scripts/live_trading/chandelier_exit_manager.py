@@ -1273,7 +1273,9 @@ class ChandelierExitManager:
             try:
                 if not hasattr(self, '_position_reviewer'):
                     from scripts.live_trading.position_review import PositionReviewScheduler
-                    self._position_reviewer = PositionReviewScheduler(REGISTRY, self.llm_advisor, cfg)
+                    self._position_reviewer = PositionReviewScheduler(
+                        REGISTRY, self.llm_advisor, cfg,
+                        decision_config=getattr(self, 'config', {}))
                 self._position_reviewer.schedule(code, price, event_reason=reason if hit else None)
             except Exception:
                 logger.exception('影子持仓复核失败；保留原计划')

@@ -18,7 +18,33 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(BASE_DIR))
 
 from scripts.live_trading.decision_ledger.decision_run_store import DecisionRunStore
+from scripts.live_trading.decision_ledger.event_store import digest
 from scripts.live_trading.position_registry import REGISTRY
+
+_INPUT_KIND = {'selection': 'selection_input', 'entry': 'entry_input',
+               'position': 'position_input'}
+
+
+def _role_validator(role):
+    """返回角色对应的契约校验器（raw, packet）→ 错误列表。"""
+    if role == 'selection':
+        from mutifactor.llm.contracts.selection_v4 import validate_selection_packet
+        return validate_selection_packet
+    if role == 'entry':
+        from mutifactor.llm.contracts.entry_v2 import validate_entry_v2
+        return validate_entry_v2
+    if role == 'position':
+        from mutifactor.llm.contracts.position_v2 import validate_position_v2
+        return validate_position_v2
+    return None
+
+
+def _normalize_for_replay(role, parsed, packet):
+    """执行与在线 DecisionEngine 相同的确定性规范化，不调用网络。"""
+    if role == 'selection':
+        from mutifactor.llm.contracts.selection_v4 import normalize_selection_output
+        return normalize_selection_output(parsed, packet)
+    return parsed
 
 
 def _deep_diff(a, b, prefix=''):
@@ -94,27 +120,59 @@ class ReplayEngine:
         }
 
     def validate(self, decision_id, output_schema=None):
-        """用历史 parsed_response 重新校验（结构健全；若给 schema 则做 schema 校验）。"""
+        """用历史 parsed_response 重新做结构/证据/引用校验（离线，不调用网络）。
+
+        重算输入快照哈希并与 run.input_snapshot_id 比对（input_hash_match），
+        再用角色对应的契约校验器重新校验每个 attempt 的 parsed_response。
+        """
         proj = self.project(decision_id)
         if proj is None:
             return {'decision_id': decision_id, 'error': 'not_found'}
+        run = proj['run']
+        role = run.get('role')
         report = {'decision_id': decision_id, 'network_used': False, 'checks': []}
+
+        # 重算输入快照哈希（快照是内容寻址的：id = digest({kind,subject_id,packet,version})）
         snap = proj.get('input_snapshot')
-        report['input_hash_match'] = True
-        if snap is not None and proj['run'].get('input_snapshot_id'):
-            report['input_snapshot_present'] = True
+        kind = _INPUT_KIND.get(role)
+        input_hash_match = False
+        if kind and snap is not None and run.get('input_snapshot_id'):
+            recomputed = digest({'kind': kind, 'subject_id': run.get('subject_id'),
+                                 'packet': snap, 'version': 1})
+            input_hash_match = (recomputed == run['input_snapshot_id'])
+        report['input_hash_match'] = input_hash_match
+        report['input_snapshot_present'] = snap is not None
+
+        validator = _role_validator(role)
+        validated_all = input_hash_match and snap is not None
         for att in proj['attempts']:
             check = {'attempt_id': att.get('attempt_id'), 'status': att.get('status')}
             parsed = att.get('parsed_response')
-            if isinstance(parsed, dict):
-                check['has_parsed'] = True
-                check['keys'] = sorted(parsed.keys())
-            else:
+            if not isinstance(parsed, dict):
                 check['has_parsed'] = False
+                check['valid'] = False
+                validated_all = False
+            elif validator is None or snap is None:
+                check['has_parsed'] = True
+                check['valid'] = None  # 无法校验（无契约或输入快照缺失）
+            else:
+                check['has_parsed'] = True
+                try:
+                    normalized = _normalize_for_replay(role, parsed, snap)
+                    errs = validator(normalized, snap)
+                    check['normalized'] = normalized != parsed
+                    check['validation_errors'] = list(errs)
+                    check['valid'] = not errs
+                    if errs:
+                        validated_all = False
+                except Exception as exc:
+                    check['validation_error'] = str(exc)
+                    check['valid'] = False
+                    validated_all = False
             if att.get('validation_errors'):
                 check['historical_validation_errors'] = att['validation_errors']
             report['checks'].append(check)
-        report['validated'] = True
+        report['validated'] = validated_all
         return report
 
     def compare(self, decision_id, attempt_a, attempt_b=None):

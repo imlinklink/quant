@@ -383,6 +383,44 @@ class ProposalStore:
                         plan_version=request['plan_version'], review_id=request['review_id']))
             return applicable
 
+    def complete_v2_review(self, request, result, ttl=180):
+        """保存 DecisionEngine 结果并投影为现有审批结构。
+
+        v2 输出已由 DecisionEngine 按对应契约校验，不再经过 legacy validator。
+        revision fencing 与 complete_review 相同，晚到回调只能落审计快照。
+        """
+        from scripts.live_trading.decision_bridge import entry_legacy_projection
+        review = entry_legacy_projection(result, request=request, ttl=float(ttl))
+        with self._lock:
+            if self.events.get_snapshot('review', request['review_id']):
+                return False
+            item = self.get(request['id'])
+            applicable = bool(
+                item and item['status'] == 'pending'
+                and item.get('review_id') == request.get('review_id')
+                and item.get('plan_id') == request.get('plan_id')
+                and item.get('plan_version') == request.get('plan_version'))
+            kind = 'llm_completed' if review['status'] == 'complete' else 'llm_failed'
+            if applicable:
+                item['llm'] = review
+                for field in ('decision_id', 'decision_status', 'decision_engine_version',
+                              'model_action', 'effective_action', 'permission_level'):
+                    item[field] = review.get(field)
+                self.events.save_proposal(
+                    item, kind, review, key=request['review_id'],
+                    snapshots=(('review', request['review_id'], 1, review),))
+                self._items[item['id']] = item
+            else:
+                from scripts.live_trading.decision_ledger.event_store import insert_event, make_event
+                with self.events.transaction() as con:
+                    self.events.snapshot(con, 'review', request['review_id'], 1, review)
+                    insert_event(con, make_event(
+                        self.events.scope, kind, request['review_id'], review,
+                        proposal_id=request['id'], signal_id=request.get('signal_id'),
+                        plan_id=request.get('plan_id'), plan_version=request.get('plan_version'),
+                        review_id=request['review_id'], decision_id=result.decision_id))
+            return applicable
+
     def revise_plan(self, proposal_id, changes, reason):
         from mutifactor.llm.trade_review import build_plan, build_input
         from scripts.live_trading.decision_ledger.event_store import digest, stable_id

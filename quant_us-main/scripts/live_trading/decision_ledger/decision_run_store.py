@@ -24,10 +24,25 @@ SNAPSHOT_KIND_INPUT = {
 }
 
 
+def finalize_decision_id(*, account_scope, role, subject_id, input_snapshot_id,
+                         versions: Dict[str, str], model_id: str) -> str:
+    """按 §4.1 生成绑定冻结输入的 decision_id（含 input_snapshot_id 内容哈希）。"""
+    from .event_store import stable_id
+    return stable_id(
+        'decision', account_scope, role, subject_id, input_snapshot_id,
+        versions.get('prompt', ''), versions.get('output_schema', ''), model_id)
+
+
 def build_context(*, role, subject_type, subject_id, account_scope, as_of,
                   versions: Dict[str, str], model: Dict[str, Any],
-                  market_session: str = 'closed') -> Dict[str, Any]:
-    """构造 DecisionContext（技术设计 §4.1）。"""
+                  market_session: str = 'closed',
+                  input_snapshot_id: str = '') -> Dict[str, Any]:
+    """构造 DecisionContext（技术设计 §4.1）。
+
+    input_snapshot_id 为空时生成「临时」decision_id；最终 decision_id 必须在
+    输入快照落库后由 DecisionEngine 用 finalize_decision_id 重算并回填，
+    保证 decision_id 绑定冻结输入（相同输入+版本 → 相同 id）。
+    """
     if role not in VALID_ROLES:
         raise ValueError(f'非法 role: {role}')
     ctx = {
@@ -40,12 +55,12 @@ def build_context(*, role, subject_type, subject_id, account_scope, as_of,
         'versions': versions,
         'model': model,
     }
-    # decision_id 由稳定字段生成（§4.1）：相同输入+版本只产生一个正式决策。
-    from .event_store import stable_id
-    ctx['decision_id'] = stable_id(
-        'decision', account_scope, role, subject_id,
-        versions.get('packet_schema', ''), versions.get('prompt', ''),
-        versions.get('output_schema', ''), versions.get('model_id', ''))
+    # 无 input_snapshot_id 时 decision_id 为空（临时）；由 DecisionEngine 在快照落库后回填。
+    ctx['decision_id'] = (
+        finalize_decision_id(account_scope=account_scope, role=role, subject_id=subject_id,
+                             input_snapshot_id=input_snapshot_id, versions=versions,
+                             model_id=model.get('model_id', ''))
+        if input_snapshot_id else '')
     return ctx
 
 
@@ -72,15 +87,35 @@ class DecisionRunStore:
 
     def save_snapshot(self, kind: str, key: str, payload: Dict[str, Any],
                       version: int = 1) -> str:
-        """保存任意版本化快照（model_raw_response/validated_decision/...）。"""
-        snapshot_id = digest({'kind': kind, 'key': key,
-                              'payload': payload, 'version': version})
+        """保存任意版本化快照（model_raw_response/validated_decision/...）。
+
+        按 key 存储，get_snapshot 用同一 key 读取（对称）。返回 key。
+        """
         with self.events.transaction() as con:
-            self.events.snapshot(con, kind, snapshot_id, version, payload)
-        return snapshot_id
+            self.events.snapshot(con, kind, key, version, payload)
+        return key
 
     def get_snapshot(self, kind: str, key: str, version: int = 1):
         return self.events.get_snapshot(kind, key, version)
+
+    def next_snapshot_version(self, kind: str, key: str) -> int:
+        """返回该 (kind, key) 下一个可用快照版本（重试时递增，避免不可覆盖冲突）。"""
+        with self.events.transaction() as con:
+            row = con.execute(
+                'SELECT MAX(version) FROM decision_snapshots '
+                'WHERE account_scope=? AND kind=? AND id=?',
+                (self.scope, kind, key)).fetchone()
+            return (row[0] or 0) + 1
+
+    def get_snapshot_latest(self, kind: str, key: str):
+        """读取该 (kind, key) 最新版本的快照。"""
+        import json as _json
+        with self.events.transaction() as con:
+            row = con.execute(
+                'SELECT body FROM decision_snapshots '
+                'WHERE account_scope=? AND kind=? AND id=? ORDER BY version DESC LIMIT 1',
+                (self.scope, kind, key)).fetchone()
+            return _json.loads(row[0]) if row else None
 
     # ---------- 投影行 ----------
 

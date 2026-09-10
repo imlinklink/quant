@@ -163,6 +163,39 @@ def start_review(owner, item):
         try:
             if time.time() < request['expires_at'] and advisor is not None:
                 snapshot = store.events.get_snapshot('input', request['input_snapshot_id'])
+                from scripts.live_trading.decision_runtime import DecisionRuntime
+                runtime = DecisionRuntime(store.registry, advisor, owner.config)
+                if runtime.is_shadow('entry'):
+                    from scripts.live_trading.decision_bridge import build_entry_packet
+                    from mutifactor.llm.contracts.entry_v2 import build_review_trigger
+                    plan = snapshot['plan']
+                    constraints = plan.get('entry_constraints') or {}
+                    risk = plan.get('risk') or {}
+                    packet = build_entry_packet(
+                        signal={
+                            'signal_id': request['signal_id'],
+                            'strategy': plan.get('strategy'),
+                            'rule_baseline': 'execute_now',
+                        },
+                        plan=plan, evidence=list(snapshot.get('evidence') or []),
+                        account_scope=store.registry.namespace,
+                        subject_id=f"{request['signal_id']}:{request['plan_version']}",
+                        as_of=snapshot.get('observed_at') or utc(),
+                        standard_quantity=int(float(constraints.get('quantity_cap') or request['quantity'])),
+                        entry_price=float(constraints.get('price') or request['price']),
+                        initial_stop=float(risk.get('initial_stop')),
+                        expires_at=utc(request['expires_at']),
+                        review_triggers=[build_review_trigger(
+                            f"{request['review_id']}:expiry", 'scheduled_time',
+                            {'at': utc(request['expires_at'])})],
+                        model={'provider': 'configured',
+                               'model_id': getattr(advisor, 'model', ''),
+                               'temperature': 0.0, 'timeout_seconds': 30})
+                    result = runtime.engine().decide_entry(packet)
+                    store.complete_v2_review(
+                        request, result, ttl=float(cfg.get('review_ttl_seconds', 180)))
+                    store.events.export()
+                    return
                 raw = advisor.review_plan(snapshot, request.get('side', 'buy'))
                 metadata = getattr(advisor, 'last_metadata', {})
         except Exception:

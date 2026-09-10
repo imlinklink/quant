@@ -490,6 +490,96 @@ class ExecutionService:
         with self.registry.transaction() as book:
             return book['orders'][exit_id]['status']
 
+    def submit_constrained_entry(self, *, decision_id, template_id,
+                                 risk_group=None, reason='constrained_entry'):
+        """受约束自动买入（PR8）：仅当 entry_review+plan_template+position_scale 均
+        constrained_action、且 effective_action=execute_now 时由 DecisionEngine 调用。
+
+        数量/止损/价格来自程序模板，模型不得扩大；仍执行账户作用域、持仓数量、活跃买单、
+        风险预算与幂等校验。DRY-RUN 按可成交价冲正；真实下单当前显式 gate（需样本达标后
+        再接通券商路径），不静默降级为人工提案。
+        """
+        if not self.dry_run:
+            # 真实券商路径尚未实现；必须在创建订单占用前拒绝，避免留下 submitting 脏状态。
+            raise RuntimeError('受约束自动买入真实下单尚未启用（当前仅 DRY-RUN）')
+
+        from .decision_ledger.decision_run_store import DecisionRunStore
+        from .llm_permission import level_for
+        from mutifactor.llm.validators.action import applicable_permissions
+        dstore = DecisionRunStore(self.registry)
+        run = dstore.get_run(decision_id)
+        decision = dstore.get_snapshot_latest('validated_decision', decision_id) or {}
+        if not run or run.get('role') != 'entry' or run.get('status') != 'validated':
+            raise ValueError('缺少已验证的 Entry Decision')
+        if run.get('effective_action') != 'execute_now' \
+                or decision.get('effective_action') != 'execute_now' \
+                or decision.get('permission_level') != 'constrained_action':
+            raise ValueError('Entry Decision 未获 constrained_action 权限')
+        output = decision.get('output') or {}
+        if output.get('template_id') != template_id or output.get('action') != 'execute_now':
+            raise ValueError('模板与已验证 Entry Decision 不匹配')
+        if any(level_for(p, self.config) != 'constrained_action'
+               for p in applicable_permissions('entry', 'execute_now')):
+            raise ValueError('当前 Entry 权限已降低，禁止执行旧决策')
+
+        packet = dstore.events.get_snapshot('entry_input', run['input_snapshot_id'], 1)
+        if not packet:
+            raise ValueError('Entry Decision 缺少冻结输入快照')
+        template = next((t for t in packet.get('templates', [])
+                         if t.get('template_id') == template_id), None)
+        if not template or template.get('kind') not in ('standard', 'half_size'):
+            raise ValueError('冻结输入中不存在可执行模板')
+        plan = packet.get('plan') or {}
+        code = plan.get('stock_code')
+        qty = template.get('quantity')
+        price = template.get('entry_price_limit')
+        initial_stop = template.get('initial_stop')
+        entry_id = stable_id('constrained_entry', self.registry.namespace,
+                             decision_id, template_id)
+
+        if not code or not all(finite_positive(v) for v in (price, initial_stop)) or initial_stop >= price:
+            raise ValueError('受约束买入价格/止损无效')
+        if not isinstance(qty, int) or qty <= 0:
+            raise ValueError('受约束买入数量无效')
+        cfg = self.config.get('risk_budget', {})
+        group = risk_group or cfg.get('code_groups', {}).get(code)
+        with self.registry.transaction() as book:
+            if entry_id in book['orders']:
+                return book['orders'][entry_id]['status']
+            if code in book['positions']:
+                raise ValueError('禁止重复买入及亏损摊平')
+            if any(o['code'] == code and o['status'] in ACTIVE for o in book['orders'].values()):
+                raise ValueError('该股票已有活跃订单，禁止重复')
+            # 风险预算复核：模板数量不得超过程序当前风险上限
+            equity = float(cfg.get('dry_run_equity', 100000))
+            cash = equity - sum(p['qty'] * p['entry_price'] for p in book['positions'].values())
+            allowed, _ = risk_quantity(price, initial_stop, equity, cash,
+                                       list(book['positions'].values()),
+                                       list(book['orders'].values()), cfg, group,
+                                       float(cfg.get('max_position_fraction', .15)) * equity)
+            if qty > allowed:
+                raise ValueError(f'受约束买入数量 {qty} 超过风险上限 {allowed}')
+            meta = dict(direction='long', initial_stop=initial_stop, risk_group=group,
+                        constrained=True, reason=reason)
+            order = dict(proposal={}, id=entry_id,
+                         order_intent_id=stable_id('intent', self.registry.namespace, entry_id),
+                         code=code, side='buy', price=price, qty=qty,
+                         risk=float(qty) * abs(price - initial_stop),
+                         metadata=meta, status='submitting', filled_qty=0,
+                         cost_per_share=float(cfg.get('cost_per_share', .05)),
+                         created_at=time.time())
+            book['orders'][entry_id] = order
+            enqueue(book, self.registry.namespace, 'order_intent_created',
+                    order['order_intent_id'],
+                    {'quantity': qty, 'price': price, 'side': 'buy', 'constrained': True},
+                    proposal_id=entry_id, order_intent_id=order['order_intent_id'])
+        if self.dry_run:
+            self.apply_report(entry_id, dict(order_id='dry-' + entry_id, order_status='FILLED_ALL',
+                                             dealt_qty=qty, dealt_avg_price=price,
+                                             cumulative_fee=0.0))
+            return 'filled'
+        raise AssertionError('非 DRY-RUN 已在创建订单前拒绝')
+
     def submit(self, item, price, cap=None):
         from .approval.proposal_store import ProposalStore
         if not self.store or not item or item.get('status') != 'executing' or not ProposalStore.llm_ready(item):

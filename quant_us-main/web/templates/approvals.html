@@ -100,6 +100,17 @@ function llmHtml(llm, side) {
   if (!llm) {
     return '<div class="llm-box"><span class="muted">等待大模型评估完成，暂不能下单</span></div>';
   }
+  if (llm.decision_engine_version === 'v2') {
+    const recommendations = {support_execute:'支持本次执行', wait_for_confirmation:'建议暂缓', oppose_execute:'建议不执行'};
+    const effective = {rule_baseline:'现有规则/人工流程', execute_now:'立即执行', defer:'暂缓', reject:'拒绝', hold:'保持'};
+    const claims = [...(llm.facts || []).map(c => '事实：' + c.text), ...(llm.inferences || []).map(c => '推断：' + c.text)].slice(0,3);
+    return '<div class="llm-box"><b>模型建议：' + esc(recommendations[llm.recommendation] || llm.model_action || '无有效建议') + '</b>' +
+      '<div>当前有效动作：<b>' + esc(effective[llm.effective_action] || llm.effective_action || '-') + '</b> · 权限 ' + esc(llm.permission_level || '-') + '</div>' +
+      claims.map(c => '<div>' + esc(c) + '</div>').join('') +
+      '<div>资料缺口：' + esc((llm.missing_information || []).join('；') || '未报告') + '</div>' +
+      '<div class="note">decision ' + esc((llm.decision_id || '').slice(0,16)) + '</div>' +
+      '<details><summary>完整评估与来源引用</summary><pre style="white-space:pre-wrap">' + esc(JSON.stringify(llm, null, 2)) + '</pre></details></div>';
+  }
   if (llm.schema_version === 'trade-review-v1') {
     const recommendations = {support_execute:'支持本次执行', defer:'建议暂缓', oppose_execute:'建议不执行'};
     const actions = {buy:'买入', hold:'持有', reduce:'建议减仓（需另行确认）', exit:'退出', revise_plan:'修订计划'};

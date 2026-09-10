@@ -143,7 +143,27 @@ def _migrate(con, path):
 
 
 # 投影 schema 版本（独立于决策事件 schema v1）
-PROJECTION_SCHEMA_VERSION = 1
+PROJECTION_SCHEMA_VERSION = 2
+
+# decision_outcomes_v2：主键含 subject_key（selection=code / entry=template_id / position=trade_id），
+# 避免同一 horizon 下多股票/多模板相互覆盖（§16.1/§16.2）。
+_OUTCOMES_DDL = '''
+    CREATE TABLE IF NOT EXISTS decision_outcomes_v2 (
+        account_scope TEXT NOT NULL,
+        decision_id TEXT NOT NULL,
+        horizon TEXT NOT NULL,
+        subject_key TEXT NOT NULL DEFAULT '',
+        label_as_of TEXT NOT NULL,
+        return_pct REAL,
+        benchmark_return_pct REAL,
+        excess_return_pct REAL,
+        mfe_pct REAL,
+        mae_pct REAL,
+        realized_r REAL,
+        data_quality TEXT NOT NULL,
+        body TEXT NOT NULL,
+        PRIMARY KEY (account_scope, decision_id, horizon, subject_key));
+'''
 
 _PROJECTION_DDL = '''
     CREATE TABLE IF NOT EXISTS decision_projection_schema(
@@ -186,27 +206,34 @@ _PROJECTION_DDL = '''
         PRIMARY KEY (account_scope, attempt_id));
     CREATE INDEX IF NOT EXISTS llm_attempt_decision
         ON llm_model_attempts(account_scope, decision_id);
-    CREATE TABLE IF NOT EXISTS decision_outcomes_v2 (
-        account_scope TEXT NOT NULL,
-        decision_id TEXT NOT NULL,
-        horizon TEXT NOT NULL,
-        label_as_of TEXT NOT NULL,
-        return_pct REAL,
-        benchmark_return_pct REAL,
-        excess_return_pct REAL,
-        mfe_pct REAL,
-        mae_pct REAL,
-        realized_r REAL,
-        data_quality TEXT NOT NULL,
-        body TEXT NOT NULL,
-        PRIMARY KEY (account_scope, decision_id, horizon));
-'''
+''' + _OUTCOMES_DDL
 
 
 def _ensure_projection_schema(con):
-    """幂等确保投影 schema 存在（每次连接时调用，兼容旧库与新库）。"""
+    """幂等确保投影 schema 存在（每次连接时调用，兼容旧库与新库）。
+
+    v1 → v2：decision_outcomes_v2 主键加入 subject_key。旧行无法还原原始
+    code/template，但必须无损保留；使用 legacy:<rowid> 作为兼容 subject_key。
+    """
     con.executescript(_PROJECTION_DDL)
-    con.execute('INSERT OR IGNORE INTO decision_projection_schema(version) VALUES (?)',
+    row = con.execute('SELECT MAX(version) FROM decision_projection_schema').fetchone()[0]
+    if row is None or row < 2:
+        cols = [r[1] for r in con.execute('PRAGMA table_info(decision_outcomes_v2)').fetchall()]
+        if cols and 'subject_key' not in cols:
+            con.execute('ALTER TABLE decision_outcomes_v2 RENAME TO decision_outcomes_v1_migration')
+            con.executescript(_OUTCOMES_DDL)
+            con.execute('''
+                INSERT INTO decision_outcomes_v2 (
+                    account_scope,decision_id,horizon,subject_key,label_as_of,
+                    return_pct,benchmark_return_pct,excess_return_pct,mfe_pct,mae_pct,
+                    realized_r,data_quality,body)
+                SELECT account_scope,decision_id,horizon,'legacy:' || rowid,label_as_of,
+                    return_pct,benchmark_return_pct,excess_return_pct,mfe_pct,mae_pct,
+                    realized_r,data_quality,body
+                FROM decision_outcomes_v1_migration
+            ''')
+            con.execute('DROP TABLE decision_outcomes_v1_migration')
+    con.execute('INSERT OR REPLACE INTO decision_projection_schema(version) VALUES (?)',
                 (PROJECTION_SCHEMA_VERSION,))
 
 

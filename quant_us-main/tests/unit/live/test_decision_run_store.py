@@ -93,13 +93,17 @@ class DecisionRunStoreContracts(unittest.TestCase):
         a = self._ctx()
         b = self._ctx()
         self.assertEqual(a['decision_id'], b['decision_id'])
-        # 输入不同 → id 不同
-        c = build_context(role='entry', subject_type='signal', subject_id='s1',
-                          account_scope='DRY-RUN', as_of='2026-09-08T00:00:00+00:00',
-                          versions={'prompt': 'v2', 'output_schema': 'v2',
-                                    'packet_schema': 'v2', 'model_id': 'm'},
-                          model={'model_id': 'm'})
-        self.assertNotEqual(a['decision_id'], c['decision_id'])
+        # 无输入快照时 decision_id 为空（临时）；最终 id 由 finalize_decision_id 绑定输入
+        self.assertEqual(a['decision_id'], '')
+        from scripts.live_trading.decision_ledger.decision_run_store import finalize_decision_id
+        d1 = finalize_decision_id(account_scope='DRY-RUN', role='selection', subject_id='b1',
+                                  input_snapshot_id='snap_a', versions=a['versions'],
+                                  model_id='deepseek-chat')
+        d2 = finalize_decision_id(account_scope='DRY-RUN', role='selection', subject_id='b1',
+                                  input_snapshot_id='snap_b', versions=a['versions'],
+                                  model_id='deepseek-chat')
+        self.assertNotEqual(d1, d2)
+        self.assertTrue(d1.startswith('decision_'))
 
     def test_input_snapshot_saved_and_replayable(self):
         ctx = self._ctx()

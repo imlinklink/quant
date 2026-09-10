@@ -15,10 +15,11 @@ from .decision_ledger.workflow import review_queue
 
 
 class PositionReviewScheduler:
-    def __init__(self, registry, advisor, config=None):
+    def __init__(self, registry, advisor, config=None, decision_config=None):
         self.events = EventStore(registry)
         self.advisor = advisor
         self.config = config or {}
+        self.decision_config = decision_config or self.config
         self.thesis = ThesisLedger(registry)
         self.last_check = {}
 
@@ -69,14 +70,48 @@ class PositionReviewScheduler:
         def run():
             raw = None
             try:
-                raw = self.advisor.review_plan(snapshot,'sell') if self.advisor else None
-                review = validate_review(raw,snapshot,'sell',ttls=self.config.get('evidence_ttl_seconds'))
+                from scripts.live_trading.decision_runtime import DecisionRuntime
+                runtime = DecisionRuntime(self.events.registry, self.advisor,
+                                          self.decision_config)
+                if runtime.is_shadow('position'):
+                    from scripts.live_trading.decision_bridge import (
+                        build_position_packet, position_legacy_projection,
+                    )
+                    trade = {
+                        'trade_id': record['trade_id'], 'code': record['code'],
+                        'direction': 'long', 'remaining_qty': float(record['qty']),
+                        'entry_price': float(record.get('entry_price') or 0),
+                    }
+                    protection = {
+                        'active_stop': float(stop or 0),
+                        'initial_stop': record.get('initial_stop'),
+                        'hard_exit_authoritative': True,
+                    }
+                    packet = build_position_packet(
+                        trade=trade, protection=protection,
+                        new_evidence=list(evidence_items),
+                        account_scope=self.events.scope,
+                        subject_id=record['trade_id'], as_of=utc(now),
+                        thesis={'state': self.thesis.current(record['trade_id']) or 'FORMING'},
+                        model={'provider': 'configured',
+                               'model_id': getattr(self.advisor, 'model', ''),
+                               'temperature': 0.0, 'timeout_seconds': 30})
+                    result = runtime.engine().decide_position(packet)
+                    review = position_legacy_projection(
+                        result, trigger=trigger,
+                        legacy_input_snapshot_id=snapshot['input_snapshot_id'])
+                    raw = result.validated_output
+                else:
+                    raw = self.advisor.review_plan(snapshot,'sell') if self.advisor else None
+                    review = validate_review(raw,snapshot,'sell',ttls=self.config.get('evidence_ttl_seconds'))
             except Exception as exc:
                 review = {'status':'failed','error':type(exc).__name__}
             review.update(shadow_only=True, trigger=trigger, input_snapshot_id=snapshot['input_snapshot_id'],
                           raw_output=raw, plan_change_applied=False,
                           comparison='无新增独立证据，保持原批准计划' if not evidence_items else '建议需人工审阅并另行确认')
-            self.events.record('position_reviewed',rid,review,**links)
+            decision_link = ({'decision_id': review.get('decision_id')}
+                             if review.get('decision_id') else {})
+            self.events.record('position_reviewed',rid,review,**links, **decision_link)
             # thesis ledger：仅有效评审更新逻辑状态（delta 由程序计算；无新证据不改状态）
             if review.get('status') == 'complete' and review.get('thesis_state'):
                 try:

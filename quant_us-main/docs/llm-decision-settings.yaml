@@ -9,6 +9,12 @@ llm_decision:
     rule: 86400
     news: 86400
     filing: 7776000
+  engine_v2:
+    selection: legacy          # 按 selection → entry → position 逐项切为 shadow
+    entry: legacy              # legacy | shadow
+    position: legacy
+    fallback_before_call: true # 只允许在 Packet/路由阶段、模型调用前回退
+    account_scope: DRY-RUN     # 应与当前 PositionRegistry namespace 一致
   position_review:
     enabled: false             # 只读影子复核，默认关闭
     check_interval_seconds: 60

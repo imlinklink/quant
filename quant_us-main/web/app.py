@@ -98,6 +98,7 @@ exit_manager_ref = None
 # ─── 配置加载 ──────────────────────────────────────────────────────
 APP_CONFIG = {
     'buy_threshold': 10,  # 运行时可通过 /api/kline-analysis?threshold= 覆盖
+    'decision_account_scope': 'DRY-RUN',
 }
 
 def load_config():
@@ -114,6 +115,9 @@ def load_config():
         approval_enabled = True
         approval_env = str(cfg.get('live_manager', {}).get('trd_env', 'SIMULATE'))
         approval_llm_enabled = bool(cfg.get('llm', {}).get('enabled', False))
+        APP_CONFIG['decision_account_scope'] = str(
+            (((cfg.get('llm_decision') or {}).get('engine_v2') or {})
+             .get('account_scope') or 'DRY-RUN'))
         if approval_enabled and approval_store is None:
             from scripts.live_trading.approval.proposal_store import ProposalStore
             approval_store = ProposalStore(
@@ -757,6 +761,111 @@ def api_suggestion_action(suggestion_id: str, action: str):
         return jsonify({'ok': True, 'message': '已忽略'})
 
     return jsonify({'ok': False, 'error': 'unknown action'}), 400
+
+
+# ─── LLM 决策评估 API（PR7，只读，不触发模型/下单）────────────────────────
+
+def _decision_registry():
+    """决策账本所在的 registry（复用审批存储的，否则全局默认）。"""
+    if approval_store is not None and getattr(approval_store, 'registry', None) is not None:
+        registry = approval_store.registry
+        # web/app.py 独立启动时全局 Registry 尚未由券商账户配置；只读 API
+        # 使用 Selection shadow 的显式 scope 查询同一个 SQLite 文件。
+        if registry.namespace == 'unconfigured':
+            from scripts.live_trading.position_registry import PositionRegistry
+            return PositionRegistry(registry.path, APP_CONFIG['decision_account_scope'])
+        return registry
+    from scripts.live_trading.position_registry import REGISTRY
+    return REGISTRY
+
+
+@app.route('/api/llm/decisions')
+def api_llm_decisions():
+    from scripts.live_trading.decision_ledger.decision_run_store import DecisionRunStore
+    from scripts.live_trading.project_decision_metrics import ProjectDecisionMetrics
+    role = request.args.get('role')
+    try:
+        registry = _decision_registry()
+        store = DecisionRunStore(registry)
+        runs = store.list_runs(role=role, limit=int(request.args.get('limit', 100)))
+        overview = ProjectDecisionMetrics(registry).overview(role=role)
+        return jsonify({'ok': True, 'runs': runs, 'overview': overview,
+                        'server_time': datetime.now().timestamp()})
+    except Exception as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 500
+
+
+@app.route('/api/llm/decisions/<decision_id>')
+def api_llm_decision(decision_id):
+    from scripts.live_trading.decision_ledger.decision_run_store import DecisionRunStore
+    try:
+        registry = _decision_registry()
+        store = DecisionRunStore(registry)
+        run = store.get_run(decision_id)
+        if not run:
+            return jsonify({'ok': False, 'error': 'not_found'}), 404
+        validated = store.get_snapshot_latest('validated_decision', decision_id)
+        return jsonify({'ok': True, 'run': run, 'validated': validated})
+    except Exception as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 500
+
+
+@app.route('/api/llm/decisions/<decision_id>/replay')
+def api_llm_replay(decision_id):
+    from scripts.live_trading.replay_decision import ReplayEngine
+    mode = request.args.get('mode', 'validate')
+    try:
+        registry = _decision_registry()
+        engine = ReplayEngine(registry=registry)
+        if mode == 'project':
+            out = engine.project(decision_id)
+        elif mode == 'compare':
+            out = engine.compare(decision_id, request.args.get('attempt_a'),
+                                 request.args.get('attempt_b'))
+        else:
+            out = engine.validate(decision_id)
+        return jsonify({'ok': True, 'replay': out})
+    except Exception as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 500
+
+
+@app.route('/api/llm/metrics/<role>')
+def api_llm_metrics(role):
+    from scripts.live_trading.project_decision_metrics import ProjectDecisionMetrics
+    if role not in ('selection', 'entry', 'position'):
+        return jsonify({'ok': False, 'error': 'role 需为 selection/entry/position'}), 400
+    try:
+        registry = _decision_registry()
+        m = ProjectDecisionMetrics(registry)
+        fn = {'selection': m.selection_metrics, 'entry': m.entry_metrics,
+              'position': m.position_metrics}[role]
+        return jsonify({'ok': True, 'metrics': fn()})
+    except Exception as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 500
+
+
+@app.route('/api/llm/permissions')
+def api_llm_permissions():
+    from scripts.live_trading.llm_permission import PERMISSIONS, level_for
+    cfg = {}
+    try:
+        with open(os.path.join(BASE_DIR, 'config.yaml'), 'r', encoding='utf-8') as f:
+            cfg = yaml.safe_load(f) or {}
+    except Exception:
+        pass
+    perms = {p: level_for(p, cfg) for p in PERMISSIONS}
+    return jsonify({'ok': True, 'permissions': perms,
+                    '_default': (cfg.get('llm_permissions') or {}).get('_default', 'shadow')})
+
+
+@app.route('/api/llm/health')
+def api_llm_health():
+    from scripts.live_trading.project_decision_metrics import ProjectDecisionMetrics
+    try:
+        registry = _decision_registry()
+        return jsonify({'ok': True, 'health': ProjectDecisionMetrics(registry).health()})
+    except Exception as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 500
 
 
 if __name__ == '__main__':

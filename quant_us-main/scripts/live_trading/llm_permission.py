@@ -14,7 +14,8 @@
 from enum import Enum
 
 PERMISSIONS = ('selection_rank', 'entry_review', 'exit_review',
-               'position_scale', 'plan_template', 'auto_exit_thesis')
+               'position_scale', 'plan_template', 'auto_exit_thesis',
+               'protection_tighten', 'thesis_reduce')
 
 # 升级顺序：shadow 最低，disabled 表示「显式关闭」
 LEVEL_ORDER = ('shadow', 'recommend', 'constrained_action', 'disabled')

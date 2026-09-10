@@ -1,9 +1,12 @@
 """PR3 Replay CLI 回归：project/validate/compare，不连执行器。"""
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from mutifactor.llm.contracts.common import build_evidence_item
+from mutifactor.llm.contracts.entry_v2 import build_entry_templates
 from scripts.live_trading.decision_ledger.decision_run_store import DecisionRunStore
 from scripts.live_trading.position_registry import PositionRegistry
 from scripts.live_trading.replay_decision import ReplayEngine, _deep_diff
@@ -42,11 +45,47 @@ class ReplayEngineContracts(unittest.TestCase):
         self.assertEqual(len(proj['attempts']), 1)
 
     def test_validate_rechecks_parsed(self):
-        self._seed({'candidates': [{'code': 'US.A', 'rank': 1}]})
-        rep = self.engine.validate(self.decision_id)
+        # 用合法的 entry-v2 决策验证 validate 真正重校验（input_hash_match + 契约校验）
+        plan = {'plan_id': 'plan1', 'stock_code': 'US.AAPL',
+                'risk': {'initial_stop': 90.0}, 'entry_constraints': {'price': 100.0}}
+        templates = build_entry_templates(plan=plan, standard_quantity=100, entry_price=100.0,
+                                          initial_stop=90.0,
+                                          expires_at='2999-01-01T00:00:00+00:00')
+        evidence = [build_evidence_item(evidence_id='e1', subject_code='US.AAPL',
+                                        kind='fundamental', source='internal:test',
+                                        source_grade=2, summary='财报超预期，营收同比增长 20%',
+                                        observed_at=time.time() - 60, cluster_id='c1'),
+                    build_evidence_item(evidence_id='e2', subject_code='US.AAPL',
+                                        kind='fundamental', source='internal:test',
+                                        source_grade=2, summary='估值处于历史高位',
+                                        observed_at=time.time() - 60, cluster_id='c2')]
+        packet = {'plan': plan, 'templates': templates, 'evidence': evidence,
+                  'quality_gate': {'status': 'pass', 'allowed_uses': ['entry']}}
+        parsed = {'status': 'complete', 'action': 'execute_now', 'template_id': 'plan1:standard',
+                  'confidence': 'high', 'reason_codes': ['OPTIONS_CONFIRM'],
+                  'facts': [{'text': '财报超预期，营收同比增长 20%', 'claim_type': 'fact',
+                             'evidence_ids': ['e1']}],
+                  'inferences': [{'text': '基本面转强', 'claim_type': 'inference',
+                                  'evidence_ids': ['e1']}],
+                  'counterevidence': [{'text': '估值处于历史高位', 'claim_type': 'counterevidence',
+                                       'evidence_ids': ['e2']}],
+                  'missing_information': []}
+        sid = self.store.save_input_snapshot('entry', 'sig1', packet)
+        run = dict(decision_id='decision_entry_0001', role='entry', subject_type='signal',
+                   subject_id='sig1', as_of='2026-09-08T00:00:00+00:00', status='validated',
+                   input_snapshot_id=sid, prompt_version='entry-v2', output_schema_version='entry-v2',
+                   feature_version='f2', rule_version='r2', permission_version='p2',
+                   provider='deepseek', model_id='deepseek-chat',
+                   created_at='2026-09-08T00:00:00+00:00', selected_attempt_id='a1',
+                   effective_action='rule_baseline')
+        self.store.save_run(run)
+        self.store.save_attempt(dict(attempt_id='a1', decision_id='decision_entry_0001',
+                                     status='complete', started_at='2026-09-08T00:00:00+00:00',
+                                     parsed_response=parsed))
+        rep = self.engine.validate('decision_entry_0001')
+        self.assertTrue(rep['input_hash_match'])
         self.assertTrue(rep['validated'])
-        self.assertTrue(rep['input_snapshot_present'])
-        self.assertEqual(rep['checks'][0]['has_parsed'], True)
+        self.assertEqual(rep['checks'][0]['valid'], True)
 
     def test_validate_missing_decision(self):
         rep = self.engine.validate('decision_missing')

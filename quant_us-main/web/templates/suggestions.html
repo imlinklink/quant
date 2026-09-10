@@ -145,7 +145,8 @@ function renderResearch(research) {
   el.style.display = 'block';
   el.innerHTML = '<b>🔬 LLM 研究候选（研究建议，不是交易信号）</b>' +
     '<br><span class="muted">批次 ' + esc(batch) + ' · 模型 ' + esc(research.model || '-') +
-    ' · prompt ' + esc(research.prompt_version || '-') + ' · 基础池 ' + esc((research.universe || []).length) + ' 只</span>' +
+    ' · prompt ' + esc(research.prompt_version || '-') + ' · 基础池 ' + esc((research.universe || []).length) + ' 只' +
+    (research.decision_engine_version === 'v2' ? ' · DecisionEngine v2 · 有效动作 ' + esc(research.effective_action || '-') : '') + '</span>' +
     (!candidates.length ? '<div class="box" style="margin-top:12px"><b>本批次无候选：</b>' +
       esc(research.no_candidate_reason || research.error || '模型未提供原因（旧版批次）') + '</div>' : '') +
     candidates.map(researchCard).join('') +
