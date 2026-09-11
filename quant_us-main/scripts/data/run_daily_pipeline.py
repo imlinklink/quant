@@ -34,6 +34,29 @@ def _filter_daily(daily,master,start,end):
     dates=pd.to_datetime(d.date);return d[(dates>=pd.Timestamp(start))&(dates<=pd.Timestamp(end))].reset_index(drop=True)
 
 
+def propagate_quality(liquidity, quality):
+    """把质量失败按 **(股票, 年份)** 传播到流动性表（设计 §8.4「该股票区间」）。
+
+    只标真正失败的年份，避免单年问题把该股票全历史一起标为失败。
+    `failed_years` 为空的失败股票保守地整段标记。
+    """
+    out = liquidity.copy()
+    fail_pairs = set()
+    fail_all = set()
+    for _, row in quality.loc[quality.quality != 'good'].iterrows():
+        years = [y.strip() for y in str(row.get('failed_years') or '').split(';') if y.strip()]
+        if years:
+            fail_pairs |= {(row['stock'], int(y)) for y in years}
+        else:
+            fail_all.add(row['stock'])
+    if fail_pairs or fail_all:
+        years = pd.to_datetime(out['date']).dt.year
+        mask = pd.Series([(c, int(y)) in fail_pairs for c, y in zip(out['code'], years)],
+                         index=out.index) | out['code'].isin(fail_all)
+        out.loc[mask, 'quality'] = 'quality_fail'
+    return out
+
+
 def run_pipeline(*,master_path,start,end,universe_start,universe_end,run_id,
                  raw_root='data/market_history/raw',runs_root='data/market_history/runs',
                  checkpoint='data/market_history/checkpoints/download_state.json',
@@ -86,9 +109,7 @@ def run_pipeline(*,master_path,start,end,universe_start,universe_end,run_id,
 
         quality=validate_daily(daily,master,calendar)
         write_frame(quality,run_dir/'daily_quality.csv')
-        liquidity=build_liquidity(daily)
-        failed=set(quality.loc[quality.quality!='good','stock'])
-        liquidity.loc[liquidity.code.isin(failed),'quality']='quality_fail'
+        liquidity=propagate_quality(build_liquidity(daily),quality)
         write_frame(liquidity,run_dir/'daily_liquidity.csv.gz')
         state['stages']['quality']={'status':'complete','good':int((quality.quality=='good').sum()),
                                     'failed':int((quality.quality!='good').sum())}

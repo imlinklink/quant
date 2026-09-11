@@ -10,7 +10,7 @@ from scripts.data.build_security_master_from_futu import build_from_basicinfo,co
 from scripts.data.build_security_master import build_master
 from scripts.data.download_market_history import download, fetch_pages
 from scripts.data.normalize_market_history import normalize
-from scripts.data.run_daily_pipeline import run_pipeline
+from scripts.data.run_daily_pipeline import propagate_quality, run_pipeline
 from scripts.data.trading_calendar import sessions
 from scripts.data.validate_market_history import validate_daily
 
@@ -128,6 +128,56 @@ class MarketDataPipelineTests(unittest.TestCase):
             self.assertEqual(result['stages']['quality']['failed'],0)
             self.assertTrue((root/'runs'/'test'/'universe.csv').exists())
             self.assertTrue(result['files']['daily.csv.gz']['sha256'])
+
+
+class QualityIntervalTests(unittest.TestCase):
+    """质量失败必须按「股票+年份」定位，不能波及全历史（设计 §8.4）。"""
+
+    def _calendar(self):
+        return pd.DataFrame({'session_date': pd.bdate_range('2019-01-02', '2020-12-31')})
+
+    def test_validate_daily_reports_failing_years_only(self):
+        master = pd.DataFrame([{'code': 'US.A', 'listing_date': '2019-01-02',
+                                'delisting_date': ''}])
+        # 只有 2019 有数据，2020 整段缺失
+        daily = pd.DataFrame({'stock': 'US.A', 'date': pd.bdate_range('2019-01-02', '2019-12-31'),
+                              'open': 10., 'high': 11., 'low': 9., 'close': 10, 'volume': 1e6})
+        q = validate_daily(daily, master, self._calendar())
+        self.assertEqual(q.quality.iloc[0], 'quality_fail')
+        self.assertEqual(q.failed_years.iloc[0], '2020',
+                         '整段 2020 缺失，只应标记 2020 而不是全历史')
+
+    def test_clean_stock_has_no_failed_years(self):
+        master = pd.DataFrame([{'code': 'US.A', 'listing_date': '2019-01-02',
+                                'delisting_date': ''}])
+        daily = pd.DataFrame({'stock': 'US.A', 'date': pd.bdate_range('2019-01-02', '2020-12-31'),
+                              'open': 10., 'high': 11., 'low': 9., 'close': 10, 'volume': 1e6})
+        q = validate_daily(daily, master, self._calendar())
+        self.assertEqual(q.quality.iloc[0], 'good')
+        self.assertEqual(q.failed_years.iloc[0], '')
+
+    def test_propagate_marks_only_failing_year(self):
+        liq = pd.DataFrame({
+            'date': pd.to_datetime(['2019-06-03', '2020-06-01', '2020-06-02']),
+            'code': ['US.A'] * 3,
+            'previous_close': [10., 10., 10.], 'adv20': [1e8] * 3,
+            'liquidity_as_of': pd.to_datetime(['2019-05-31', '2020-05-29', '2020-06-01']),
+            'quality': ['good'] * 3})
+        q = pd.DataFrame([{'stock': 'US.A', 'quality': 'quality_fail',
+                           'failed_years': '2020'}])
+        out = propagate_quality(liq, q)
+        self.assertEqual(list(out.quality), ['good', 'quality_fail', 'quality_fail'],
+                         '2019 不应被 2020 的失败波及')
+
+    def test_propagate_falls_back_to_whole_stock_when_no_years(self):
+        liq = pd.DataFrame({'date': pd.to_datetime(['2019-06-03', '2020-06-01']),
+                            'code': ['US.A', 'US.A'], 'previous_close': [10., 10.],
+                            'adv20': [1e8, 1e8],
+                            'liquidity_as_of': pd.to_datetime(['2019-05-31', '2020-05-29']),
+                            'quality': ['good', 'good']})
+        q = pd.DataFrame([{'stock': 'US.A', 'quality': 'quality_fail', 'failed_years': ''}])
+        out = propagate_quality(liq, q)
+        self.assertEqual(list(out.quality), ['quality_fail', 'quality_fail'])
 
 
 if __name__=='__main__':unittest.main()
