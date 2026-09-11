@@ -150,6 +150,8 @@ def metrics(matrix, groups=GROUP_ORDER, asset_types=None):
         ci=group_bootstrap_ci(g)
         pnl=g.net_pnl_usd.astype(float);total=float(pnl.sum())
         by_stock=g.groupby('stock').net_pnl_usd.sum().sort_values(ascending=False)
+        pos_stock=by_stock[by_stock>0];pos_trade=pnl[pnl>0]
+        gross_stock=float(pos_stock.sum());gross_trade=float(pos_trade.sum())
         realized=g.sort_values('exit_time' if 'exit_time' in g else 'entry_time').net_pnl_usd.astype(float).cumsum()
         max_dd=float((realized.cummax()-realized).max()) if len(realized) else 0.
         rows.append({'experiment':keys[0],'exit_method':keys[1],'cost_scenario':float(keys[2]),
@@ -157,8 +159,9 @@ def metrics(matrix, groups=GROUP_ORDER, asset_types=None):
             'expectancy_usd':float(pnl.mean()),'win_rate':float((pnl>0).mean()),
             'mean_mae_pct':float(g.mae_pct.mean()),'mean_mfe_pct':float(g.mfe_pct.mean()),
             'max_drawdown_usd':max_dd,
-            'net_pnl_pct_ci':ci,'top2_stock_share':float(by_stock.head(2).sum()/total) if total else None,
-            'top3_trade_share':float(pnl.nlargest(3).sum()/total) if total else None})
+            'net_pnl_pct_ci':ci,
+            'top2_stock_share':float(pos_stock.head(2).sum()/gross_stock) if gross_stock>0 else None,
+            'top3_trade_share':float(pos_trade.nlargest(3).sum()/gross_trade) if gross_trade>0 else None})
     yearly=[]
     accepted['year']=pd.to_datetime(accepted['entry_time'],utc=True).dt.year
     for keys,g in accepted.groupby(['experiment','exit_method','cost_scenario','year']):
@@ -208,7 +211,7 @@ def render_report(result, experiment_id, groups=None):
     lines=[f'# 买入策略验证报告：{experiment_id}','',
            '> 本报告由冻结逐笔数据生成；参数与验收标准见 manifest 和实验设计。','',
            f'## {label} × Exit 核心结果','',
-           '| 组 | Exit | 成本 | 交易 | 独立组 | 期望$ | 总收益$ | 胜率 | MAE | 最大回撤$ | top2股占比 | top3笔占比 |',
+           '| 组 | Exit | 成本 | 交易 | 独立组 | 期望$ | 总收益$ | 胜率 | MAE | 最大回撤$ | top2股(占毛利) | top3笔(占毛利) |',
            '|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|']
     for r in result['groups']:
         lines.append(f"| {r['experiment']} | {r['exit_method']} | {r['cost_scenario']:.2%} | "

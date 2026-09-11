@@ -68,7 +68,10 @@ class BuyStrategyReportTests(unittest.TestCase):
             self.assertEqual(s['cells'],s['positive'])   # 各组同向为正
         text=render_report(out,'BUY-WD-ABC-EXP-001',('A','B','C'))
         self.assertIn('## 资产类型切片（增量方向）',text)
-        self.assertIn('top2股占比',text)
+        self.assertIn('top2股(占毛利)',text)
+        for r in out['groups']:
+            for k in ('top2_stock_share','top3_trade_share'):
+                self.assertTrue(r[k] is None or 0.0<=r[k]<=1.0)
         empty=metrics(matrix,groups=('A','B','C'))
         self.assertEqual(empty['asset_slices'],[])
         self.assertIn('未提供证券主数据',render_report(empty,'X',('A','B','C')))
