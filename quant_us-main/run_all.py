@@ -1,6 +1,6 @@
 """
 美股交易系统统一入口
-同时启动：Web服务(8890) + 抄底监控 + 唐奇安突破监控(可选) + 止盈止损
+同时启动：Web服务(8890) + 周线/日线 Setup 调度 + 唐奇安突破监控(可选) + 止盈止损
 
 用法：
     python run_all.py --dry-run     # 模拟模式
@@ -8,7 +8,7 @@
     python run_all.py --web-only    # 仅Web（调参用）
 
 人工确认模式（config.yaml -> trading.live_trading.human_approval.enabled: true）：
-    抄底/突破信号只推送到 http://127.0.0.1:8890/approvals，
+    规则信号只推送到 http://127.0.0.1:8890/approvals，
     页面显示规则理由 + 大模型判定，点「下单」才真正执行。
 
 第二条策略线（config.yaml -> trend_breakout.enabled: true）：
@@ -76,7 +76,7 @@ class UnifiedSystem:
         """
         人工确认：创建/复用与 Web 共用的提案存储，并注入 Flask。
 
-        启用后 DipBuyMonitor 只推信号不自动下单，由确认页点单执行。
+        启用后规则信号只生成提案，由确认页点单执行。
         """
         from web import app as webapp
 
@@ -135,17 +135,9 @@ class UnifiedSystem:
             self.exit_mgr.start()
             logger.info("✅ 止盈止损管理器已启动")
 
-            # 抄底监控
-            from scripts.live_trading.dip_buy_monitor import DipBuyMonitor
+            # 股票池仍兼容旧配置键；买入主链不再启动 15m dip_buy 监控器。
             watch_list = self.config.get("dip_buy", {}).get("watch_list", [])
-            self.dip_monitor = DipBuyMonitor(
-                watch_list,
-                self.config,
-                dry_run=self.dry_run,
-                approval_store=self.approval_store,
-            )
-            self.dip_monitor.start()
-            logger.info(f"✅ 抄底监控器已启动 ({', '.join(watch_list) or '无'})")
+            logger.info("✅ 中长期买入主链：周线环境 + 日线 setup + T+1 执行（收盘后调度）")
 
             # 唐奇安突破（第二条买入策略线，可选）
             tb_cfg = self.config.get("trend_breakout", {})
@@ -179,8 +171,8 @@ class UnifiedSystem:
             # 把 LLM 实际可用状态同步到 Web（便于页面显示徽标）
             try:
                 from web import app as webapp
-                webapp.approval_llm_enabled = bool(getattr(self.dip_monitor, 'llm_enabled', False))
-                webapp.dip_monitor_ref = self.dip_monitor
+                webapp.approval_llm_enabled = bool(self.config.get('llm', {}).get('enabled', False))
+                webapp.dip_monitor_ref = None
                 webapp.exit_manager_ref = self.exit_mgr
                 if hasattr(self, "trend_monitor"):
                     webapp.trend_monitor_ref = self.trend_monitor
@@ -220,8 +212,6 @@ class UnifiedSystem:
                 self.outcome_scheduler.stop()
             for monitor in getattr(self, 'pullback_monitors', []):
                 monitor.stop()
-            if hasattr(self, "dip_monitor"):
-                self.dip_monitor.stop()
             if hasattr(self, "trend_monitor"):
                 self.trend_monitor.stop()
             if hasattr(self, "exit_mgr"):

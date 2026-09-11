@@ -29,6 +29,7 @@ logs/
 
 # Output
 scripts/output/
+data/market_history/
 
 # OS
 .DS_Store

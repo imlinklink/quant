@@ -19,8 +19,8 @@
 | Entry v2 | `legacy` | 买入复核仍走原有 `trade-review-v1` 链路 |
 | Position v2 | `legacy` | 持仓复核仍走原有链路 |
 | 期权视角 | `shadow` | 进入研究上下文和账本，不直接决定交易 |
-| 买入策略 v2 | `shadow` | 日线 setup 被扫描和记录，不生成正式买入订单 |
-| 独立 dip_buy | 关闭 | 不再把单独的 15 分钟抄底信号作为正式候选 |
+| 买入策略 v2 | `shadow` | 周线环境和日线 setup 被扫描记录，不生成正式买入订单 |
+| 独立 dip_buy | 关闭 | 统一入口不再启动 15 分钟抄底监控 |
 | dip_buy 基线 | 开启 | 继续记录影子结果，用于后续对照实验 |
 | 唐奇安突破 | 开启 | 仍是主运行时的正式信号源之一 |
 | Pullback / breakout retest | 关闭 | 代码存在，当前不启动 |
@@ -42,7 +42,7 @@ flowchart TB
     end
 
     subgraph SIGNAL[规则信号层]
-        DIP[Dip Buy\n15m 基线/时机]
+        DIP[Dip Buy\nlegacy 历史复现]
         DON[Trend Breakout\n唐奇安突破]
         PULL[Pullback / Retest\n当前关闭]
         GATES[确定性闸门\n趋势、反转、RR、财报、指数、组合约束]
@@ -108,10 +108,9 @@ flowchart TB
 
 1. Flask Web 服务，默认监听 `8890`。
 2. `ChandelierExitManager`，管理已有持仓的保护线与退出。
-3. `DipBuyMonitor`。当前独立正式信号关闭，但仍可保留影子基线和盘中 timing 能力。
-4. `TrendBreakoutMonitor`，当前启用。
-5. 可选的 `PullbackMonitor`，当前两个模式均关闭。
-6. `OutcomeSchedulerThread`，每 30 秒检查日线 setup 扫描和 outcome 结算是否到期。
+3. `TrendBreakoutMonitor`，当前启用。
+4. 可选的 `PullbackMonitor`，当前两个模式均关闭。
+5. `OutcomeSchedulerThread`，每 30 秒检查周线/日线 setup 扫描和 outcome 结算是否到期。
 
 调度器通过 SQLite 中的日任务 claim 保证同一账户作用域、同一交易日、同一任务只成功领取一次，因此服务重启或多进程并发不会重复执行已领取任务。
 
@@ -427,4 +426,3 @@ A/B/C/D 的含义：
 | 日任务 | `outcome_scheduler.py`、`review_scheduler.py`、`run_outcomes.py` |
 | 期权 | `option_view.py` |
 | 实验 | `experiment_manifest.py`、`historical_universe.py`、`buy_strategy_experiment_runner.py`、`exit_matrix.py`、`buy_strategy_report.py` |
-

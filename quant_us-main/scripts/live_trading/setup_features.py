@@ -6,7 +6,7 @@ from typing import Any, Dict, Optional
 import numpy as np
 import pandas as pd
 
-FEATURE_VERSION = 'daily-setup-v1'
+FEATURE_VERSION = 'weekly-daily-setup-v2'
 REQUIRED_COLUMNS = {'date', 'open', 'high', 'low', 'close', 'volume'}
 
 
@@ -45,6 +45,31 @@ def _confirmed_pivots(d: pd.DataFrame, right_bars: int = 2):
                 d['low'].iloc[i + 1:i + 1 + right_bars].min()):
             lows.append(i)
     return lows
+
+
+def _weekly_features(d: pd.DataFrame) -> Dict[str, Any]:
+    """只从已完成日线聚合周线；最后一周表示截至 as_of 的可知状态。"""
+    weekly = (d.set_index('date').resample('W-FRI')
+              .agg({'open': 'first', 'high': 'max', 'low': 'min',
+                    'close': 'last', 'volume': 'sum'}).dropna())
+    close = weekly['close'].astype(float)
+    ma10, ma20, ma40 = close.rolling(10).mean(), close.rolling(20).mean(), close.rolling(40).mean()
+    high52 = weekly['high'].tail(52).max()
+    atr = _atr(weekly.reset_index(), 14)
+    atr_now = float(atr.iloc[-1]); atr_prior = float(atr.iloc[-5]) if len(atr) >= 5 else np.nan
+    drawdown = float(close.iloc[-1] / high52 - 1)
+    ma20_slope = float(ma20.iloc[-1] / ma20.iloc[-5] - 1)
+    trend = bool(close.iloc[-1] > ma40.iloc[-1] and ma20_slope > 0)
+    recovering = bool(drawdown <= -.10 and close.iloc[-1] > ma10.iloc[-1] and
+                      float(ma10.iloc[-1] / ma10.iloc[-3] - 1) >= 0 and
+                      (not np.isfinite(atr_prior) or atr_now <= atr_prior * 1.10))
+    return {'weekly_close': float(close.iloc[-1]), 'weekly_ma10': float(ma10.iloc[-1]),
+            'weekly_ma20': float(ma20.iloc[-1]), 'weekly_ma40': float(ma40.iloc[-1]),
+            'weekly_ma20_slope_4w': ma20_slope, 'weekly_drawdown_52w': drawdown,
+            'weekly_atr14': atr_now, 'weekly_volatility_contracting':
+            bool(np.isfinite(atr_prior) and atr_now <= atr_prior),
+            'weekly_regime': 'trend' if trend else ('recovering' if recovering else 'falling'),
+            'weekly_gate': bool(trend or recovering), 'weekly_bar_count': len(weekly)}
 
 
 def compute_setup_features(stock_bars: pd.DataFrame, sector_bars: Optional[pd.DataFrame],
@@ -100,8 +125,10 @@ def compute_setup_features(stock_bars: pd.DataFrame, sector_bars: Optional[pd.Da
                                   d['volume'].iloc[-21:-1].mean()),
         'one_day_return': float(close.iloc[-1] / close.iloc[-2] - 1),
     }
+    weekly = _weekly_features(d)
+    features.update(weekly)
     finite = all(np.isfinite(features[k]) for k in
-                 ('close', 'ma20', 'ma50', 'ma200', 'atr14'))
+                 ('close', 'ma20', 'ma50', 'ma200', 'atr14', 'weekly_ma40'))
     quality_reasons = [] if finite else ['NON_FINITE_REQUIRED_FEATURE']
     if sector_bars is not None and rs20 is None:
         quality_reasons.append('SECTOR_ALIGNMENT_FAILED')

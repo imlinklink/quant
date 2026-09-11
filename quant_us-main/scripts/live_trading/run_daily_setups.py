@@ -16,7 +16,7 @@ from scripts.live_trading.setup_scanner import SetupScanner
 def run(config, fetcher, as_of=None):
     as_of = as_of or datetime.now(timezone.utc).isoformat()
     cfg = config.get('buy_strategy_v2', {})
-    codes = list(config.get('dip_buy', {}).get('watch_list') or [])
+    codes = list(cfg.get('watch_list') or config.get('dip_buy', {}).get('watch_list') or [])
     group_map = config.get('risk_budget', {}).get('code_groups', {})
     proxies = config.get('pullback', {}).get('sector_proxies', {})
     sector_map = {code: proxies.get(group_map.get(code), 'US.SPY') for code in codes}

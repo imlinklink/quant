@@ -12,7 +12,8 @@ from pathlib import Path
 from typing import Iterable
 
 REQUIRED = ('experiment_id', 'document_version', 'git_commit', 'random_seed',
-            'git_dirty', 'created_at', 'config', 'universe', 'data_files', 'periods', 'costs')
+            'git_dirty', 'created_at', 'config', 'universe', 'data_files',
+            'quality_files', 'periods', 'costs')
 
 
 def sha256_file(path) -> str:
@@ -41,7 +42,8 @@ def file_record(path) -> dict:
 
 
 def build_manifest(experiment_id: str, config_path, universe_path,
-                   data_paths: Iterable, periods: dict, costs=(.001, .002, .005, .01),
+                   data_paths: Iterable, periods: dict, quality_paths=(),
+                   costs=(.001, .002, .005, .01),
                    random_seed=20260910, root='.') -> dict:
     return {
         'experiment_id': experiment_id,
@@ -51,6 +53,7 @@ def build_manifest(experiment_id: str, config_path, universe_path,
         'created_at': datetime.now(timezone.utc).isoformat(),
         'config': file_record(config_path), 'universe': file_record(universe_path),
         'data_files': [file_record(p) for p in sorted(map(str, data_paths))],
+        'quality_files': [file_record(p) for p in sorted(map(str, quality_paths))],
         'periods': periods, 'costs': list(map(float, costs)),
     }
 
@@ -70,6 +73,12 @@ def validate_manifest(manifest: dict, root='.', require_git=True) -> list:
             errors.append('DATA_FILE_MISSING')
         elif sha256_file(path) != record.get('sha256'):
             errors.append('DATA_HASH_MISMATCH')
+    if not manifest.get('quality_files'):
+        errors.append('QUALITY_FILES_MISSING')
+    for record in manifest.get('quality_files') or []:
+        path = record.get('path')
+        if not path or not Path(path).is_file(): errors.append('QUALITY_FILE_MISSING')
+        elif sha256_file(path) != record.get('sha256'): errors.append('QUALITY_HASH_MISMATCH')
     periods = manifest.get('periods') or {}
     if periods.get('development_end', '') >= periods.get('validation_start', '9999'):
         errors.append('PERIOD_OVERLAP_DEVELOPMENT_VALIDATION')
@@ -99,7 +108,7 @@ def write_new_manifest(output_dir, manifest: dict) -> Path:
 
 
 def create_frozen_experiment(output_dir, experiment_id, config_path, universe_path,
-                             data_paths, periods, root='.') -> Path:
+                             data_paths, periods, root='.', quality_paths=()) -> Path:
     """复制小型冻结输入到实验目录，再基于最终路径生成 manifest。"""
     out=Path(output_dir)
     if out.exists() and any(out.iterdir()):
@@ -109,7 +118,8 @@ def create_frozen_experiment(output_dir, experiment_id, config_path, universe_pa
     out.mkdir(parents=True,exist_ok=True)
     frozen_config=out/'config.yaml';frozen_universe=out/'universe.csv'
     shutil.copy2(config_path,frozen_config);shutil.copy2(universe_path,frozen_universe)
-    manifest=build_manifest(experiment_id,frozen_config,frozen_universe,data_paths,periods,root=root)
+    manifest=build_manifest(experiment_id,frozen_config,frozen_universe,data_paths,periods,
+                            quality_paths=quality_paths,root=root)
     path=out/'manifest.json'
     path.write_text(json.dumps(manifest,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
     return path
@@ -120,6 +130,7 @@ def main():
     p.add_argument('--validate')
     p.add_argument('--experiment-id', default='BUY-V2-EXP-001')
     p.add_argument('--config'); p.add_argument('--universe'); p.add_argument('--data', nargs='*')
+    p.add_argument('--quality', nargs='+')
     p.add_argument('--output-dir'); p.add_argument('--root', default='.')
     args = p.parse_args()
     if args.validate:
@@ -127,14 +138,14 @@ def main():
         errors = validate_manifest(manifest, args.root)
         print(json.dumps({'valid': not errors, 'errors': errors}, ensure_ascii=False, indent=2))
         return 0 if not errors else 1
-    if not all((args.config, args.universe, args.output_dir)):
-        p.error('创建模式需要 --config --universe --output-dir')
+    if not all((args.config, args.universe, args.output_dir, args.quality)):
+        p.error('创建模式需要 --config --universe --quality --output-dir')
     periods = {'development_start': '2016-01-01', 'development_end': '2020-12-31',
                'validation_start': '2021-01-01', 'validation_end': '2023-12-31',
                'test_start': '2024-01-01', 'test_end': '2026-08-31'}
     try:
         path=create_frozen_experiment(args.output_dir,args.experiment_id,args.config,
-                                      args.universe,args.data or [],periods,args.root)
+                                      args.universe,args.data or [],periods,args.root,args.quality)
     except RuntimeError as exc:
         raise SystemExit(str(exc))
     print(path)

@@ -1,17 +1,17 @@
 # 买入策略实验数据准备规范（2026-09-10）
 
-> 适用项目：`quant_us-main`  
-> 适用实验：买入策略 A/B/C/D 与退出策略 E1-E12 组合实验  
-> 目标：生成可审计、可复现、无未来数据泄漏的历史时点股票池、日线、15 分钟行情和流动性输入。
+> 适用项目：`quant_us-main`
+> 适用实验：买入策略 A/B/C/D 与退出策略 E1-E11 组合实验
+> 目标：生成可审计、可复现、无未来数据泄漏的历史时点股票池、日线和流动性输入。
 
 ## 1. 为什么需要单独准备数据
 
-现有实验基础设施可以冻结配置、股票池和数据文件，也可以生成 A/B/C/D 入场、E1-E12 退出矩阵及固定格式报告。但实验是否可信，首先取决于输入是否满足以下条件：
+现有实验基础设施可以冻结配置、股票池和数据文件，也可以生成 A/B/C/D 入场、E1-E11 退出矩阵及固定格式报告。但实验是否可信，首先取决于输入是否满足以下条件：
 
 - 股票在当时确实已经上市且尚未退市；
 - 股票当时满足流动性条件，而不是根据今天的观察池倒推；
 - 技术指标只使用决策时刻已经产生的数据；
-- 日线和 15 分钟行情采用一致的复权、时区和交易时段；
+- 周线由当时已完成的日线聚合，日线采用固定复权口径；
 - API 分页、权限或限流没有造成静默截断；
 - 数据质量不合格的区间被明确拒绝，不会进入交易样本。
 
@@ -63,14 +63,9 @@ data/
     raw/
       security_master/
       daily/
-      intraday_15m/
     normalized/
       security_master.csv
       daily/
-        year=2015/
-        year=2016/
-        ...
-      intraday_15m/
         year=2015/
         year=2016/
         ...
@@ -78,7 +73,6 @@ data/
     quality/
       security_master_quality.csv
       daily_quality.csv
-      intraday_15m_quality.csv
       coverage_summary.csv
     checkpoints/
       download_state.json
@@ -235,42 +229,12 @@ stock,date,open,high,low,close,volume
 
 测试集只能在策略、参数、成本口径和验收标准冻结后使用。
 
-## 6. 历史 15 分钟行情
+## 6. 日线下载方式
 
-### 6.1 建议 schema
-
-```text
-stock
-timestamp
-session_date
-open
-high
-low
-close
-volume
-turnover
-session
-source
-fetched_at
-```
-
-### 6.2 时间与交易时段
-
-- `timestamp` 标准化后统一保存为 UTC；
-- `session_date` 使用 America/New_York 对应的交易日期；
-- 保留原始数据源时间戳，便于复核转换；
-- 第一轮正式实验只使用常规交易时段 `09:30–16:00 ET`；
-- 盘前和盘后数据如需保留，必须标记 `session`，不能混入常规时段；
-- 正常完整交易日应有 26 根 15 分钟 K 线；
-- 提前收盘日按交易日历计算理论 bar 数；
-- DST 切换由时区数据库处理，禁止用固定 UTC 偏移转换美东时间。
-
-### 6.3 下载方式
-
-Futu 历史 K 线接口可以获取日线和 15 分钟 K 线，也支持复权类型、分页和美股扩展时段。采集器必须：
+Futu 历史 K 线接口用于获取日线，支持复权类型和分页。采集器必须：
 
 1. 按股票和时间片分页；
-2. 保存每个股票、周期和年份的下载检查点；
+2. 保存每个股票和年份的下载检查点；
 3. 检查返回的第一页和最后一页；
 4. 验证分页游标已完全耗尽；
 5. 对限流、超时和临时失败进行退避重试；
@@ -355,16 +319,7 @@ valid_observations_20d >= 15
 - 公司行动附近的复权因子和收益跳变合理；
 - 不存在由 API 分页截断导致的固定长度数据集。
 
-### 8.3 15 分钟检查
-
-- 正常完整交易日 bar 数为 26；
-- 提前收盘日 bar 数符合日历；
-- 没有重复时间戳或跨日错位；
-- 常规时段实验不包含盘前盘后 bar；
-- 15 分钟聚合后的日 OHLC 与日线数据在容忍范围内一致；
-- 入场时点之后的数据不会进入入场特征。
-
-### 8.4 质量处理
+### 8.3 质量处理
 
 关键行情缺失或覆盖率低于 98% 时：
 
@@ -441,8 +396,7 @@ python3 scripts/experiment_manifest.py \
     data/market_history/normalized/security_master.csv \
     data/market_history/normalized/daily_liquidity.parquet \
     data/market_history/normalized/daily/daily.parquet \
-    data/market_history/normalized/intraday_15m/intraday_15m.parquet \
-    data/market_history/quality/coverage_summary.csv \
+  --quality data/market_history/quality/coverage_summary.csv \
   --output-dir backtests/buy_v2/BUY-V2-EXP-001 \
   --root .
 ```
@@ -466,8 +420,8 @@ Manifest 必须记录：
 | 工具 | 职责 |
 |---|---|
 | `scripts/data/build_security_master.py` | 合并当前证券、上市/退市、ticker 变更和资产分类 |
-| `scripts/data/download_market_history.py` | 分页下载日线和 15 分钟数据，支持断点续传 |
-| `scripts/data/normalize_market_history.py` | 统一字段、时区、交易时段和复权口径 |
+| `scripts/data/download_market_history.py` | 分页下载日线，支持本地缓存和断点续传 |
+| `scripts/data/normalize_market_history.py` | 统一日线字段和复权口径 |
 | `scripts/data/build_daily_liquidity.py` | 使用 T-1 可知数据生成流动性特征 |
 | `scripts/data/validate_market_history.py` | 生成逐股逐区间质量报告和覆盖率摘要 |
 | `scripts/data/trading_calendar.py` | 提供真实美股 session 和提前收盘信息 |
@@ -485,12 +439,11 @@ Manifest 必须记录：
 
 1. 构建小型 security master；
 2. 下载 2015 至 2026 年日线；
-3. 下载同区间 15 分钟常规时段数据；
-4. 标准化并生成流动性；
-5. 运行质量检查；
-6. 构建历史 point-in-time universe；
-7. 跑通 A/B/C/D 和 E1-E12；
-8. 核对若干股票、日期和交易的原始数据。
+3. 标准化并生成流动性；
+4. 运行质量检查；
+5. 构建历史 point-in-time universe；
+6. 跑通 A/B/C/D 和 E1-E11；
+7. 核对若干股票、日期和交易的原始数据。
 
 阶段 A 只验收管道正确性，不据此决定策略是否有效。
 
@@ -507,7 +460,7 @@ Manifest 必须记录：
 
 正式历史集完成后：
 
-- 每个交易日收盘后追加日线和 15 分钟数据；
+- 每个交易日收盘后追加日线数据；
 - 更新流动性特征和质量摘要；
 - 不修改已经冻结的实验数据；
 - 新增数据仅用于新的实验版本或 shadow outcome。
@@ -518,9 +471,8 @@ Manifest 必须记录：
 
 1. Futu OpenD 可以正常登录；
 2. 当前账户具有美股历史日线权限；
-3. 当前账户具有所需年份的 15 分钟历史行情权限；
-4. 是否可以接受阶段 A 存在幸存者偏差、只用于管道验收；
-5. 正式实验是否准备使用专业 point-in-time 数据源。
+3. 是否可以接受阶段 A 存在幸存者偏差、只用于管道验收；
+4. 正式实验是否准备使用专业 point-in-time 数据源。
 
 除数据权限和正式数据源选择外，其余采集、标准化、质量检查和实验冻结均应由代码自动完成。
 
@@ -529,8 +481,8 @@ Manifest 必须记录：
 只有同时满足以下条件，数据准备才算完成：
 
 - security master 覆盖实验股票且通过字段、日期和分类检查；
-- 日线和 15 分钟数据完成分页下载，无静默截断；
-- 时区、交易时段和复权口径已固定；
+- 日线数据完成分页下载，无静默截断；
+- 交易日标签和复权口径已固定；
 - 每日流动性只使用 T-1 可知信息；
 - point-in-time universe 使用真实美股交易日历；
 - 关键行情覆盖率不低于 98%；
@@ -538,4 +490,3 @@ Manifest 必须记录：
 - 数据文件和质量报告均有 SHA-256；
 - Git 工作区干净；
 - 正式实验 manifest 创建成功并能通过独立校验。
-

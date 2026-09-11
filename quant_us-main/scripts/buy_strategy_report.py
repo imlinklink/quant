@@ -134,7 +134,7 @@ def main():
     errors=validate_manifest(manifest)
     if errors:raise SystemExit('manifest 无效: '+','.join(errors))
     matrix=pd.read_csv(args.matrix)
-    expected={(e,x,c) for e in 'ABCD' for x in [f'E{i}' for i in range(1,13)]
+    expected={(e,x,c) for e in 'ABCD' for x in [f'E{i}' for i in range(1,12)]
               for c in (.001,.002,.005,.01)}
     actual=set(zip(matrix.experiment,matrix.exit_method,matrix.cost_scenario.astype(float)))
     if expected-actual:raise SystemExit(f'矩阵不完整，缺少 {len(expected-actual)} 个单元')

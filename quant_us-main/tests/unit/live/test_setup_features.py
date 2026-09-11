@@ -39,6 +39,15 @@ class SetupFeatureTests(unittest.TestCase):
         self.assertEqual(a['features'], b['features'])
         self.assertEqual(a['structure'], b['structure'])
 
+    def test_weekly_features_are_derived_from_completed_daily_prefix(self):
+        d=bars(300)
+        cutoff=d.date.iloc[279].normalize()+pd.Timedelta(hours=22)
+        out=compute_setup_features(d,None,None,cutoff,{'min_daily_bars':250})
+        f=out['features']
+        self.assertIn(f['weekly_regime'],('trend','recovering','falling'))
+        self.assertIsInstance(f['weekly_gate'],bool)
+        self.assertGreaterEqual(f['weekly_bar_count'],40)
+
 
 if __name__ == '__main__':
     unittest.main()

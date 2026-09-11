@@ -9,10 +9,10 @@ from scripts.portfolio_backtest import apply_portfolio_constraints
 
 
 EXPERIMENTS = {
-    'A': '旧15m dip_buy',
-    'B': '日线setup + 旧15m timing',
-    'C': '日线setup + 次日开盘',
-    'D': '日线setup + 15m timing',
+    'A': '日线Setup + 次日开盘',
+    'B': '周线环境门 + 日线Setup + 次日开盘',
+    'C': '周线环境门 + 日线反转确认 + 次日开盘',
+    'D': 'C组 + LLM研究过滤',
 }
 
 

@@ -8,6 +8,7 @@ def snapshot(**overrides):
                 'ma20_slope_5d': .01, 'ma50_slope_20d': .02, 'atr14': 3.0,
                 'no_new_low': True, 'one_day_return': .01,
                 'volume_ratio_20d': 1.0, 'relative_strength_20d': .03}
+    features.update({'weekly_gate': True, 'weekly_regime': 'trend'})
     features.update(overrides)
     return {'feature_version': 'daily-setup-v1', 'session': '2026-09-10',
             'quality': {'status': 'pass'}, 'features': features,

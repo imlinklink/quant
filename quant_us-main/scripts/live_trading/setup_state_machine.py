@@ -14,6 +14,8 @@ def transition(previous: str, snapshot: Dict[str, Any],
     if snapshot.get('quality', {}).get('status') != 'pass':
         return 'FALLING', ['DATA_QUALITY_FAILED']
     f, st = snapshot['features'], snapshot['structure']
+    if bool(cfg.get('require_weekly_gate', True)) and not f.get('weekly_gate', False):
+        return 'FALLING', ['WEEKLY_REGIME_BLOCKED']
     close, ma20 = f['close'], f['ma20']
     structural_break = st.get('swing_low') is not None and close < st['swing_low']
     falling = structural_break or (close < f['ma50'] and f['ma20_slope_5d'] < 0 and
@@ -45,6 +47,8 @@ def transition(previous: str, snapshot: Dict[str, Any],
 
 def setup_family(snapshot: Dict[str, Any], state: str) -> Optional[str]:
     f, st = snapshot.get('features', {}), snapshot.get('structure', {})
+    if not f.get('weekly_gate', False):
+        return None
     trend_ok = (f.get('close', 0) > f.get('ma200', float('inf')) and
                 f.get('ma50_slope_20d', -1) > 0 and
                 (f.get('relative_strength_20d') is None or
@@ -83,4 +87,8 @@ def build_setup_candidate(code: str, snapshot: Dict[str, Any], state: str,
             'initial_stop': float(stop),
             'max_chase_price': float(trigger + float(cfg.get('max_chase_atr', .5)) * f['atr14']),
             'risk_per_share': float(trigger - stop),
-            'reason_codes': ['DAILY_' + state], 'feature_version': snapshot['feature_version']}
+            'weekly_gate': bool(f.get('weekly_gate')), 'weekly_regime': f.get('weekly_regime'),
+            'daily_confirmed': state == 'CONFIRMED',
+            'reason_codes': ['WEEKLY_' + str(f.get('weekly_regime', 'unknown')).upper(),
+                             'DAILY_' + state],
+            'feature_version': snapshot['feature_version']}

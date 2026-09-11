@@ -16,10 +16,9 @@ class ExitMatrixTests(unittest.TestCase):
           'entry_time':'2026-01-02T00:00:00Z','entry_price':101,'initial_stop':95,
           'portfolio_rank':1}])
         out=run_exit_matrix(entries,daily())
-        self.assertEqual(len(out),48)
+        self.assertEqual(len(out),44)
         self.assertEqual(set(out.exit_method),set(EXIT_IDS))
         self.assertEqual(set(out.cost_scenario),{.001,.002,.005,.01})
-        self.assertEqual(set(out[out.exit_method=='E12'].data_quality),{'missing_intraday_bars'})
 
     def test_gap_stop_fills_at_open(self):
         b=daily();b.loc[1,['open','low','close']]=[90,89,91]
