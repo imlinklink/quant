@@ -28,4 +28,13 @@ class ExitMatrixTests(unittest.TestCase):
         self.assertEqual(result['exit_reason'],'GAP_STOP')
 
 
+    def test_run_exit_matrix_handles_selected_groups(self):
+        entries=pd.DataFrame([{'experiment':g,'setup_id':f's{g}','stock':'US.X',
+          'entry_time':'2026-01-02T00:00:00Z','entry_price':101,'initial_stop':95,
+          'portfolio_rank':1} for g in 'ABC'])
+        out=run_exit_matrix(entries,daily())
+        self.assertEqual(set(out.experiment),{'A','B','C'})
+        self.assertEqual(len(out),3*11*4)
+
+
 if __name__=='__main__':unittest.main()

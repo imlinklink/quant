@@ -1,6 +1,7 @@
 import unittest
 import pandas as pd
-from scripts.buy_strategy_report import holm_adjust,metrics
+from scripts.buy_strategy_report import (COSTS, EXIT_IDS, holm_adjust, metrics,
+                                         render_report)
 
 
 class BuyStrategyReportTests(unittest.TestCase):
@@ -17,6 +18,31 @@ class BuyStrategyReportTests(unittest.TestCase):
         self.assertEqual(out['d_minus_c'][0]['pairs'],4)
         self.assertAlmostEqual(out['d_minus_c'][0]['mean_diff'],.01)
         adjusted=holm_adjust([.04,.01,.03]);self.assertTrue(all(0<=x<=1 for x in adjusted))
+
+    def test_abc_groups_mark_llm_inconclusive_no_empty_table(self):
+        rows=[]
+        for i in range(4):
+            for exp,pnl in [('A',.0),('B',.01),('C',.02)]:
+                rows.append({'experiment':exp,'setup_id':f's{i}','stock':f'US.{i}',
+                  'strategy':'reversal_confirmed','entry_time':f'2026-01-0{i+1}T14:30:00Z',
+                  'exit_method':'E7','cost_scenario':.002,'net_pnl_pct':pnl,
+                  'net_pnl_usd':pnl*5000,'mfe_pct':.03,'mae_pct':-.01,
+                  'portfolio_accepted':True,'data_quality':'good'})
+        out=metrics(pd.DataFrame(rows),groups=('A','B','C'))
+        self.assertEqual(out['selected_groups'],['A','B','C'])
+        self.assertEqual(out['d_minus_c'],[])
+        self.assertEqual(out['llm_increment'],
+                         {'status':'inconclusive','reason':'HISTORICAL_LLM_LABELS_UNAVAILABLE'})
+        increments={i['child']:i for i in out['increments']}
+        self.assertEqual(set(increments),{'B','C'})
+        self.assertAlmostEqual(increments['B']['rows'][0]['mean_diff'],.01)
+        self.assertAlmostEqual(increments['C']['rows'][0]['mean_diff'],.01)
+        text=render_report(out,'BUY-WD-ABC-EXP-001',('A','B','C'))
+        self.assertIn('LLM_INCREMENT_STATUS = inconclusive',text)
+        self.assertIn('reason = HISTORICAL_LLM_LABELS_UNAVAILABLE',text)
+        self.assertIn('## A/B/C × Exit 核心结果',text)
+        self.assertNotIn('## D-C 配对增量',text)
+        self.assertEqual(len(EXIT_IDS)*len(COSTS)*3,132)
 
 
 if __name__=='__main__':unittest.main()

@@ -114,20 +114,32 @@ def main():
     p=argparse.ArgumentParser(description='运行 E1-E11 日线退出矩阵')
     p.add_argument('--manifest',required=True);p.add_argument('--entries',required=True);p.add_argument('--daily',required=True)
     p.add_argument('--output',required=True)
+    p.add_argument('--groups',default='ABCD',
+                   help='实验分组，A/B/C/D 的有序子集，默认 ABCD（例如 ABC）')
     args=p.parse_args()
     import json
-    from scripts.experiment_manifest import validate_manifest
+    from scripts.experiment_manifest import (validate_manifest, parse_groups,
+                                             check_groups_consistent)
+    try:
+        groups=parse_groups(args.groups)
+    except ValueError as exc:
+        raise SystemExit(str(exc))
     manifest=json.loads(Path(args.manifest).read_text(encoding='utf-8'))
     errors=validate_manifest(manifest)
     if errors:raise SystemExit('manifest 无效: '+','.join(errors))
+    check_groups_consistent(groups,manifest)
     entries=pd.read_csv(args.entries)
-    if set(entries.get('experiment',[]))!=set('ABCD'):
-        raise SystemExit('entries 必须包含 A/B/C/D 四组')
+    if 'experiment' not in entries:
+        raise SystemExit('entries 缺少 experiment 列')
+    entries=entries[entries.experiment.isin(groups)]
+    missing=set(groups)-set(entries.experiment)
+    if missing:
+        raise SystemExit(f'entries 缺少实验分组: {",".join(sorted(missing))}')
     out=run_exit_matrix(entries,pd.read_csv(args.daily))
     target=Path(args.output)
     if target.exists(): raise FileExistsError(f'禁止覆盖实验产物: {target}')
     target.parent.mkdir(parents=True,exist_ok=True);out.to_csv(target,index=False)
-    print(f'wrote {len(out)} rows to {target}');return 0
+    print(f'wrote {len(out)} rows to {target} (groups={",".join(groups)})');return 0
 
 
 if __name__=='__main__': raise SystemExit(main())
