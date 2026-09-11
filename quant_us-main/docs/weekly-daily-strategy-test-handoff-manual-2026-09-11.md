@@ -12,6 +12,23 @@
 
 本文是当前周线/日线方案的测试入口。`buy-strategy-validation-plan-2026-09-10.md` 中仍包含旧 15 分钟 A/B/C/D 定义；涉及主实验分组和退出方法时，以本文及 `weekly-daily-buy-strategy-technical-design-2026-09-11.md` 为准。
 
+## 变更记录（2026-09-11 第二轮，优先于下文旧描述）
+
+本轮修复了退出模拟与增量分析，下文相关段落的旧描述以本节为准：
+
+| 项目 | 旧（首轮） | 现（本轮） | 影响章节 |
+|---|---|---|---|
+| 退出窗口 | `bars[date >= entry_time]` 把成交当日整根 K 线排除，退出从次日开始 | **含成交当日**：按交易日选取入场日及其后 40 个交易日 | §6 §12 |
+| 退出时刻 | 交易日 00:00，可能早于入场时刻 | 统一为交易日 09:30 ET，保证 `exit_time >= entry_time` | §12 |
+| 增量分析 | 同 setup 配对，嵌套分组下恒为 0 | 两组**聚合期望差**（独立组 bootstrap）+ 年份同向计数 | §13 |
+| 报告完整性 | 强制 A/B/C/D 四组共 176 单元 | 支持 `--groups ABC`，ABC 为 3×11×4 = **132 单元** | §8.3 §13 |
+| 集中度 | 按净收益总额（净额≈0 或为负时失真） | 按**毛利**（正贡献之和）比例 | §13 |
+| 报告分层 | 无 | **资产类型切片**（普通股/ETF/杠杆 ETF）+ 集中度列，自动读 manifest 的 `security_master.csv` | §9 §13 |
+| 脚本运行 | 需 `PYTHONPATH=.` | 已加 `sys.path` bootstrap，`python3 scripts/X.py` 直接可用 | §4 §10 §12 §13 |
+| 全量测试 | 461 | 480 | §4.3 |
+
+对应实现提交：`169aff2`（`--groups`）、`037d4b1`/`fb8a34b`（退出缺陷修复与提速）、`b9c7f67`（增量改聚合对比）、`7843a6c`/`68b517d`（资产切片与集中度）。首个 A/B/C 工程实验与登记见 `backtests/buy_v2/BUY-WD-ABC-EXP-001/` 和 `backtests/buy_v2/experiment-log.md`。
+
 ## 2. 当前系统状态
 
 截至 2026-09-11，已经完成：
@@ -21,9 +38,9 @@
 - 历史行情统一采用 Futu `QFQ` 前复权日线；
 - Security Master、断点下载、标准化、交易日历、数据质量、T-1 流动性和历史时点 universe 已有脚本；
 - 历史 setup、A/B/C/D 入场、E1-E11 退出矩阵和统计报告已有脚本；
-- 最近一次全量测试结果为 `461 passed`。
+- 最近一次全量测试结果为 `480 passed`（本轮修复后；首轮为 461）。
 
-当前代码尚未提交。接手者首先应检查并提交这些文件：
+首轮交接时以下文件尚未提交；**本轮已全部提交**（当前实现提交见开头「变更记录」）：
 
 ```text
 Makefile
@@ -133,7 +150,7 @@ python3 -m pytest -q
 验收：
 
 - 所有测试通过；
-- 当前参考值为 461 项；新增合理测试后数量可以增加；
+- 当前参考值为 480 项（首轮 461；本轮新增资产切片/§12 校验/退出缺陷回归等测试）；新增合理测试后数量可以增加；
 - 不允许通过跳过失败测试来提交。
 
 另外运行定向测试：
@@ -410,7 +427,9 @@ insufficient_evidence
 
 管道契约测试可以复制少量 setup，使用明确标记为 `synthetic_contract_test` 的固定标签，验证 join、D 子集和报告代码。这些结果不得进入收益报告。
 
-正式实验必须使用真实历史时点证据生成冻结标签。若无法建立可靠的历史证据库，正式结论限定为 A/B/C，LLM 增量判定为 `inconclusive`。当前 `exit_matrix.py` 和 `buy_strategy_report.py` 强制要求 A/B/C/D 完整，因此在 D 为空时不要运行正式矩阵；应先补标签，或另开代码变更让报告显式支持 `--groups ABC`，同时将 D 标记为不可判定。不得用伪标签绕过完整性检查。
+正式实验必须使用真实历史时点证据生成冻结标签。若无法建立可靠的历史证据库，正式结论限定为 A/B/C，LLM 增量判定为 `inconclusive`。
+
+**已实现（本轮）**：`exit_matrix.py` / `buy_strategy_report.py` 均支持 `--groups ABC`（默认 `ABCD`，保持兼容；只接受 A/B/C/D 的有序子集，且必须与 `manifest.experiment_groups` 一致）；`experiment_manifest.py` 冻结 `experiment_groups` 与 `llm_evaluation`，缺 D 时强制 `status=inconclusive`。报告在无 D 时输出 `LLM_INCREMENT_STATUS = inconclusive` / `reason = HISTORICAL_LLM_LABELS_UNAVAILABLE`，不显示空表。因此 D 为空时可直接运行 A/B/C（§10–§13 命令加 `--groups ABC`），无需伪标签。实验编号用 `BUY-WD-ABC-EXP-001`；未来补齐真实标签后另建 `BUY-WD-ABCD-EXP-001`，二者不得互相覆盖。
 
 标签冻结后必须重新生成一个新 setup 文件，不能覆盖无标签版本：
 
@@ -472,9 +491,12 @@ python3 scripts/experiment_manifest.py \
     data/market_history/runs/FORMAL-QFQ-001/setups-labeled.csv \
     data/market_history/runs/FORMAL-QFQ-001/llm_labels.csv \
   --quality data/market_history/runs/FORMAL-QFQ-001/daily_quality.csv \
+  --groups ABC \
   --output-dir backtests/buy_v2/BUY-WD-EXP-001 \
   --root .
 ```
+
+`--groups` 写入 manifest 的 `experiment_groups` 并据此决定 `llm_evaluation`（缺 D 时强制 `status=inconclusive`，见 §8.3）。ABC 实验编号用 `BUY-WD-ABC-EXP-001`；补齐真实标签后另建 `BUY-WD-ABCD-EXP-001`，不得互相覆盖。
 
 复制冻结 setup；目标不存在时才执行：
 
@@ -549,8 +571,14 @@ python3 scripts/exit_matrix.py \
   --manifest backtests/buy_v2/BUY-WD-EXP-001/manifest.json \
   --entries backtests/buy_v2/BUY-WD-EXP-001/entries/signals.csv \
   --daily data/market_history/runs/FORMAL-QFQ-001/daily.csv.gz \
+  --groups ABC \
   --output backtests/buy_v2/BUY-WD-EXP-001/exit_matrix.csv
 ```
+
+`--groups` 必须与 `manifest.experiment_groups` 一致（A/B/C 实验用 `ABC`；ABCD 实验用默认 `ABCD`）。退出引擎的两条口径（本轮修复）：
+
+- 模拟窗口**含成交当日**：从入场交易日（`next_open_time` 所在日）起的 40 个交易日，不得跳过成交当日；
+- 退出时刻统一为交易日的 09:30 ET，因此 `exit_time >= entry_time` 恒成立。
 
 检查矩阵完整性：
 
@@ -559,7 +587,8 @@ python3 - <<'PY'
 import pandas as pd
 p='backtests/buy_v2/BUY-WD-EXP-001/exit_matrix.csv'
 d=pd.read_csv(p)
-expected={(g,f'E{i}',c) for g in 'ABCD' for i in range(1,12)
+GROUPS='ABC'  # 与 manifest.experiment_groups 一致；ABCD 实验用 'ABCD'
+expected={(g,f'E{i}',c) for g in GROUPS for i in range(1,12)
           for c in (.001,.002,.005,.01)}
 actual=set(zip(d.experiment,d.exit_method,d.cost_scenario.astype(float)))
 assert expected<=actual, expected-actual
@@ -582,33 +611,38 @@ PY
 6. 四个成本场景均为 0.1%、0.2%、0.5%、1.0%；
 7. 每个 experiment/exit/cost 独立应用最多三仓约束。
 
+上述 1–5、7 已有确定性单测（`tests/unit/live/test_exit_matrix.py`：成交当日 GAP_STOP、日内 STOP 按止损线成交、新保护线次日生效、数据不足标 `DATA_END`、三仓按 experiment/exit/cost 独立）；6 由 `COSTS` 常量与矩阵完整性检查覆盖。
+
 ## 13. 第九阶段：生成报告但不自动选参数
 
 ```bash
 python3 scripts/buy_strategy_report.py \
   --matrix backtests/buy_v2/BUY-WD-EXP-001/exit_matrix.csv \
   --manifest backtests/buy_v2/BUY-WD-EXP-001/manifest.json \
+  --groups ABC \
   --output-dir backtests/buy_v2/BUY-WD-EXP-001/report
 ```
 
+`--groups` 必须与 manifest 一致。资产类型切片会自动读取 manifest 的 `security_master.csv`，也可用 `--security-master` 覆盖。
+
 检查：
 
-- 176 个单元全部存在：4 组 × 11 种退出 × 4 种成本；
+- 单元数与所选组一致：`--groups ABC` 为 3 组 × 11 种退出 × 4 种成本 = 132；`ABCD` 为 176；
 - 报告包含 group bootstrap 95% 区间；
-- D-C 使用相同 setup 做配对；
+- 增量采用**两组聚合期望差**（独立组 bootstrap）并给出**年份同向**计数；不是同 setup 配对——嵌套分组下配对差恒为 0，无法回答增量；
 - 多重比较使用 Holm 校正；
 - 分年份报告最好和最差年份；
-- 报告 top-2 股票收益占比和 top-3 交易收益占比；
-- 杠杆 ETF 与普通股票另做切片；
+- 报告 top-2 股票、top-3 交易占**毛利**（正贡献之和）的比例，不是占净额（净额≈0 或为负时失真）；
+- **按资产类型切片**：普通股 / ETF / 杠杆 ETF 分开；某类型无可交易样本时必须显式标注（本试点中普通 ETF 无成交）；
 - 开发期、验证期、测试期分别报告。
 
 不要用全期收益最高的单元直接宣布胜出。应依次判断：
 
 1. B-A 是否在多个年份同方向，回答 weekly gate 是否有增量；
-2. C-B 是否改善 MAE、止损率或风险调整收益，回答确认等待的价值；
-3. D-C 是否在配对样本中有稳定增量，回答 LLM 是否创造价值；
+2. C-B 是否改变期望并跨资产类型同向，回答等待日线确认的价值（注意方向可能按资产类型相反：本试点普通股为正、杠杆 ETF 为负）；
+3. D-C 是否有稳定的聚合增量，回答 LLM 是否创造价值（本实验 D 为空，标记 inconclusive）；
 4. 退出家族是否跨年份、资产层和成本场景保持方向；
-5. 结果是否由少数股票或交易贡献。
+5. 结果是否由少数股票或交易贡献（看集中度列：占毛利比例过高即为集中风险）。
 
 结论只能是：
 
@@ -719,5 +753,12 @@ report.md
 7. 运行 A/B/C/D × E1-E11 × 四种成本；
 8. 按预登记规则作出结论；
 9. 连续运行至少两个交易日 shadow 并完成账本对账。
+
+### 进度（2026-09-11 第二轮）
+
+- **已完成**：1（审查/测试/提交）；3（setup 无未来数据抽查，28 条跨标的 0 失败，记录在 `backtests/buy_v2/setup-lookahead-audit-PILOT-QFQ-20260911-R2.csv`）；6/7/8 的 **A/B/C 部分**（实验 `BUY-WD-ABC-EXP-001`，132 单元，结论 `inconclusive`）。
+- **需本机 Futu OpenD**：2（重跑 QFQ 试点）、9（shadow 联调）。
+- **需外部数据源**：4（历史时点 LLM 标签）、5（含退市的 point-in-time Security Master），二者是 D 组的阻断项。
+- 本轮同时修复了退出模拟成交当日缺失与增量配对两个缺陷（见开头「变更记录」）。
 
 在第 4、5 项完成前，可以证明工程管道正确，但不能证明 LLM 或买入策略具备可交易优势。

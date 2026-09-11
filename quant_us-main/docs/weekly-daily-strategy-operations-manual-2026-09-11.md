@@ -1,6 +1,7 @@
 # 周线/日线买入策略落地操作手册（2026-09-11）
 
 > 后续测试、正式实验和人员交接请优先执行 `weekly-daily-strategy-test-handoff-manual-2026-09-11.md`。该文档记录了当前冻结数据、阻断项、验收阈值和逐步命令。
+> 2026-09-11 第二轮的退出语义与增量方法修复（成交当日 K 线纳入、退出时刻口径、聚合增量、`--groups ABC`、资产类型切片与集中度）以测试交接手册开头的「变更记录」为准。
 
 ## 1. 当前阶段
 
@@ -337,9 +338,12 @@ python3 scripts/experiment_manifest.py \
     data/market_history/runs/PILOT-20260911/daily_liquidity.csv.gz \
     data/market_history/runs/PILOT-20260911/trading_calendar.csv \
   --quality data/market_history/runs/PILOT-20260911/daily_quality.csv \
+  --groups ABC \
   --output-dir backtests/buy_v2/BUY-WD-EXP-001 \
   --root .
 ```
+
+`--groups` 会写入 manifest 的 `experiment_groups`，并据此决定 `llm_evaluation`（缺 D 时强制 `status=inconclusive`）。ABC 实验用 `BUY-WD-ABC-EXP-001`，补齐真实标签后的 ABCD 实验另建 `BUY-WD-ABCD-EXP-001`，不得互相覆盖。
 
 正式实验不使用`config.yaml`，避免冻结本地API密钥。应准备不含密钥的实验配置文件。
 
@@ -371,7 +375,7 @@ python3 scripts/buy_strategy_experiment_runner.py \
 | C | B + 日线CONFIRMED |
 | D | C + LLM candidate |
 
-必须检查`D ⊆ C ⊆ B ⊆ A`。
+必须检查`D ⊆ C ⊆ B ⊆ A`。D 组为空（无历史时点 LLM 标签）时，直接用 `--groups ABC` 运行 A/B/C，D 增量标记为 `inconclusive`；不要用伪标签凑 D。
 
 ## 13. 运行E1-E11和报告
 
@@ -380,6 +384,7 @@ python3 scripts/exit_matrix.py \
   --manifest backtests/buy_v2/BUY-WD-EXP-001/manifest.json \
   --entries backtests/buy_v2/BUY-WD-EXP-001/entries/signals.csv \
   --daily data/market_history/runs/PILOT-20260911/daily.csv.gz \
+  --groups ABC \
   --output backtests/buy_v2/BUY-WD-EXP-001/exit_matrix.csv
 ```
 
@@ -387,16 +392,19 @@ python3 scripts/exit_matrix.py \
 python3 scripts/buy_strategy_report.py \
   --matrix backtests/buy_v2/BUY-WD-EXP-001/exit_matrix.csv \
   --manifest backtests/buy_v2/BUY-WD-EXP-001/manifest.json \
+  --groups ABC \
   --output-dir backtests/buy_v2/BUY-WD-EXP-001/report
 ```
 
+`--groups` 必须与 manifest 的 `experiment_groups` 一致（ABC 实验用 `ABC`，ABCD 实验用默认 `ABCD`）。
+
 重点比较：
 
-- B-A：周线环境门；
-- C-B：等待日线确认；
-- D-C：LLM过滤。
+- B-A：周线环境门（聚合期望差，看是否跨年份同向）；
+- C-B：等待日线确认（注意方向可能按资产类型相反）；
+- D-C：LLM 过滤（D 为空时标记 `inconclusive`）。
 
-同时查看期望收益、MAE、MFE、最大回撤、年份稳定性、个股集中度、成本敏感性和置信区间。
+同时查看期望收益、MAE、MFE、最大回撤、年份稳定性、**按资产类型（普通股/ETF/杠杆 ETF）切片**、个股集中度（占**毛利**的 top-2 股票、top-3 交易占比）、成本敏感性和置信区间。退出矩阵**含成交当日**，`exit_time >= entry_time`。
 
 ## 14. 日常Shadow运行
 
