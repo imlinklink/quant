@@ -69,15 +69,25 @@ def build_point_in_time_universe(master: pd.DataFrame, liquidity: pd.DataFrame,
         joined = active.merge(day, on='code', how='left')
         joined['eligible'] = (joined[price_col].ge(min_price) &
                               joined[volume_col].ge(min_dollar_volume))
-        joined['quality'] = np.where(joined[[price_col, volume_col]].isna().any(axis=1),
-                                     'missing_liquidity', 'good')
-        if 'liquidity_quality' in joined:
-            joined['quality'] = np.where(joined['liquidity_quality'].eq('good'),
-                                         joined['quality'], 'quality_fail')
+        missing_data = joined[[price_col, volume_col]].isna().any(axis=1)
+        joined['quality'] = np.where(missing_data, 'missing_liquidity', 'good')
+        lq = joined['liquidity_quality'] if 'liquidity_quality' in joined else None
+        if lq is not None:
+            joined['quality'] = np.where(lq.eq('good'), joined['quality'], 'quality_fail')
+        # 数据质量不通过的区间不得进入可交易集合（设计 §9 / 操作手册 §5.5）。
+        joined['eligible'] = joined['eligible'] & joined['quality'].eq('good')
+        # 拒绝原因：先区分「上市初期流动性历史不足」，再区分「当日无数据」，
+        # 再区分「有数据但未过质量门」，最后才是价格/成交额门槛（设计 §9 原因枚举）。
+        insufficient = (lq.eq('insufficient_history') if lq is not None
+                        else pd.Series(False, index=joined.index))
         joined['reason'] = np.select(
-            [joined['quality'].ne('good'), joined[price_col].lt(min_price),
+            [insufficient,
+             missing_data,
+             joined['quality'].eq('quality_fail'),
+             joined[price_col].lt(min_price),
              joined[volume_col].lt(min_dollar_volume)],
-            ['MISSING_LIQUIDITY', 'PRICE_TOO_LOW', 'DOLLAR_VOLUME_TOO_LOW'],
+            ['INSUFFICIENT_LIQUIDITY_HISTORY', 'MISSING_LIQUIDITY', 'DATA_QUALITY_FAIL',
+             'PRICE_TOO_LOW', 'DOLLAR_VOLUME_TOO_LOW'],
             default='ELIGIBLE')
         joined['universe_date'] = session
         rows.append(joined)
