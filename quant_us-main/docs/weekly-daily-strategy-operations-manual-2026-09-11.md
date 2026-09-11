@@ -1,5 +1,7 @@
 # 周线/日线买入策略落地操作手册（2026-09-11）
 
+> 后续测试、正式实验和人员交接请优先执行 `weekly-daily-strategy-test-handoff-manual-2026-09-11.md`。该文档记录了当前冻结数据、阻断项、验收阈值和逐步命令。
+
 ## 1. 当前阶段
 
 系统已经完成从15分钟抄底转向“周线环境 + 日线Setup + LLM研究 + T+1执行”的代码改造。下一阶段的目标是用本地历史日线跑通第一轮可复现实验，再用每日shadow数据验证运行时链路。
@@ -78,7 +80,24 @@ python3 scripts/live_trading/preflight_check.py
 
 ### 4.2 文件格式
 
-建立：
+推荐直接从Futu生成：
+
+```bash
+python3 scripts/data/build_security_master_from_futu.py \
+  --config config.yaml \
+  --include US.SPY \
+  --output data/security_master_pilot.csv
+```
+
+或运行：
+
+```bash
+make security-master
+```
+
+脚本会读取`buy_strategy_v2.watch_list`，若为空则兼容读取现有`dip_buy.watch_list`，并自动加入行业代理和`US.SPY`。它从Futu当前美股证券目录提取代码、名称、上市日期、证券类型和手数，并自动标记常见杠杆ETF。
+
+生成文件：
 
 ```text
 data/security_master_pilot.csv
@@ -100,7 +119,9 @@ etf
 leveraged_etf
 ```
 
-第一轮手工master只用于管道验收，必须在报告中注明幸存者偏差。正式实验需要包含退市证券和ticker历史的point-in-time数据源。
+第一轮Futu master只包含当前证券，只用于管道验收，必须在报告中注明幸存者偏差。正式实验需要包含退市证券和ticker历史的point-in-time数据源。
+
+生成后重点检查`listing_date_quality`。如果脚本因Futu未返回股票或上市日期而退出，应先核对代码和行情权限；只有管道诊断时才使用`--allow-missing`，正式实验禁止使用未知上市日期。
 
 ### 4.3 校验并标准化
 
@@ -155,7 +176,7 @@ make data-pipeline \
 原始行情保存在：
 
 ```text
-data/market_history/raw/day/year=YYYY/US_SYMBOL.csv.gz
+data/market_history/raw/day/qfq/year=YYYY/US_SYMBOL.csv.gz
 ```
 
 下载状态保存在：
@@ -164,7 +185,7 @@ data/market_history/raw/day/year=YYYY/US_SYMBOL.csv.gz
 data/market_history/checkpoints/download_state.json
 ```
 
-相同股票、年份和覆盖区间已经下载且哈希一致时，下载器直接复用。结束日期向后延伸时，下载器合并新结果、按`code + time_key`去重并更新检查点。
+相同股票、复权口径、年份和覆盖区间已经下载且哈希一致时，下载器直接复用。策略特征固定使用`qfq`前复权分区。结束日期向后延伸时，下载器合并新结果、按`code + time_key`去重并更新检查点。
 
 每次流水线的标准化快照保存在：
 
@@ -262,11 +283,11 @@ python3 scripts/live_trading/run_daily_setups.py --json
 
 ```bash
 python3 scripts/data/generate_historical_setups.py \
-  --daily data/market_history/runs/PILOT-20260911/daily.csv.gz \
+  --daily data/market_history/runs/PILOT-QFQ-20260911-R2/daily.csv.gz \
   --config docs/trading-upgrade-settings.yaml \
   --start 2016-01-01 \
   --end 2026-08-31 \
-  --output backtests/buy_v2/input/setups.csv
+  --output data/market_history/runs/PILOT-QFQ-20260911-R2/setups.csv
 ```
 
 没有历史LLM标签时，`llm_decision=missing`，D组暂时为空；之后可通过`--llm-labels`传入包含`setup_id,llm_decision`的冻结文件。Setup输入包含：
@@ -434,7 +455,7 @@ data/market_history/checkpoints/download_state.json
 
 ### 现在执行
 
-1. 创建20～50只股票的`security_master_pilot.csv`；
+1. 使用`make security-master`从Futu生成并检查`security_master_pilot.csv`；
 2. 启动OpenD；
 3. 运行`PILOT-20260911`数据流水线；
 4. 检查质量报告；

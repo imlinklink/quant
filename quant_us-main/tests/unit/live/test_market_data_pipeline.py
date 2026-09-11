@@ -6,6 +6,7 @@ from pathlib import Path
 import pandas as pd
 
 from scripts.data.build_daily_liquidity import build_liquidity
+from scripts.data.build_security_master_from_futu import build_from_basicinfo,codes_from_config,reconcile_listing_dates
 from scripts.data.build_security_master import build_master
 from scripts.data.download_market_history import download, fetch_pages
 from scripts.data.normalize_market_history import normalize
@@ -21,6 +22,32 @@ class FakeHistoryContext:
 
 
 class MarketDataPipelineTests(unittest.TestCase):
+    def test_builds_pilot_master_from_config_and_futu_rows(self):
+        cfg={'dip_buy':{'watch_list':['US.A','SOXL']},
+             'pullback':{'sector_proxies':{'semis':'US.SOXX'}}}
+        codes=codes_from_config(cfg,[])
+        self.assertEqual(codes,['US.A','US.SOXL','US.SOXX','US.SPY'])
+        basic=pd.DataFrame([
+            {'code':'US.A','name':'A Corp','stock_type':'STOCK','list_time':'2020-01-02','lot_size':1},
+            {'code':'US.SOXL','name':'SOXL ETF','stock_type':'ETF','list_time':'2010-03-11','lot_size':1},
+            {'code':'US.SOXX','name':'SOXX ETF','stock_type':'ETF','list_time':'2001-07-10','lot_size':1},
+            {'code':'US.SPY','name':'SPY ETF','stock_type':'ETF','list_time':'1993-01-29','lot_size':1}])
+        out=build_from_basicinfo(basic,codes,as_of='2026-09-11')
+        self.assertEqual(out.set_index('code').loc['US.SOXL','asset_type'],'leveraged_etf')
+        self.assertEqual(out.set_index('code').loc['US.SPY','asset_type'],'etf')
+        self.assertTrue((out.listing_date_quality=='reported_unverified').all())
+
+    def test_first_daily_reconciles_placeholder_but_not_history_boundary(self):
+        master=pd.DataFrame([
+            {'code':'US.OLD','listing_date':'1970-01-01','listing_date_quality':'unknown'},
+            {'code':'US.NEW','listing_date':'1970-01-01','listing_date_quality':'unknown'}])
+        daily=pd.DataFrame([{'stock':'US.OLD','date':'2015-01-02'},
+                            {'stock':'US.NEW','date':'2020-06-01'}])
+        out=reconcile_listing_dates(master,daily,'2015-01-01').set_index('code')
+        self.assertEqual(out.loc['US.OLD','listing_date_quality'],'listed_on_or_before_history_start')
+        self.assertEqual(out.loc['US.NEW','listing_date'],'2020-06-01')
+        self.assertEqual(out.loc['US.NEW','listing_date_quality'],'confirmed_by_first_daily')
+
     def test_liquidity_is_lagged_one_session(self):
         rows=[]
         for i in range(21):
@@ -48,11 +75,11 @@ class MarketDataPipelineTests(unittest.TestCase):
         page=pd.DataFrame([{'code':'US.A','time_key':'2026-01-02','open':1,'high':1,
                             'low':1,'close':1,'volume':1}])
         ctx=FakeHistoryContext([(0,page,b'next'),(0,page.assign(time_key='2026-01-03'),None)])
-        frame,pages=fetch_pages(ctx,'US.A','2026-01-01','2026-12-31','DAY',autype='NONE',session='RTH')
+        frame,pages=fetch_pages(ctx,'US.A','2026-01-01','2026-12-31','DAY',autype='NONE',session='RTH',request_interval=0)
         self.assertEqual((len(frame),pages),(2,2))
         with tempfile.TemporaryDirectory() as tmp:
             ctx=FakeHistoryContext([(0,page,None)])
-            types={'day':'DAY','autype':'NONE','session':'RTH'}
+            types={'day':'DAY','autype':'NONE','autype_name':'none','session':'RTH'}
             state=download(ctx,['US.A'],'2026-01-01','2026-12-31',Path(tmp)/'raw',
                            Path(tmp)/'state.json',kinds=('day',),futu_types=types)
             self.assertEqual(len(state['completed']),1)
@@ -61,6 +88,15 @@ class MarketDataPipelineTests(unittest.TestCase):
                             Path(tmp)/'state.json',kinds=('day',),futu_types=types)
             self.assertEqual(ctx.calls,calls)
             self.assertEqual(state,state2)
+
+    def test_downloader_skips_years_before_reported_listing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx=FakeHistoryContext([]);types={'day':'DAY','autype':'NONE','autype_name':'none','session':'RTH'}
+            state=download(ctx,['US.NEW'],'2020-01-01','2021-12-31',Path(tmp)/'raw',
+                Path(tmp)/'state.json',kinds=('day',),futu_types=types,
+                listing_dates={'US.NEW':'2022-01-01'})
+            self.assertEqual(ctx.calls,0)
+            self.assertEqual(len(state['unavailable']),2)
 
     def test_quality_reports_daily_failures(self):
         master=pd.DataFrame([{'code':'US.A','listing_date':'2026-01-02','delisting_date':''}])
@@ -72,7 +108,7 @@ class MarketDataPipelineTests(unittest.TestCase):
 
     def test_end_to_end_pipeline_reuses_local_daily_cache(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root=Path(tmp);raw=root/'raw'/'day'/'year=2026';raw.mkdir(parents=True)
+            root=Path(tmp);raw=root/'raw'/'day'/'qfq'/'year=2026';raw.mkdir(parents=True)
             dates=pd.bdate_range('2026-01-02',periods=30)
             for code in ('US.SPY','US.A'):
                 frame=pd.DataFrame({'code':code,'time_key':dates.astype(str),

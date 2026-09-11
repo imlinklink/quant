@@ -23,7 +23,7 @@ def year_ranges(start, end):
 
 
 def fetch_pages(ctx, code, start, end, ktype, *, autype, session, max_count=1000,
-                retries=3, retry_seconds=2.0):
+                retries=5, retry_seconds=3.0, request_interval=.55):
     """拉取并验证所有分页；ctx 便于测试时注入。"""
     page_key = None; frames = []; pages = 0
     while True:
@@ -33,6 +33,7 @@ def fetch_pages(ctx, code, start, end, ktype, *, autype, session, max_count=1000
                 ktype=ktype, autype=autype, max_count=max_count,
                 page_req_key=page_key, extended_time=False, session=session)
             if ret == 0:
+                if request_interval:time.sleep(request_interval)
                 break
             if attempt + 1 == retries:
                 raise RuntimeError(f'{code} {start}..{end} 下载失败: {data}')
@@ -51,8 +52,8 @@ def fetch_pages(ctx, code, start, end, ktype, *, autype, session, max_count=1000
 
 def _load_checkpoint(path):
     path = Path(path)
-    if not path.exists(): return {'completed': {}, 'failed': {}}
-    return json.loads(path.read_text(encoding='utf-8'))
+    if not path.exists(): return {'completed': {}, 'failed': {}, 'unavailable': {}}
+    state=json.loads(path.read_text(encoding='utf-8'));state.setdefault('unavailable',{});return state
 
 
 def _save_checkpoint(path, state):
@@ -62,18 +63,44 @@ def _save_checkpoint(path, state):
     tmp.replace(path)
 
 
+def records_for_request(records, codes, kinds, start, end, adjustment):
+    """筛选本次代码、周期、复权口径和年份对应的检查点记录。"""
+    years={str(part_start.year) for part_start,_ in year_ranges(start,end)}
+    prefixes={(str(code),str(kind),str(adjustment)) for code in codes for kind in kinds}
+    result={}
+    for key,item in records.items():
+        parts=key.split('|')
+        if len(parts)==4 and tuple(parts[:3]) in prefixes and parts[3] in years:
+            result[key]=item
+    return result
+
+
+def failures_for_request(state, codes, kinds, start, end, adjustment):
+    """只返回本次口径和区间的失败项，忽略检查点中的历史口径。"""
+    return records_for_request(state.get('failed',{}),codes,kinds,start,end,adjustment)
+
+
 def download(ctx, codes, start, end, output_root, checkpoint, *, kinds=('day',),
-             overwrite=False, futu_types=None):
+             overwrite=False, futu_types=None, listing_dates=None):
     if futu_types is None:
         from futu import AuType, KLType, Session
-        futu_types = {'day': KLType.K_DAY, 'autype': AuType.NONE, 'session': Session.RTH}
+        futu_types = {'day': KLType.K_DAY, 'autype': AuType.QFQ,
+                      'autype_name': 'qfq', 'session': Session.RTH}
+    autype_name=str(futu_types.get('autype_name') or futu_types['autype']).lower().split('.')[-1]
     state = _load_checkpoint(checkpoint); root = Path(output_root)
     for code in codes:
         safe_code = code.replace('.', '_')
         for kind in kinds:
             for part_start, part_end in year_ranges(start, end):
-                key = f'{code}|{kind}|{part_start.year}'
-                target = root / kind / f'year={part_start.year}' / f'{safe_code}.csv.gz'
+                key = f'{code}|{kind}|{autype_name}|{part_start.year}'
+                if key in state['unavailable'] and not overwrite:
+                    continue
+                listed=pd.to_datetime((listing_dates or {}).get(code),errors='coerce')
+                if pd.notna(listed) and listed.year>1970 and part_end<listed:
+                    state['unavailable'][key]={'reason':'BEFORE_REPORTED_LISTING',
+                        'listing_date':str(listed.date())}
+                    state['failed'].pop(key,None);_save_checkpoint(checkpoint,state);continue
+                target = root / kind / autype_name / f'year={part_start.year}' / f'{safe_code}.csv.gz'
                 existing = None
                 if target.exists() and not overwrite:
                     record = state['completed'].get(key, {})
@@ -109,6 +136,21 @@ def download(ctx, codes, start, end, output_root, checkpoint, *, kinds=('day',),
                     _save_checkpoint(checkpoint, state)
                     continue
                 _save_checkpoint(checkpoint, state)
+    # Futu常用1970占位。若后续年份有数据，则更早EMPTY_RESPONSE属于上市前不可用。
+    first_year={}
+    for key in state['completed']:
+        parts=key.split('|')
+        if len(parts)!=4:continue
+        code,kind,adjustment,year=parts
+        first_year[(code,kind,adjustment)]=min(first_year.get((code,kind,adjustment),9999),int(year))
+    for key,item in list(state['failed'].items()):
+        parts=key.split('|')
+        if len(parts)!=4:continue
+        code,kind,adjustment,year=parts;first=first_year.get((code,kind,adjustment))
+        if first is not None and int(year)<first and str(item.get('error','')).startswith('EMPTY_RESPONSE'):
+            state['unavailable'][key]={'reason':'UNAVAILABLE_BEFORE_FIRST_DATA','first_data_year':first}
+            del state['failed'][key]
+    _save_checkpoint(checkpoint,state)
     return state
 
 
@@ -132,9 +174,10 @@ def main():
                          args.checkpoint, kinds=('day',), overwrite=args.overwrite)
     finally:
         ctx.close()
-    print(json.dumps({'completed': len(state['completed']), 'failed': len(state['failed'])},
+    active_failures=failures_for_request(state,codes,('day',),args.start,args.end,'qfq')
+    print(json.dumps({'completed': len(state['completed']), 'failed': len(active_failures)},
                      ensure_ascii=False))
-    return 1 if state['failed'] else 0
+    return 1 if active_failures else 0
 
 
 if __name__ == '__main__':

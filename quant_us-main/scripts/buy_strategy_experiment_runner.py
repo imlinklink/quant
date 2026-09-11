@@ -44,7 +44,7 @@ def apply_universe(entries: pd.DataFrame, universe: pd.DataFrame):
     u['universe_date']=pd.to_datetime(u.universe_date).dt.date
     e=entries.copy();e['universe_date']=pd.to_datetime(e.entry_time,utc=True).dt.date
     joined=e.merge(u[['universe_date','code','eligible','quality','reason']],left_on=['universe_date','stock'],right_on=['universe_date','code'],how='left')
-    joined['eligible']=joined.eligible.fillna(False).astype(bool)
+    joined['eligible']=joined.eligible.eq(True)
     joined['portfolio_reject_reason']=joined.reason.fillna('NOT_IN_POINT_IN_TIME_UNIVERSE')
     return joined[joined.eligible].copy(),joined[~joined.eligible].copy()
 

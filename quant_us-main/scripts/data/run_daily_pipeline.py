@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import shutil
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,7 +14,8 @@ ROOT=Path(__file__).resolve().parents[2]
 sys.path.insert(0,str(ROOT))
 
 from scripts.data.build_daily_liquidity import build_liquidity
-from scripts.data.download_market_history import download
+from scripts.data.build_security_master_from_futu import reconcile_listing_dates
+from scripts.data.download_market_history import download,failures_for_request,records_for_request
 from scripts.data.io_utils import read_frame,sha256_file,write_frame
 from scripts.data.normalize_market_history import collect_inputs,normalize
 from scripts.data.trading_calendar import sessions
@@ -52,21 +52,29 @@ def run_pipeline(*,master_path,start,end,universe_start,universe_end,run_id,
         if not required.issubset(master):raise ValueError('security master 缺字段: '+','.join(sorted(required-set(master))))
         if 'US.SPY' not in set(master.code.astype(str)):
             raise ValueError('security master 必须包含 US.SPY，用于构建实际交易日历')
-        shutil.copy2(master_path,run_dir/'security_master.csv')
         state['stages']['master']={'status':'complete','rows':len(master)};_write_json(run_dir/'pipeline.json',state)
 
         if not skip_download:
             if ctx is None:raise ValueError('未提供 Futu quote context')
-            dl=download(ctx,master.code.astype(str).tolist(),start,end,raw_root,checkpoint,kinds=('day',))
-            if dl.get('failed'):raise RuntimeError(f"行情下载失败分区: {len(dl['failed'])}")
-            state['stages']['download']={'status':'complete','partitions':len(dl['completed'])}
+            listing_dates=dict(zip(master.code.astype(str),master.listing_date))
+            dl=download(ctx,master.code.astype(str).tolist(),start,end,raw_root,checkpoint,
+                        kinds=('day',),listing_dates=listing_dates)
+            active_failed=failures_for_request(dl,master.code.astype(str).tolist(),('day',),start,end,'qfq')
+            if active_failed:raise RuntimeError(f"行情下载失败分区: {len(active_failed)}")
+            request_args=(master.code.astype(str).tolist(),('day',),start,end,'qfq')
+            completed=records_for_request(dl.get('completed',{}),*request_args)
+            unavailable=records_for_request(dl.get('unavailable',{}),*request_args)
+            state['stages']['download']={'status':'complete','adjustment':'qfq',
+                                         'partitions':len(completed),'unavailable':len(unavailable)}
         else:state['stages']['download']={'status':'skipped'}
         _write_json(run_dir/'pipeline.json',state)
 
-        raw=collect_inputs([Path(raw_root)/'day'])
+        raw=collect_inputs([Path(raw_root)/'day'/'qfq'])
         daily=_filter_daily(normalize(raw,'day'),master,start,end)
         if daily.empty:raise ValueError('标准化后没有日线数据')
         write_frame(daily,run_dir/'daily.csv.gz')
+        master=reconcile_listing_dates(master,daily,start)
+        master.to_csv(run_dir/'security_master.csv',index=False)
         state['stages']['normalize']={'status':'complete','rows':len(daily)};_write_json(run_dir/'pipeline.json',state)
 
         spy=daily[daily.stock=='US.SPY']

@@ -30,6 +30,7 @@ help:
 	@echo "    make verify-intraday 日内K线分析校验（抄底逻辑）"
 	@echo "    make check           语法检查"
 	@echo "    make data-pipeline   下载并准备周线/日线研究数据"
+	@echo "    make security-master 从Futu生成试验证券主表"
 	@echo ""
 	@echo "  🚀 实盘"
 	@echo "    make web           启动Web服务（调参用）"
@@ -169,6 +170,11 @@ data-pipeline: _check_python
 
 START ?= 2015-01-01
 UNIVERSE_START ?= 2016-01-01
+
+.PHONY: security-master
+security-master: _check_python
+	@$(PYTHON) scripts/data/build_security_master_from_futu.py \
+		--config config.yaml --output data/security_master_pilot.csv
 
 # ------------------------------------------------------------------
 # 日内K线分析校验（抄底逻辑）
