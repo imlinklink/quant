@@ -74,22 +74,34 @@ def download(ctx, codes, start, end, output_root, checkpoint, *, kinds=('day',),
             for part_start, part_end in year_ranges(start, end):
                 key = f'{code}|{kind}|{part_start.year}'
                 target = root / kind / f'year={part_start.year}' / f'{safe_code}.csv.gz'
+                existing = None
                 if target.exists() and not overwrite:
-                    if state['completed'].get(key, {}).get('sha256') == sha256_file(target):
+                    record = state['completed'].get(key, {})
+                    if record.get('sha256') != sha256_file(target):
+                        raise FileExistsError(f'已有分区哈希与检查点不一致: {target}')
+                    covered_start = pd.Timestamp(record.get('requested_start', '2999-01-01'))
+                    covered_end = pd.Timestamp(record.get('requested_end', '1900-01-01'))
+                    if covered_start <= part_start and covered_end >= part_end:
                         continue
-                    raise FileExistsError(f'已有分区未出现在有效检查点中: {target}')
+                    existing = read_frame(target)
                 try:
                     frame, pages = fetch_pages(ctx, code, part_start, part_end,
                         futu_types[kind], autype=futu_types['autype'],
                         session=futu_types['session'])
                     if frame.empty:
                         raise RuntimeError('EMPTY_RESPONSE: 需核对上市区间、权限或数据源覆盖')
+                    if existing is not None and not existing.empty:
+                        frame = pd.concat([existing, frame], ignore_index=True)
+                        keys = [c for c in ('code', 'time_key') if c in frame]
+                        frame = frame.drop_duplicates(keys, keep='last') if keys else frame.drop_duplicates()
                     frame['downloaded_at'] = datetime.now(timezone.utc).isoformat()
                     frame['requested_start'] = str(part_start.date())
                     frame['requested_end'] = str(part_end.date())
-                    write_frame(frame, target, overwrite=overwrite)
+                    write_frame(frame, target, overwrite=overwrite or existing is not None)
                     state['completed'][key] = {'path': str(target.resolve()), 'rows': len(frame),
-                        'pages': pages, 'sha256': sha256_file(target)}
+                        'pages': pages, 'sha256': sha256_file(target),
+                        'requested_start': str(part_start.date()),
+                        'requested_end': str(part_end.date())}
                     state['failed'].pop(key, None)
                 except Exception as exc:
                     state['failed'][key] = {'error': str(exc),

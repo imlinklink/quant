@@ -1,6 +1,6 @@
 import unittest
 
-from scripts.live_trading.setup_state_machine import build_setup_candidate, transition
+from scripts.live_trading.setup_state_machine import build_setup_candidate, setup_family, transition
 
 
 def snapshot(**overrides):
@@ -36,6 +36,11 @@ class SetupStateTests(unittest.TestCase):
     def test_quality_failure_returns_falling(self):
         s = snapshot(); s['quality'] = {'status': 'fail'}
         self.assertEqual(transition('CONFIRMED', s)[0], 'FALLING')
+
+    def test_daily_baseline_can_be_measured_before_weekly_gate(self):
+        s=snapshot();s['features']['weekly_gate']=False
+        self.assertIsNone(setup_family(s,'CONFIRMED'))
+        self.assertEqual(setup_family(s,'CONFIRMED',require_weekly_gate=False),'reversal_confirmed')
 
 
 if __name__ == '__main__':

@@ -108,29 +108,28 @@ def check_config(r: PreflightResult) -> dict:
 
 
 def check_dip_config(cfg: dict, r: PreflightResult):
-    """核对监控股票池与买入参数"""
+    """核对周线/日线买入股票池与参数；函数名保留兼容。"""
+    strategy = cfg.get('buy_strategy_v2', {}) or {}
     dip = cfg.get('dip_buy', {}) or {}
-    watch_list = dip.get('watch_list', []) or []
+    watch_list = strategy.get('watch_list') or dip.get('watch_list', []) or []
     if not watch_list:
-        r.warn('dip_buy.watch_list 为空：监控器启动后不会买入任何股票')
+        r.warn('buy_strategy_v2.watch_list 为空：收盘后不会扫描任何股票')
     else:
         bad = [c for c in watch_list if not str(c).upper().startswith(('US.', 'HK.', 'SH.', 'SZ.'))]
         if bad:
             r.warn(f'watch_list 存在非富途格式代码: {bad}')
-        r.info(f'监控股票池: {", ".join(str(c) for c in watch_list)}')
+        r.info(f'周线/日线扫描股票池: {", ".join(str(c) for c in watch_list)}')
 
     try:
-        threshold = float(dip.get('buy_threshold', dip.get('strong_buy_threshold', 8)))
-        if not (1 <= threshold <= 15):
-            r.warn(f'dip_buy.buy_threshold 超出常见范围(1-15): {threshold}')
-        pos_usd = float(dip.get('position_size_usd', 0))
-        if pos_usd <= 0:
-            r.fail('dip_buy.position_size_usd 必须 > 0')
-        max_pos = int(dip.get('max_positions', 3))
+        minimum = int(strategy.get('min_daily_bars', 250))
+        if minimum < 200:r.warn(f'buy_strategy_v2.min_daily_bars 过低: {minimum}')
+        max_pos = int(strategy.get('max_positions', 3))
         if max_pos < 1:
-            r.fail('dip_buy.max_positions 必须 ≥ 1')
+            r.fail('buy_strategy_v2.max_positions 必须 ≥ 1')
+        if strategy.get('intraday_timing', {}).get('enabled'):
+            r.fail('新买入主链禁止启用 intraday_timing')
     except (TypeError, ValueError) as e:
-        r.fail(f'dip_buy 参数非数值: {e}')
+        r.fail(f'buy_strategy_v2 参数非数值: {e}')
 
 
 def check_opend_tcp(r: PreflightResult) -> bool:

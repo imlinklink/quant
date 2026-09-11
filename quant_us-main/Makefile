@@ -29,6 +29,7 @@ help:
 	@echo "    make backtest-5min   快速回测 SNDK 5分钟线"
 	@echo "    make verify-intraday 日内K线分析校验（抄底逻辑）"
 	@echo "    make check           语法检查"
+	@echo "    make data-pipeline   下载并准备周线/日线研究数据"
 	@echo ""
 	@echo "  🚀 实盘"
 	@echo "    make web           启动Web服务（调参用）"
@@ -126,12 +127,12 @@ web: _check_python
 
 .PHONY: start
 start: _check_python
-	@echo "🚀 启动完整系统（Web + 抄底监控 + 止盈止损，模拟）..."
+	@echo "🚀 启动完整系统（Web + 周线/日线Setup + 止盈止损，模拟）..."
 	@$(PYTHON) run_all.py --dry-run
 
 .PHONY: start-real
 start-real: _check_python
-	@echo "🚀 启动完整系统（Web + 抄底监控 + 止盈止损，实盘）..."
+	@echo "🚀 启动完整系统（Web + 周线/日线Setup + 止盈止损，实盘）..."
 	@$(PYTHON) run_all.py --real
 
 .PHONY: stop
@@ -154,6 +155,20 @@ live-dry: start
 live-dry-old: _check_python
 	@echo "🚀 启动实盘管理器（dry-run）..."
 	@$(PYTHON) scripts/live_trading/run_manager.py --dry-run
+
+# ------------------------------------------------------------------
+# 周线/日线研究数据流水线
+# 用法: make data-pipeline MASTER=data/security_master.csv END=2026-09-10
+# ------------------------------------------------------------------
+.PHONY: data-pipeline
+data-pipeline: _check_python
+	@if [ "$(MASTER)" = "" ] || [ "$(END)" = "" ]; then echo "❌ 请指定 MASTER 和 END"; exit 1; fi
+	@$(PYTHON) scripts/data/run_daily_pipeline.py --master "$(MASTER)" \
+		--start "$(START)" --end "$(END)" --universe-start "$(UNIVERSE_START)" \
+		--universe-end "$(END)" $(if $(RUN_ID),--run-id "$(RUN_ID)",)
+
+START ?= 2015-01-01
+UNIVERSE_START ?= 2016-01-01
 
 # ------------------------------------------------------------------
 # 日内K线分析校验（抄底逻辑）

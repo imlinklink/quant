@@ -9,6 +9,7 @@ from scripts.data.build_daily_liquidity import build_liquidity
 from scripts.data.build_security_master import build_master
 from scripts.data.download_market_history import download, fetch_pages
 from scripts.data.normalize_market_history import normalize
+from scripts.data.run_daily_pipeline import run_pipeline
 from scripts.data.trading_calendar import sessions
 from scripts.data.validate_market_history import validate_daily
 
@@ -68,6 +69,29 @@ class MarketDataPipelineTests(unittest.TestCase):
                              'low':1,'close':1,'volume':100}])
         result=validate_daily(daily,master,cal)
         self.assertEqual(result.quality.iloc[0],'quality_fail')
+
+    def test_end_to_end_pipeline_reuses_local_daily_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);raw=root/'raw'/'day'/'year=2026';raw.mkdir(parents=True)
+            dates=pd.bdate_range('2026-01-02',periods=30)
+            for code in ('US.SPY','US.A'):
+                frame=pd.DataFrame({'code':code,'time_key':dates.astype(str),
+                    'open':10.,'high':11.,'low':9.,'close':10.,'volume':1_000_000.,
+                    'turnover':10_000_000.})
+                frame.to_csv(raw/f'{code.replace(".","_")}.csv.gz',index=False,compression='gzip')
+            master=root/'master.csv'
+            pd.DataFrame([
+                {'code':'US.SPY','listing_date':'1993-01-29','delisting_date':'','asset_type':'etf'},
+                {'code':'US.A','listing_date':'2000-01-01','delisting_date':'','asset_type':'stock'},
+            ]).to_csv(master,index=False)
+            result=run_pipeline(master_path=master,start=str(dates[0].date()),end=str(dates[-1].date()),
+                universe_start=str(dates[20].date()),universe_end=str(dates[-1].date()),
+                run_id='test',raw_root=root/'raw',runs_root=root/'runs',
+                checkpoint=root/'checkpoint.json',skip_download=True)
+            self.assertEqual(result['status'],'complete')
+            self.assertEqual(result['stages']['quality']['failed'],0)
+            self.assertTrue((root/'runs'/'test'/'universe.csv').exists())
+            self.assertTrue(result['files']['daily.csv.gz']['sha256'])
 
 
 if __name__=='__main__':unittest.main()

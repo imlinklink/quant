@@ -45,9 +45,10 @@ def transition(previous: str, snapshot: Dict[str, Any],
     return 'FALLING', ['INVALID_PREVIOUS_STATE']
 
 
-def setup_family(snapshot: Dict[str, Any], state: str) -> Optional[str]:
+def setup_family(snapshot: Dict[str, Any], state: str,
+                 require_weekly_gate: bool = True) -> Optional[str]:
     f, st = snapshot.get('features', {}), snapshot.get('structure', {})
-    if not f.get('weekly_gate', False):
+    if require_weekly_gate and not f.get('weekly_gate', False):
         return None
     trend_ok = (f.get('close', 0) > f.get('ma200', float('inf')) and
                 f.get('ma50_slope_20d', -1) > 0 and
@@ -65,10 +66,10 @@ def setup_family(snapshot: Dict[str, Any], state: str) -> Optional[str]:
 def build_setup_candidate(code: str, snapshot: Dict[str, Any], state: str,
                           selection_decision_id: str = '',
                           config: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
-    family = setup_family(snapshot, state)
+    cfg = config or {}
+    family = setup_family(snapshot, state, bool(cfg.get('require_weekly_gate', True)))
     if not family or snapshot.get('quality', {}).get('status') != 'pass':
         return None
-    cfg = config or {}
     f, st = snapshot['features'], snapshot['structure']
     trigger = st.get('reversal_level') or f['close']
     invalidation = st.get('swing_low')
