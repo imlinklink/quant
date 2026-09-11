@@ -146,7 +146,7 @@ def metrics(matrix, groups=GROUP_ORDER):
 
 
 def _increment_table(rows):
-    lines=['| Exit | 成本 | 交易 P→C | 期望% P | 期望% C | 增量% | 95% CI | 年份同向 | Holm p |',
+    lines=['| Exit | 成本 | 交易 父→子 | 期望% 父 | 期望% 子 | 增量% | 95% CI | 年份同向 | Holm p |',
            '|---|---|---:|---:|---:|---:|---|---:|---:|']
     if not rows:
         lines.append('| - | - | 0 | - | - | - | - | - | - |');return lines
