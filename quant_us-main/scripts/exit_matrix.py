@@ -40,22 +40,25 @@ def _prepare_bars(bars):
     return bars
 
 
-def simulate_daily(entry, bars, exit_id, cost_pct=.002):
-    entry_time = pd.Timestamp(entry['entry_time'])
-    entry_time = entry_time.tz_localize('UTC') if entry_time.tzinfo is None else entry_time.tz_convert('UTC')
-    d = _prepare_bars(bars)
-    d = d[d['date'] >= entry_time].head(40).reset_index(drop=True)
-    if d.empty:
-        return {'data_quality': 'missing_future_bars', 'exit_method': exit_id}
+def _entry_day(value):
+    """入场时刻所在的交易日（按 UTC 日历日；实盘中 09:30 ET 与日线 00:00 同日）。"""
+    ts = pd.Timestamp(value)
+    ts = ts.tz_localize('UTC') if ts.tzinfo is None else ts.tz_convert('UTC')
+    return ts.tz_localize(None).normalize()
+
+
+def _bar_days(dates):
+    """日线日期列统一为无时区的自然日，便于与入场交易日比较。"""
+    d = dates.dt.tz_localize(None) if dates.dt.tz is not None else dates
+    return d.dt.normalize()
+
+
+def _simulate_core(entry, exit_id, opens, highs, lows, closes, times, atrs, n):
+    """退出路径：与成本无关；先检查旧保护线，再更新当日保护线。"""
     ep = float(entry['entry_price']); raw_stop = entry.get('initial_stop')
     initial = float(raw_stop) if pd.notna(raw_stop) and float(raw_stop) > 0 else ep*.95
     stop = initial; high = ep; structure_stop = initial
     exit_px = exit_time = reason = None; mfe = 0.; mae = 0.
-    opens = d['open'].to_numpy(float); highs = d['high'].to_numpy(float)
-    lows = d['low'].to_numpy(float); closes = d['close'].to_numpy(float)
-    times = d['date'].to_numpy()
-    atrs = d['atr14'].to_numpy(float) if 'atr14' in d.columns else np.full(len(d), np.nan)
-    n = len(d)
     for i in range(n):
         bh = highs[i]; bl = lows[i]
         mfe = max(mfe, bh / ep - 1); mae = min(mae, bl / ep - 1)
@@ -83,26 +86,69 @@ def simulate_daily(entry, bars, exit_id, cost_pct=.002):
     gross = exit_px / ep - 1 if exit_px is not None else None
     return {'exit_method': exit_id, 'exit_time': exit_time, 'exit_price': exit_px,
             'exit_reason': reason, 'mfe_pct': mfe, 'mae_pct': mae,
-            'gross_pnl_pct': gross, 'cost_pct': cost_pct,
-            'net_pnl_pct': gross - cost_pct if gross is not None else None,
-            'net_pnl_usd': (gross-cost_pct)*float(entry.get('position_usd', 5000))
-            if gross is not None else None, 'data_quality': 'good'}
+            'gross_pnl_pct': gross, 'data_quality': 'good'}
+
+
+def _finalize(result, cost_pct, position_usd):
+    gross = result.get('gross_pnl_pct')
+    result['cost_pct'] = cost_pct
+    result['net_pnl_pct'] = gross - cost_pct if gross is not None else None
+    result['net_pnl_usd'] = (gross-cost_pct)*position_usd if gross is not None else None
+    return result
+
+
+def simulate_daily(entry, bars, exit_id, cost_pct=.002):
+    d = _prepare_bars(bars)
+    entry_day = _entry_day(entry['entry_time'])
+    d = d[_bar_days(d['date']) >= entry_day].head(40).reset_index(drop=True)
+    if d.empty:
+        return {'data_quality': 'missing_future_bars', 'exit_method': exit_id}
+    result = _simulate_core(
+        entry, exit_id,
+        d['open'].to_numpy(float), d['high'].to_numpy(float), d['low'].to_numpy(float),
+        d['close'].to_numpy(float),
+        _bar_days(d['date']).to_numpy(),
+        d['atr14'].to_numpy(float) if 'atr14' in d.columns else np.full(len(d), np.nan),
+        len(d))
+    return _finalize(result, cost_pct, float(entry.get('position_usd', 5000)))
+
+
+def _stock_arrays(g):
+    """按股票预计算 numpy 数组，避免内层循环重复解析时间与索引。"""
+    return {'open': g['open'].to_numpy(float), 'high': g['high'].to_numpy(float),
+            'low': g['low'].to_numpy(float), 'close': g['close'].to_numpy(float),
+            'atr14': g['atr14'].to_numpy(float) if 'atr14' in g.columns else np.full(len(g), np.nan),
+            'day': _bar_days(g['date']).astype('int64').to_numpy(),
+            'session': g['date'].to_numpy()}
 
 
 def run_exit_matrix(entries, daily_bars, costs=(.001,.002,.005,.01)):
     daily = daily_bars.copy(); daily['date'] = pd.to_datetime(daily['date'], utc=True)
     enriched = [add_atr(g).assign(stock=code) for code,g in daily.groupby('stock')]
     daily = pd.concat(enriched, ignore_index=True) if enriched else daily
-    empty=daily.iloc[0:0]
-    by_stock={code:g.reset_index(drop=True) for code,g in daily.groupby('stock')}
+    prep = {code: _stock_arrays(g.reset_index(drop=True)) for code, g in daily.groupby('stock')}
+    missing = {'data_quality': 'missing_future_bars'}
     rows=[]
     for _, entry in entries.iterrows():
-        db=by_stock.get(entry.stock,empty)
-        position_usd=float(entry.get('position_usd',5000))
-        base=entry.to_dict()
+        base=entry.to_dict(); position_usd=float(entry.get('position_usd',5000))
+        p=prep.get(entry.stock)
+        start=end=0
+        if p is not None:
+            # 含成交当日：从入场交易日开始的 40 个交易日。
+            start=int(np.searchsorted(p['day'], _entry_day(entry['entry_time']).value, side='left'))
+            end=min(start+40, len(p['day']))
+        if p is None or end-start <= 0:
+            for exit_id in EXIT_IDS:
+                for cost in costs:
+                    rows.append(dict(base, cost_scenario=cost, exit_method=exit_id, **missing))
+            continue
+        sl=slice(start,end)
+        opens=p['open'][sl]; highs=p['high'][sl]; lows=p['low'][sl]
+        closes=p['close'][sl]; atrs=p['atr14'][sl]; times=p['session'][sl]
+        n=end-start
         for exit_id in EXIT_IDS:
             # 退出路径与成本无关：只模拟一次，再按成本推导净收益。
-            result=simulate_daily(entry,db,exit_id,costs[0])
+            result=_simulate_core(entry, exit_id, opens, highs, lows, closes, times, atrs, n)
             gross=result.get('gross_pnl_pct')
             for cost in costs:
                 row=dict(base, cost_scenario=cost, **result)
@@ -118,23 +164,29 @@ def apply_matrix_portfolio(matrix: pd.DataFrame, max_positions: int = 3) -> pd.D
     if matrix.empty: return matrix
     out=[]
     for _, group in matrix.groupby(['experiment','exit_method','cost_scenario'], dropna=False):
-        g=group.copy();g['_entry']=pd.to_datetime(g['entry_time'],utc=True)
+        g=group.copy()
+        if 'portfolio_rank' not in g: g['portfolio_rank']=999999
+        g['_entry']=pd.to_datetime(g['entry_time'],utc=True)
         g['_exit']=pd.to_datetime(g['exit_time'],utc=True,errors='coerce')
-        if 'portfolio_rank' not in g:g['portfolio_rank']=999999
-        g=g.sort_values(['_entry','portfolio_rank','stock','setup_id'])
+        g=g.sort_values(['_entry','portfolio_rank','stock','setup_id']).reset_index(drop=True)
+        entry_ns=g['_entry'].astype('int64').to_numpy()
+        exit_ns=g['_exit'].astype('int64').to_numpy()  # NaT -> INT64_MIN，永不大于入场时刻
+        quality=g['data_quality'].to_numpy() if 'data_quality' in g else np.array(['']*len(g),dtype=object)
+        accepted=np.zeros(len(g),dtype=bool)
+        reason=np.empty(len(g),dtype=object); reason[:]=''
         active=[]
-        for idx,row in g.iterrows():
-            active=[end for end in active if pd.notna(end) and end>row['_entry']]
-            item=row.drop(labels=['_entry','_exit']).to_dict()
-            if row['data_quality']!='good':
-                item['portfolio_accepted']=False;item['portfolio_reject_reason']='DATA_QUALITY'
+        for i in range(len(g)):
+            now=entry_ns[i]
+            active=[end for end in active if end>now]
+            if quality[i]!='good':
+                reason[i]='DATA_QUALITY'
             elif len(active)>=max_positions:
-                item['portfolio_accepted']=False;item['portfolio_reject_reason']='MAX_POSITIONS'
+                reason[i]='MAX_POSITIONS'
             else:
-                item['portfolio_accepted']=True;item['portfolio_reject_reason']=''
-                active.append(row['_exit'])
-            out.append(item)
-    return pd.DataFrame(out)
+                accepted[i]=True; active.append(exit_ns[i])
+        g['portfolio_accepted']=accepted; g['portfolio_reject_reason']=reason
+        out.append(g.drop(columns=['_entry','_exit']))
+    return pd.concat(out, ignore_index=True)
 
 
 def main():
