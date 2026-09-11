@@ -22,47 +22,64 @@ def add_atr(frame, period=14):
     return d
 
 
-def _fill_at_stop(bar, stop):
-    if float(bar['open']) <= stop: return float(bar['open']), 'GAP_STOP'
-    if float(bar['low']) <= stop: return float(stop), 'STOP'
+def _fill_at_stop(open_px, low_px, stop):
+    if open_px <= stop: return open_px, 'GAP_STOP'
+    if low_px <= stop: return stop, 'STOP'
     return None, None
+
+
+def _prepare_bars(bars):
+    """把 date 规整为 UTC datetime64；已规整则原样返回，避免内层重复解析。"""
+    dates = bars['date']
+    if not pd.api.types.is_datetime64_any_dtype(dates):
+        return bars.assign(date=pd.to_datetime(dates, utc=True))
+    if dates.dt.tz is None:
+        return bars.assign(date=dates.dt.tz_localize('UTC'))
+    if str(dates.dt.tz) != 'UTC':
+        return bars.assign(date=dates.dt.tz_convert('UTC'))
+    return bars
 
 
 def simulate_daily(entry, bars, exit_id, cost_pct=.002):
     entry_time = pd.Timestamp(entry['entry_time'])
     entry_time = entry_time.tz_localize('UTC') if entry_time.tzinfo is None else entry_time.tz_convert('UTC')
-    d = bars[pd.to_datetime(bars['date'], utc=True) >= entry_time].copy()
-    d = d.head(40).reset_index(drop=True)
+    d = _prepare_bars(bars)
+    d = d[d['date'] >= entry_time].head(40).reset_index(drop=True)
     if d.empty:
         return {'data_quality': 'missing_future_bars', 'exit_method': exit_id}
     ep = float(entry['entry_price']); raw_stop = entry.get('initial_stop')
     initial = float(raw_stop) if pd.notna(raw_stop) and float(raw_stop) > 0 else ep*.95
     stop = initial; high = ep; structure_stop = initial
     exit_px = exit_time = reason = None; mfe = 0.; mae = 0.
-    for i, bar in d.iterrows():
-        mfe = max(mfe, float(bar['high']) / ep - 1); mae = min(mae, float(bar['low']) / ep - 1)
+    opens = d['open'].to_numpy(float); highs = d['high'].to_numpy(float)
+    lows = d['low'].to_numpy(float); closes = d['close'].to_numpy(float)
+    times = d['date'].to_numpy()
+    atrs = d['atr14'].to_numpy(float) if 'atr14' in d.columns else np.full(len(d), np.nan)
+    n = len(d)
+    for i in range(n):
+        bh = highs[i]; bl = lows[i]
+        mfe = max(mfe, bh / ep - 1); mae = min(mae, bl / ep - 1)
         if exit_id not in FIXED_HOLDS:
-            exit_px, reason = _fill_at_stop(bar, stop)
-            if exit_px is not None: exit_time = bar['date']; break
+            exit_px, reason = _fill_at_stop(opens[i], bl, stop)
+            if exit_px is not None: exit_time = times[i]; break
         if exit_id in FIXED_HOLDS and i + 1 >= FIXED_HOLDS[exit_id]:
-            exit_px, exit_time, reason = float(bar['close']), bar['date'], 'TIME_EXIT'; break
+            exit_px, exit_time, reason = closes[i], times[i], 'TIME_EXIT'; break
         if exit_id == 'E5' and i + 1 >= 20:
-            exit_px, exit_time, reason = float(bar['close']), bar['date'], 'TIME_EXIT'; break
+            exit_px, exit_time, reason = closes[i], times[i], 'TIME_EXIT'; break
         # 今日完成后才更新，下一交易日生效。
-        high = max(high, float(bar['high']))
-        atr = float(bar.get('atr14', np.nan))
+        if bh > high: high = bh
+        atr = atrs[i]
         if exit_id in ATR_MULTS and np.isfinite(atr):
             stop = max(stop, high - ATR_MULTS[exit_id] * atr)
         if exit_id in ('E10', 'E11') and i >= 4:
             pivot_i = i - 2
-            lows = d['low']
-            if (float(lows.iloc[pivot_i]) < float(lows.iloc[pivot_i-2:pivot_i].min()) and
-                    float(lows.iloc[pivot_i]) < float(lows.iloc[pivot_i+1:pivot_i+3].min())):
-                structure_stop = max(structure_stop, float(lows.iloc[pivot_i]))
+            if (lows[pivot_i] < lows[pivot_i-2:pivot_i].min() and
+                    lows[pivot_i] < lows[pivot_i+1:pivot_i+3].min()):
+                structure_stop = max(structure_stop, lows[pivot_i])
             stop = structure_stop
             if exit_id == 'E11' and np.isfinite(atr): stop = max(stop, high - 2 * atr)
-        if i == len(d)-1:
-            exit_px, exit_time, reason = float(bar['close']), bar['date'], 'DATA_END'
+        if i == n - 1:
+            exit_px, exit_time, reason = closes[i], times[i], 'DATA_END'
     gross = exit_px / ep - 1 if exit_px is not None else None
     return {'exit_method': exit_id, 'exit_time': exit_time, 'exit_price': exit_px,
             'exit_reason': reason, 'mfe_pct': mfe, 'mae_pct': mae,
@@ -76,13 +93,23 @@ def run_exit_matrix(entries, daily_bars, costs=(.001,.002,.005,.01)):
     daily = daily_bars.copy(); daily['date'] = pd.to_datetime(daily['date'], utc=True)
     enriched = [add_atr(g).assign(stock=code) for code,g in daily.groupby('stock')]
     daily = pd.concat(enriched, ignore_index=True) if enriched else daily
+    empty=daily.iloc[0:0]
+    by_stock={code:g.reset_index(drop=True) for code,g in daily.groupby('stock')}
     rows=[]
     for _, entry in entries.iterrows():
-        db=daily[daily.stock==entry.stock]
-        for cost in costs:
-            for exit_id in EXIT_IDS:
-                result=simulate_daily(entry,db,exit_id,cost)
-                rows.append(dict(entry.to_dict(), cost_scenario=cost, **result))
+        db=by_stock.get(entry.stock,empty)
+        position_usd=float(entry.get('position_usd',5000))
+        base=entry.to_dict()
+        for exit_id in EXIT_IDS:
+            # 退出路径与成本无关：只模拟一次，再按成本推导净收益。
+            result=simulate_daily(entry,db,exit_id,costs[0])
+            gross=result.get('gross_pnl_pct')
+            for cost in costs:
+                row=dict(base, cost_scenario=cost, **result)
+                row['cost_pct']=cost
+                row['net_pnl_pct']=gross-cost if gross is not None else None
+                row['net_pnl_usd']=(gross-cost)*position_usd if gross is not None else None
+                rows.append(row)
     return apply_matrix_portfolio(pd.DataFrame(rows))
 
 
