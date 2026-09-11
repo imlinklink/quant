@@ -53,6 +53,12 @@ def _bar_days(dates):
     return d.dt.normalize()
 
 
+def _session_open_times(dates):
+    """把日线交易日映射为该日 09:30 ET 的 UTC 时刻，与入场时刻口径一致。"""
+    et = _bar_days(dates).dt.tz_localize('America/New_York') + pd.Timedelta(hours=9, minutes=30)
+    return et.dt.tz_convert('UTC').to_numpy()
+
+
 def _simulate_core(entry, exit_id, opens, highs, lows, closes, times, atrs, n):
     """退出路径：与成本无关；先检查旧保护线，再更新当日保护线。"""
     ep = float(entry['entry_price']); raw_stop = entry.get('initial_stop')
@@ -107,7 +113,7 @@ def simulate_daily(entry, bars, exit_id, cost_pct=.002):
         entry, exit_id,
         d['open'].to_numpy(float), d['high'].to_numpy(float), d['low'].to_numpy(float),
         d['close'].to_numpy(float),
-        _bar_days(d['date']).to_numpy(),
+        _session_open_times(d['date']),
         d['atr14'].to_numpy(float) if 'atr14' in d.columns else np.full(len(d), np.nan),
         len(d))
     return _finalize(result, cost_pct, float(entry.get('position_usd', 5000)))
@@ -119,7 +125,7 @@ def _stock_arrays(g):
             'low': g['low'].to_numpy(float), 'close': g['close'].to_numpy(float),
             'atr14': g['atr14'].to_numpy(float) if 'atr14' in g.columns else np.full(len(g), np.nan),
             'day': _bar_days(g['date']).astype('int64').to_numpy(),
-            'session': g['date'].to_numpy()}
+            'times': _session_open_times(g['date'])}
 
 
 def run_exit_matrix(entries, daily_bars, costs=(.001,.002,.005,.01)):
@@ -144,7 +150,7 @@ def run_exit_matrix(entries, daily_bars, costs=(.001,.002,.005,.01)):
             continue
         sl=slice(start,end)
         opens=p['open'][sl]; highs=p['high'][sl]; lows=p['low'][sl]
-        closes=p['close'][sl]; atrs=p['atr14'][sl]; times=p['session'][sl]
+        closes=p['close'][sl]; atrs=p['atr14'][sl]; times=p['times'][sl]
         n=end-start
         for exit_id in EXIT_IDS:
             # 退出路径与成本无关：只模拟一次，再按成本推导净收益。
