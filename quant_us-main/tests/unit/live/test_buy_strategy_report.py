@@ -51,4 +51,31 @@ class BuyStrategyReportTests(unittest.TestCase):
         self.assertEqual(len(EXIT_IDS)*len(COSTS)*3,132)
 
 
+    def test_asset_type_slices_and_concentration(self):
+        rows=[]
+        for i in range(4):
+            for exp,pnl in [('A',.0),('B',.01),('C',.02)]:
+                rows.append({'experiment':exp,'setup_id':f's{i}','stock':f'US.{i}',
+                  'strategy':'reversal_confirmed','entry_time':f'2026-01-0{i+1}T14:30:00Z',
+                  'exit_method':'E7','cost_scenario':.002,'net_pnl_pct':pnl,
+                  'net_pnl_usd':pnl*5000,'mfe_pct':.03,'mae_pct':-.01,
+                  'portfolio_accepted':True,'data_quality':'good'})
+        matrix=pd.DataFrame(rows)
+        at={f'US.{i}':('leveraged_etf' if i%2==0 else 'stock') for i in range(4)}
+        out=metrics(matrix,groups=('A','B','C'),asset_types=at)
+        self.assertEqual({s['asset_type'] for s in out['asset_slices']},{'stock','leveraged_etf'})
+        for s in out['asset_slices']:
+            self.assertEqual(s['cells'],s['positive'])   # 各组同向为正
+        text=render_report(out,'BUY-WD-ABC-EXP-001',('A','B','C'))
+        self.assertIn('## 资产类型切片（增量方向）',text)
+        self.assertIn('top2股占比',text)
+        empty=metrics(matrix,groups=('A','B','C'))
+        self.assertEqual(empty['asset_slices'],[])
+        self.assertIn('未提供证券主数据',render_report(empty,'X',('A','B','C')))
+        at2=dict(at);at2['US.ZZZ']='etf'   # 该资产类型无可交易样本
+        out2=metrics(matrix,groups=('A','B','C'),asset_types=at2)
+        self.assertIn('etf',out2['asset_types_missing'])
+        self.assertIn('未产生可交易样本的资产类型',render_report(out2,'X',('A','B','C')))
+
+
 if __name__=='__main__':unittest.main()

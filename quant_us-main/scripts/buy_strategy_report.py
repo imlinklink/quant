@@ -110,7 +110,38 @@ def increment_rows(frame, child, parent, iterations=2000, seed=20260910):
     return rows
 
 
-def metrics(matrix, groups=GROUP_ORDER):
+def load_asset_types(path):
+    """读取 `code,asset_type` 映射（供资产类型切片）。缺失则返回 None。"""
+    if not path or not Path(path).is_file(): return None
+    d=pd.read_csv(path)
+    if not {'code','asset_type'}.issubset(d.columns): return None
+    return dict(zip(d['code'].astype(str),d['asset_type'].astype(str)))
+
+
+def asset_slices(accepted, groups, asset_types):
+    """按资产类型分别计算相邻组增量，判断方向是否只在某一类资产成立。"""
+    if not asset_types: return []
+    d=accepted.copy(); d['asset_type']=d['stock'].map(asset_types)
+    out=[]
+    for at,sub in d.groupby('asset_type'):
+        stocks=int(sub['stock'].nunique())
+        for parent,child in zip(groups,groups[1:]):
+            rows=increment_rows(sub,child,parent)
+            valid=[r for r in rows if r.get('mean_diff') is not None]
+            if not valid:
+                out.append({'asset_type':at,'parent':parent,'child':child,'stocks':stocks,
+                            'cells':len(rows),'positive':0,'median_diff':None,'mean_diff':None,
+                            'years_positive_median':None}); continue
+            diffs=[r['mean_diff'] for r in valid]
+            yf=[r['years_positive']/r['years_total'] for r in valid if r['years_total']]
+            out.append({'asset_type':at,'parent':parent,'child':child,'stocks':stocks,
+                        'cells':len(valid),'positive':int(sum(1 for x in diffs if x>0)),
+                        'median_diff':float(np.median(diffs)),'mean_diff':float(np.mean(diffs)),
+                        'years_positive_median':float(np.median(yf)) if yf else None})
+    return out
+
+
+def metrics(matrix, groups=GROUP_ORDER, asset_types=None):
     groups=tuple(groups)
     d=add_independence_group(matrix)
     accepted=d[(d['portfolio_accepted'].astype(bool))&(d['data_quality']=='good')].copy()
@@ -139,10 +170,19 @@ def metrics(matrix, groups=GROUP_ORDER):
         increments.append({'parent':parent,'child':child,
                            'rows':increment_rows(accepted,child,parent)})
     d_minus_c=next((i['rows'] for i in increments if i['child']=='D'),[])
+    slices=asset_slices(accepted,groups,asset_types)
     return {'groups':rows,'yearly':yearly,'d_minus_c':d_minus_c,'increments':increments,
+            'asset_slices':slices,
+            'asset_type_universe':sorted(set(asset_types.values())) if asset_types else [],
+            'asset_types_missing':sorted(set(asset_types.values())-{s['asset_type'] for s in slices}) if asset_types else [],
+            'has_asset_types':bool(asset_types),
             'selected_groups':list(groups),
             'llm_increment':llm_increment_status(groups,d_minus_c),
             'rejected':int((~d['portfolio_accepted'].astype(bool)).sum())}
+
+
+def _pct(value, digits=1):
+    return '-' if value is None else f"{value:.{digits}%}"
 
 
 def _increment_table(rows):
@@ -168,13 +208,13 @@ def render_report(result, experiment_id, groups=None):
     lines=[f'# 买入策略验证报告：{experiment_id}','',
            '> 本报告由冻结逐笔数据生成；参数与验收标准见 manifest 和实验设计。','',
            f'## {label} × Exit 核心结果','',
-           '| 组 | Exit | 成本 | 交易 | 独立组 | 期望$ | 总收益$ | 胜率 | MAE | 最大回撤$ |',
-           '|---|---|---:|---:|---:|---:|---:|---:|---:|---:|']
+           '| 组 | Exit | 成本 | 交易 | 独立组 | 期望$ | 总收益$ | 胜率 | MAE | 最大回撤$ | top2股占比 | top3笔占比 |',
+           '|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|']
     for r in result['groups']:
         lines.append(f"| {r['experiment']} | {r['exit_method']} | {r['cost_scenario']:.2%} | "
           f"{r['trades']} | {r['independence_groups']} | {r['expectancy_usd']:.2f} | "
           f"{r['total_net_usd']:.2f} | {r['win_rate']:.1%} | {r['mean_mae_pct']:.2%} | "
-          f"{r['max_drawdown_usd']:.2f} |")
+          f"{r['max_drawdown_usd']:.2f} | {_pct(r['top2_stock_share'])} | {_pct(r['top3_trade_share'])} |")
     # 相邻组增量（D−C 单独在 LLM 段落呈现）。
     for inc in result.get('increments',[]):
         if inc['child']=='D': continue
@@ -191,6 +231,20 @@ def render_report(result, experiment_id, groups=None):
                   f"reason = {reason}",
                   '',
                   '> 本实验不含 D 组，无法回答“大模型是否创造选股增益”。']
+    lines += ['', '## 资产类型切片（增量方向）', '']
+    if not result.get('asset_slices'):
+        lines += ['> 未提供证券主数据（security_master.csv），跳过资产类型切片。','']
+    else:
+        lines += ['| 资产 | 增量 | 标的数 | 单元 | 为正 | 增量中位 | 增量均值 | 年份同向中位 |',
+                  '|---|---|---:|---:|---:|---:|---:|---:|']
+        for s in result['asset_slices']:
+            lines.append(f"| {s['asset_type']} | {s['child']}−{s['parent']} | {s['stocks']} | "
+                         f"{s['cells']} | {s['positive']} | {_pct(s['median_diff'],2)} | "
+                         f"{_pct(s['mean_diff'],2)} | {_pct(s['years_positive_median'])} |")
+        missing=result.get('asset_types_missing') or []
+        if missing:
+            lines += ['', f"> 未产生可交易样本的资产类型：{', '.join(missing)}（其方向无法评估）。"]
+        lines += ['', '> 增量方向可能按资产类型相反（如普通股与杠杆 ETF），必须分层判读，不能只看总体。']
     lines += ['', '## 组合拒绝', '', f"- 被数据质量或最多三仓拒绝的矩阵行：{result['rejected']}", '',
               '## 最好与最差年份', '', '| 组 | Exit | 成本 | 最好年份/期望 | 最差年份/期望 |',
               '|---|---|---:|---|---|']
@@ -220,6 +274,8 @@ def main():
     p.add_argument('--output-dir',required=True)
     p.add_argument('--groups',default='ABCD',
                    help='实验分组，A/B/C/D 的有序子集，默认 ABCD（例如 ABC）')
+    p.add_argument('--security-master',
+                   help='可选：含 code,asset_type 的证券主数据，用于资产类型切片；缺省时从 manifest data_files 自动查找 security_master.csv')
     args=p.parse_args()
     try:
         groups=parse_groups(args.groups)
@@ -234,7 +290,13 @@ def main():
     expected={(g,x,c) for g in groups for x in EXIT_IDS for c in COSTS}
     actual=set(zip(matrix.experiment,matrix.exit_method,matrix.cost_scenario.astype(float)))
     if expected-actual:raise SystemExit(f'矩阵不完整，缺少 {len(expected-actual)} 个单元')
-    result=metrics(matrix,groups);out=Path(args.output_dir)
+    master=args.security_master
+    if not master:
+        for rec in manifest.get('data_files') or []:
+            pth=rec.get('path','')
+            if Path(pth).name=='security_master.csv' and Path(pth).is_file(): master=pth;break
+    asset_types=load_asset_types(master)
+    result=metrics(matrix,groups,asset_types=asset_types);out=Path(args.output_dir)
     write_new(out/'metrics.json',json.dumps(result,ensure_ascii=False,indent=2)+'\n')
     write_new(out/'report.md',render_report(result,manifest['experiment_id'],groups))
     print(out/'report.md');return 0
