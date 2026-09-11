@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+ROOT=Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path: sys.path.insert(0,str(ROOT))
 
 EXIT_IDS = tuple(f'E{i}' for i in range(1, 12))
 FIXED_HOLDS = {'E1': 5, 'E2': 10, 'E3': 20, 'E4': 40}

@@ -5,7 +5,7 @@ from scripts.buy_strategy_report import (COSTS, EXIT_IDS, holm_adjust, metrics,
 
 
 class BuyStrategyReportTests(unittest.TestCase):
-    def test_paired_d_minus_c_and_holm(self):
+    def test_increment_is_aggregate_and_holm(self):
         rows=[]
         for i in range(4):
             for exp,pnl in [('C',.01),('D',.02)]:
@@ -15,8 +15,14 @@ class BuyStrategyReportTests(unittest.TestCase):
                   'net_pnl_usd':pnl*5000,'mfe_pct':.03,'mae_pct':-.01,
                   'portfolio_accepted':True,'data_quality':'good'})
         out=metrics(pd.DataFrame(rows))
-        self.assertEqual(out['d_minus_c'][0]['pairs'],4)
-        self.assertAlmostEqual(out['d_minus_c'][0]['mean_diff'],.01)
+        row=out['d_minus_c'][0]
+        self.assertEqual(row['parent_trades'],4)
+        self.assertEqual(row['child_trades'],4)
+        self.assertAlmostEqual(row['parent_mean'],.01)
+        self.assertAlmostEqual(row['child_mean'],.02)
+        self.assertAlmostEqual(row['mean_diff'],.01)
+        self.assertEqual(row['years_total'],1)
+        self.assertEqual(row['years_positive'],1)
         adjusted=holm_adjust([.04,.01,.03]);self.assertTrue(all(0<=x<=1 for x in adjusted))
 
     def test_abc_groups_mark_llm_inconclusive_no_empty_table(self):

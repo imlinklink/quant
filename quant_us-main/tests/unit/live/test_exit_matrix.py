@@ -1,7 +1,8 @@
 import unittest
 import numpy as np
 import pandas as pd
-from scripts.exit_matrix import EXIT_IDS,run_exit_matrix,simulate_daily
+from scripts.exit_matrix import (EXIT_IDS,apply_matrix_portfolio,run_exit_matrix,
+                                 simulate_daily)
 
 
 def daily():
@@ -49,6 +50,48 @@ class ExitMatrixTests(unittest.TestCase):
         self.assertEqual(r['exit_reason'],'GAP_STOP')
         self.assertEqual(r['exit_price'],90.)
         self.assertEqual(pd.Timestamp(r['exit_time']).date(),pd.Timestamp('2026-01-05').date())
+
+
+    def test_intraday_stop_fills_at_stop_line(self):
+        dates=pd.bdate_range('2026-01-05',periods=2,tz='UTC')
+        b=pd.DataFrame({'stock':'US.X','date':dates,'open':[100.,100.],'high':[101.,101.],
+                        'low':[99.,98.],'close':[100.,100.],'volume':1000})
+        row={'entry_time':'2026-01-05T14:30:00Z','entry_price':100,'initial_stop':99.5}
+        r=simulate_daily(row,b,'E5')
+        self.assertEqual(r['exit_reason'],'STOP')
+        self.assertEqual(r['exit_price'],99.5)
+        self.assertEqual(pd.Timestamp(r['exit_time']).date(),pd.Timestamp('2026-01-05').date())
+
+    def test_protection_line_effective_next_day(self):
+        # 成交日大幅冲高把吊灯保护线推到 198，但只能在下一交易日生效。
+        dates=pd.bdate_range('2026-01-05',periods=3,tz='UTC')
+        b=pd.DataFrame({'stock':'US.X','date':dates,'open':[100.,150.,150.],
+                        'high':[200.,151.,151.],'low':[100.,150.,150.],
+                        'close':[150.,150.,150.],'volume':1000,'atr14':[1.,1.,1.]})
+        row={'entry_time':'2026-01-05T14:30:00Z','entry_price':100,'initial_stop':90}
+        r=simulate_daily(row,b,'E7')
+        self.assertEqual(r['exit_reason'],'GAP_STOP')   # 若当日生效会变成 STOP@198
+        self.assertEqual(r['exit_price'],150.)
+        self.assertEqual(pd.Timestamp(r['exit_time']).date(),pd.Timestamp('2026-01-06').date())
+
+    def test_data_end_marked_when_fewer_than_40_bars(self):
+        dates=pd.bdate_range('2026-01-05',periods=3,tz='UTC')
+        b=pd.DataFrame({'stock':'US.X','date':dates,'open':100.,'high':101.,'low':99.,
+                        'close':100.,'volume':1000})
+        row={'entry_time':'2026-01-05T14:30:00Z','entry_price':100,'initial_stop':1.}
+        r=simulate_daily(row,b,'E4')     # 固定持有 40 日，数据不足
+        self.assertEqual(r['exit_reason'],'DATA_END')
+        self.assertEqual(pd.Timestamp(r['exit_time']).date(),pd.Timestamp('2026-01-07').date())
+
+    def test_three_position_limit_is_per_cell(self):
+        def row(exp,sid,rank):
+            return {'experiment':exp,'exit_method':'E1','cost_scenario':.002,'setup_id':sid,
+                    'stock':'US.'+sid,'entry_time':'2026-01-05T14:30:00Z',
+                    'exit_time':'2026-02-05T14:30:00Z','data_quality':'good','portfolio_rank':rank}
+        rows=[row('A',f's{i}',i) for i in range(5)]+[row('B','x0',0)]
+        out=apply_matrix_portfolio(pd.DataFrame(rows))
+        self.assertEqual(int(out[out.experiment=='A'].portfolio_accepted.sum()),3)
+        self.assertEqual(int(out[out.experiment=='B'].portfolio_accepted.sum()),1)
 
 
 if __name__=='__main__':unittest.main()

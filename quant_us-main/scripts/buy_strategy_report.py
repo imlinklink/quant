@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
-"""固定格式实验报告：分组统计、group bootstrap、配对 D-C、Holm 校正。"""
+"""固定格式实验报告：分组统计、group bootstrap、聚合增量、Holm 校正。"""
 from __future__ import annotations
 
 import argparse
 import json
 import math
+import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+ROOT=Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path: sys.path.insert(0,str(ROOT))
 
 from scripts.experiment_manifest import (GROUP_ORDER, LLM_UNAVAILABLE_REASON,
                                          check_groups_consistent, parse_groups)
@@ -19,12 +23,12 @@ COSTS = (.001, .002, .005, .01)
 LLM_INCREMENT_INCONCLUSIVE_REASON = 'HISTORICAL_LLM_LABELS_UNAVAILABLE'
 
 
-def llm_increment_status(groups, d_minus_c):
-    """只有 C、D 都在且存在配对样本时才评估 LLM 增量，否则标记不可判定。"""
+def llm_increment_status(groups, d_rows):
+    """只有 C、D 都在且存在可比样本时才评估 LLM 增量，否则标记不可判定。"""
     if 'D' not in tuple(groups):
         return {'status': 'inconclusive', 'reason': LLM_INCREMENT_INCONCLUSIVE_REASON}
-    if not d_minus_c:
-        return {'status': 'inconclusive', 'reason': 'NO_PAIRED_D_C_SAMPLES'}
+    if not d_rows:
+        return {'status': 'inconclusive', 'reason': 'NO_D_C_SAMPLES'}
     return {'status': 'evaluated', 'reason': ''}
 
 
@@ -46,10 +50,12 @@ def group_bootstrap_ci(frame, value='net_pnl_pct', iterations=2000, seed=2026091
             'high':float(np.quantile(samples,.975)),'groups':len(values)}
 
 
-def _normal_p(diff):
-    if len(diff)<2:return 1.0
-    if float(diff.std(ddof=1))==0:return 0.0 if float(diff.mean())!=0 else 1.0
-    z=abs(float(diff.mean())/(float(diff.std(ddof=1))/math.sqrt(len(diff))))
+def _two_sample_p(a, b):
+    """以独立组均值为单位的双样本正态近似 p 值。"""
+    if len(a) < 2 or len(b) < 2: return 1.0
+    se = math.sqrt(a.var(ddof=1)/len(a) + b.var(ddof=1)/len(b))
+    if se == 0: return 0.0 if (float(b.mean())-float(a.mean())) != 0 else 1.0
+    z = abs(float(b.mean())-float(a.mean()))/se
     return math.erfc(z/math.sqrt(2))
 
 
@@ -61,30 +67,47 @@ def holm_adjust(pvalues):
     return out
 
 
-def paired_increment(frame, child, parent):
-    """在相同 setup/exit/成本上配对计算 child 相对 parent 的净收益增量。"""
-    key=['setup_id','exit_method','cost_scenario']
+def _arm_group_means(frame, experiment, value='net_pnl_pct'):
+    g=frame[frame.experiment==experiment].groupby('independence_group')[value].mean().dropna()
+    return g.to_numpy(float)
+
+
+def increment_rows(frame, child, parent, iterations=2000, seed=20260910):
+    """child 相对 parent 的**聚合期望增量**（独立组 bootstrap）+ 年份同方向计数。
+
+    分组是嵌套的（child ⊆ parent），同一 setup 在两组结果相同，因此“同 setup 配对”
+    的差值恒为 0、无法回答增量问题。这里改为比较两组各自的聚合期望。
+    """
     sub=frame[frame.experiment.isin([parent,child])]
-    p=sub.pivot_table(index=key,columns='experiment',values='net_pnl_pct',aggfunc='first')
-    if child not in p.columns or parent not in p.columns:
-        return []
-    p=p[[parent,child]].dropna()
+    if sub.empty: return []
+    sub=sub.assign(_year=pd.to_datetime(sub['entry_time'],utc=True).dt.year)
     rows=[]
-    for (exit_id,cost),g in p.reset_index().groupby(['exit_method','cost_scenario']):
-        diff=g[child]-g[parent];rng=np.random.default_rng(20260910)
-        boot=(rng.choice(diff.to_numpy(float),(2000,len(diff)),replace=True).mean(axis=1)
-              if len(diff) else np.array([np.nan]))
+    for (exit_id,cost),g in sub.groupby(['exit_method','cost_scenario']):
+        p=_arm_group_means(g,parent); c=_arm_group_means(g,child)
+        parent_trades=int((g.experiment==parent).sum()); child_trades=int((g.experiment==child).sum())
+        if len(p)==0 or len(c)==0:
+            rows.append({'exit_method':exit_id,'cost_scenario':float(cost),
+                'parent_trades':parent_trades,'child_trades':child_trades,
+                'parent_mean':None,'child_mean':None,'mean_diff':None,
+                'ci_low':None,'ci_high':None,'years_positive':0,'years_total':0,'p_value':1.0})
+            continue
+        rng=np.random.default_rng(seed)
+        cs=rng.choice(c,(iterations,len(c)),replace=True).mean(axis=1)
+        ps=rng.choice(p,(iterations,len(p)),replace=True).mean(axis=1)
+        diffs=cs-ps
+        ytot=ypos=0
+        for _,gy in g.groupby('_year'):
+            pm=gy.loc[gy.experiment==parent,'net_pnl_pct'].mean();cm=gy.loc[gy.experiment==child,'net_pnl_pct'].mean()
+            if pd.notna(pm) and pd.notna(cm): ytot+=1; ypos+=int(cm>pm)
         rows.append({'exit_method':exit_id,'cost_scenario':float(cost),
-            'pairs':len(diff),'mean_diff':float(diff.mean()),
-            'ci_low':float(np.nanquantile(boot,.025)),'ci_high':float(np.nanquantile(boot,.975)),
-            'p_value':_normal_p(diff)})
+            'parent_trades':parent_trades,'child_trades':child_trades,
+            'parent_mean':float(p.mean()),'child_mean':float(c.mean()),
+            'mean_diff':float(c.mean()-p.mean()),
+            'ci_low':float(np.quantile(diffs,.025)),'ci_high':float(np.quantile(diffs,.975)),
+            'years_positive':ypos,'years_total':ytot,'p_value':_two_sample_p(p,c)})
     adjusted=holm_adjust([r['p_value'] for r in rows]) if rows else []
     for r,a in zip(rows,adjusted):r['holm_p_value']=a
     return rows
-
-
-def paired_d_minus_c(frame):
-    return paired_increment(frame,'D','C')
 
 
 def metrics(matrix, groups=GROUP_ORDER):
@@ -114,12 +137,29 @@ def metrics(matrix, groups=GROUP_ORDER):
     increments=[]
     for parent,child in zip(groups,groups[1:]):
         increments.append({'parent':parent,'child':child,
-                           'rows':paired_increment(accepted,child,parent)})
+                           'rows':increment_rows(accepted,child,parent)})
     d_minus_c=next((i['rows'] for i in increments if i['child']=='D'),[])
     return {'groups':rows,'yearly':yearly,'d_minus_c':d_minus_c,'increments':increments,
             'selected_groups':list(groups),
             'llm_increment':llm_increment_status(groups,d_minus_c),
             'rejected':int((~d['portfolio_accepted'].astype(bool)).sum())}
+
+
+def _increment_table(rows):
+    lines=['| Exit | 成本 | 交易 P→C | 期望% P | 期望% C | 增量% | 95% CI | 年份同向 | Holm p |',
+           '|---|---|---:|---:|---:|---:|---|---:|---:|']
+    if not rows:
+        lines.append('| - | - | 0 | - | - | - | - | - | - |');return lines
+    for r in rows:
+        if r.get('mean_diff') is None:
+            lines.append(f"| {r['exit_method']} | {r['cost_scenario']:.2%} | "
+                         f"{r['parent_trades']}→{r['child_trades']} | - | - | - | - | - | - |")
+            continue
+        lines.append(f"| {r['exit_method']} | {r['cost_scenario']:.2%} | "
+                     f"{r['parent_trades']}→{r['child_trades']} | {r['parent_mean']:.4%} | {r['child_mean']:.4%} | "
+                     f"{r['mean_diff']:.4%} | [{r['ci_low']:.4%}, {r['ci_high']:.4%}] | "
+                     f"{r['years_positive']}/{r['years_total']} | {r['holm_p_value']:.4f} |")
+    return lines
 
 
 def render_report(result, experiment_id, groups=None):
@@ -138,24 +178,13 @@ def render_report(result, experiment_id, groups=None):
     # 相邻组增量（D−C 单独在 LLM 段落呈现）。
     for inc in result.get('increments',[]):
         if inc['child']=='D': continue
-        lines += ['', f"## {inc['child']}−{inc['parent']} 配对增量", '',
-                  '| Exit | 成本 | 配对数 | 平均差 | 95% CI | Holm p |',
-                  '|---|---:|---:|---:|---|---:|']
-        for r in inc['rows']:
-            lines.append(f"| {r['exit_method']} | {r['cost_scenario']:.2%} | {r['pairs']} | "
-                         f"{r['mean_diff']:.4%} | [{r['ci_low']:.4%}, {r['ci_high']:.4%}] | "
-                         f"{r['holm_p_value']:.4f} |")
-        if not inc['rows']:
-            lines.append('| - | - | 0 | - | - | - |')
+        lines += ['', f"## {inc['child']}−{inc['parent']} 增量（聚合期望对比）", '']
+        lines += _increment_table(inc['rows'])
     lines += ['', '## LLM 增量（D−C）', '']
     llm=result.get('llm_increment') or {}
     if 'D' in groups:
-        lines += ['| Exit | 成本 | 配对数 | 平均差 | Holm p |', '|---|---:|---:|---:|---:|']
-        for r in result['d_minus_c']:
-            lines.append(f"| {r['exit_method']} | {r['cost_scenario']:.2%} | {r['pairs']} | "
-                         f"{r['mean_diff']:.4%} | {r['holm_p_value']:.4f} |")
-        if not result['d_minus_c']:
-            lines.append('| - | - | 0 | - | - |')
+        dinc=next((i for i in result.get('increments',[]) if i['child']=='D'),None)
+        lines += _increment_table(dinc['rows'] if dinc else [])
     else:
         reason=llm.get('reason') or LLM_INCREMENT_INCONCLUSIVE_REASON
         lines += [f"LLM_INCREMENT_STATUS = {llm.get('status','inconclusive')}",
@@ -173,6 +202,7 @@ def render_report(result, experiment_id, groups=None):
                          f"{int(best.year)}/{best.expectancy_usd:.2f} | "
                          f"{int(worst.year)}/{worst.expectancy_usd:.2f} |")
     lines += ['', '## 判定', '',
+              '- 增量列是两组**聚合期望差**（独立组 bootstrap），不是逐笔配对；只有多数年份同向且成本/退出档方向一致才算信号。',
               '- 相邻组增量只回答：B−A 周线环境门的价值、C−B 日线确认的价值；退出稳定性看 E1−E11 跨年份/成本方向。',
               '- 必须由预先登记的验收程序填写 `retain/reject/inconclusive`；本报告不自动选择最佳参数。','']
     return '\n'.join(lines)
