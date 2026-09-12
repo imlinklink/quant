@@ -10,7 +10,7 @@
 | `scripts/data/asof_features.py` | 单决策日的 as-of 特征 + 前视量化 | `21c4978` |
 | `scripts/data/asof_feature_panel.py` | **逐日面板**：每交易日的原始价 + as-of 特征 + 跨日尺度因子 | `0252701` |
 | `scripts/data/price_views.py`（复核修正） | `asof_adjusted` 必须显式 `--as-of`，且只保留 `session <= as_of` | `12c06a7` |
-| `scripts/data/generate_historical_setups.py --price-basis raw_asof` | 由不复权日线逐决策日构造完整周线/日线/枢轴快照；T+1 使用原始开盘，跨行动日换算价格门 | 本轮未提交 |
+| `scripts/data/generate_historical_setups.py --price-basis raw_asof` | 由不复权日线逐决策日构造完整周线/日线/枢轴快照；T+1 使用原始开盘，跨行动日换算价格门 | `c07d2fb` |
 
 ## 关键不变量（真实数据已验证）
 
@@ -46,12 +46,18 @@
 仍待把上述构件接到实验链，使 A/B/C 重建为：
 1. `generate_historical_setups` 的 `raw_asof` 模式已接入：按行动生效日切分价格视图，只从决策日当时可见的历史构造完整特征，保留旧 `legacy_qfq` 默认模式供复现。**仍需**对实际 39 只做逐股产物审计，并把主数据质量清单接成自动排除门；目前 `--exclude-security-id` 是人工隔离接口。
 2. `buy_strategy_experiment_runner` 可沿用同一价格口径的 setup 字段；`exit_matrix` 已完成第一版不复权退出会计：拆股/反向拆股换算股数及保护线，现金分红计入总回报并调整保护线，退出 ATR 来自逐日 as-of 面板，入场日只检查成交后的盘中区间。raw 路径要求显式公司行动表、一致的 `security_id` 和覆盖完整观察窗的质量区间，不再允许静默退回旧模拟。质量失败会保留为每个退出/成本单元的 `quality_rejected` 行。
-3. 新增 `build_research_quality_intervals.py`，把证券审计与 symbol→security_id 映射转换成不可覆盖的质量区间。实际 40 只结果：**19 verified / 21 rejected**；拒绝包括 17 个未知上市日、2 个仅首根日线推断的上市日、SPY（非交易样本且上市日未知）和 HON 未解析行动。产物为本机 `research_quality_intervals-v2.csv`。
+3. 新增 `build_research_quality_intervals.py`，把证券审计与 symbol→security_id 映射转换成不可覆盖的质量区间。v2 曾为 19 verified / 21 rejected；真实配对发现 ORCL/QCOM/TSM/UNH 的 QFQ 因子明显变化但行动表为 0 条，追加 `ACTION_HISTORY_INCOMPLETE` 后，**v3 为 15 verified / 25 rejected**。另修复行动反推工具合并前未统一日期格式的问题。
 4. **尚需**对实际 39 只逐股运行 raw setup/退出审计，再另建实验编号（如 `BUY-WD-ABC-SURVIVOR-RAW-001`）冻结重跑；与 `SURVIVOR-003` 分离，不覆盖。
+
+## 首轮真实样本工程审计
+
+首轮以 v2 放行的 19 只完成 raw setup 与退出闭环：5,334 个 setup、10,462 个 A/B/C 入场、460,328 个矩阵单元。会计恒等式最大误差 `4.996e-16`，E10/E11 枢轴换算修正了 708 个单元。但配对差异暴露四只行动历史缺失，该矩阵已降级为**缺陷发现证据**，不得用于绩效；v3 只放行 15 只。完整记录见 [首轮真实样本工程审计](m2-raw-asof-first-audit-2026-09-12.md)。
+
+随后按 v3 的15只重跑，setup 截止提前至2026-06-30以覆盖完整40交易日质量窗口：4,001个 setup、7,889个 A/B/C 入场、347,116个矩阵单元，质量拒绝为0、右删失2,660。相同范围下新旧 setup 4,001/4,001完全配对，会计恒等式最大误差仍为 `4.996e-16`。状态提升为 `engineering_pass`，详见 [15只质量放行样本重跑](m2-raw-asof-15-stock-rerun-2026-09-12.md)；尚未冻结正式 Manifest，不能发布收益结论。
 
 ## 放行与结论纪律
 
 - **M1 未放行 → M2 `blocked`**：18 只上市日未核验、旧实验用 QFQ 执行价与全快照特征。
 - 在本轮修正口径重跑完成**之前**，不得发布新的 A/B/C 收益结论；`1526/11290` 的前视影响面须由修正后的**配对重跑**检验，不得沿用"影响很小"的推测。
 
-原接线提交时全量测试为 **558 passed**；本轮新增完整 setup 构造器、退出公司行动会计和自动质量区间测试。退出与质量构造器针对性测试为 **21 passed**；最新全量测试为 **584 passed、16 warnings**。面板产物：`data/survivor_sample_audit/asof_panels/*.csv.gz`、`asof_panel_summary.csv` 与 `research_quality_intervals-v2.csv`（本机，gitignore）。
+原接线提交时全量测试为 **558 passed**；本轮新增完整 setup 构造器、退出公司行动会计、自动质量区间和跨格式行动反推测试。最新全量测试为 **588 passed、16 warnings**。面板与质量产物位于本机 `data/survivor_sample_audit/`，当前质量文件为 `research_quality_intervals-v3.csv`（gitignore）。

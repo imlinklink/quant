@@ -33,11 +33,13 @@ def derive_actions(raw_bars: pd.DataFrame, adjusted_bars: pd.DataFrame, security
     """对单一标的反推公司行动。raw_bars/adjusted_bars 需含 session,close。"""
     a = raw_bars[['session', 'close']].rename(columns={'close': 'raw'})
     b = adjusted_bars[['session', 'close']].rename(columns={'close': 'adj'})
+    # 下载分区可能分别保存为 YYYY-MM-DD 与 YYYY-MM-DD 00:00:00；须先归一化再合并。
+    a['session'] = pd.to_datetime(a.session).dt.tz_localize(None).dt.normalize()
+    b['session'] = pd.to_datetime(b.session).dt.tz_localize(None).dt.normalize()
     d = a.merge(b, on='session').sort_values('session').reset_index(drop=True)
     if d.empty:
         return pd.DataFrame(columns=['security_id', 'action_type', 'ex_date', 'ratio',
                                      'cash_amount', 'source_id', 'quality_status'])
-    d['session'] = pd.to_datetime(d['session'])
     d['factor'] = d['adj'].astype(float) / d['raw'].astype(float)
     d['step'] = d['factor'] / d['factor'].shift(1)
     rows = []

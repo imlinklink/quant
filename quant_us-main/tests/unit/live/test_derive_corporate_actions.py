@@ -44,6 +44,15 @@ class DeriveActionsTests(unittest.TestCase):
         flat = frame([100, 100, 100, 100, 100])
         self.assertTrue(derive_actions(flat, flat, 'SEC-A').empty)
 
+    def test_session_string_formats_are_normalized_before_merge(self):
+        raw=frame([100,100,100,50,50]).assign(
+            session=lambda d:d.session.dt.strftime('%Y-%m-%d %H:%M:%S'))
+        adj=frame([50,50,50,50,50]).assign(
+            session=lambda d:d.session.dt.strftime('%Y-%m-%d'))
+        actions=derive_actions(raw,adj,'SEC-A')
+        self.assertEqual(len(actions),1)
+        self.assertEqual(actions.iloc[0].action_type,'split')
+
     def test_apply_adjustments_round_trip(self):
         raw = frame([100, 100, 100, 50, 50])
         adj = frame([50, 50, 50, 50, 50])

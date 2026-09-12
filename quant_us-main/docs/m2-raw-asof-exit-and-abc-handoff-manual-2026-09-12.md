@@ -4,7 +4,7 @@
 
 目标是把已接通的 **逐决策日 as-of setup + T+1 不复权入场**，延伸到持仓期退出、质量门和新编号的 A/B/C 历史再现。只研究用户选定的**当前存续普通股**，不补退市证券；结论须标明幸存者偏差，已看过的历史区间不能重新称为盲测。D 组没有严格历史 LLM 标签，不用伪标签，维持 `inconclusive`。本手册不涉及真实订单。
 
-截至撰写时，`generate_historical_setups.py --price-basis raw_asof` 已从不复权日线和按 `security_id` 关联的公司行动构造完整周/日特征，T+1 使用不复权开盘价，跨行动日换算价格门；旧 `legacy_qfq` 默认路径仍在。随后已实现 `exit_matrix.py` 的第一版公司行动会计：拆股/反向拆股换算股数与保护线，现金分红进入总回报，ATR 使用逐日 as-of 口径，raw 路径要求显式 `--actions` 和 `--quality`。`build_research_quality_intervals.py` 已把现有审计生成质量区间，实际结果为 19 个 verified、21 个 rejected。新增改动仍在工作区，**尚未提交**；当前首要剩余项是实际 39 只的 raw setup/退出逐股审计，不能直接跳到正式收益。接手时先复核 `git status --short`，不要假定已有新 commit。测试收集时富途库需能写本机日志。细节见 [M2 接线记录](m2-wiring-record-2026-09-12.md)。
+截至撰写时，`generate_historical_setups.py --price-basis raw_asof` 已从不复权日线和按 `security_id` 关联的公司行动构造完整周/日特征，T+1 使用不复权开盘价，跨行动日换算价格门；旧 `legacy_qfq` 默认路径仍在。`exit_matrix.py` 已支持拆股/反向拆股、现金分红、逐日 as-of ATR 和质量区间。真实配对发现 ORCL/QCOM/TSM/UNH 的行动表不完整后，v3 质量门为 **15 verified / 25 rejected**，使用 `research_quality_intervals-v3.csv`。15只已完成第二轮工程重跑，见 [重跑记录](m2-raw-asof-15-stock-rerun-2026-09-12.md)。下一步应核实来源级别并冻结新的实验输入；不能把内部审计标记直接解释为外部来源已核验。
 
 M1 审计已发现：40 个映射 0 歧义；39 只股票加 SPY 日历；18/40 的上市日未知或是占位值，不能标 `verified`；`US.HON` 有未解析公司行动。原 `SURVIVOR-003` 使用 QFQ 执行价与全快照特征，不能覆盖或改名当作新实验。M2 当前状态是 **`blocked`**，可继续开发，但质量门通过前不能发布新收益结论。
 

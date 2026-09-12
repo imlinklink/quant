@@ -54,6 +54,22 @@ class ExitMatrixTests(unittest.TestCase):
         self.assertAlmostEqual(result['gross_pnl_pct'],0.)
         self.assertEqual(result['cash_dividend_per_initial_share'],2.)
 
+    def test_structure_pivot_lows_are_rescaled_across_split(self):
+        dates=pd.bdate_range('2026-01-05',periods=6,tz='UTC')
+        b=pd.DataFrame({'stock':'US.X','security_id':'SEC-X','date':dates,
+            'open':[100.,98.,95.,48.,49.,44.],
+            'high':[101.,99.,96.,49.,50.,45.],
+            'low':[98.,96.,90.,47.,48.,43.],
+            'close':[99.,97.,94.,48.,49.,44.],'volume':1000.,'atr14':1.})
+        actions=pd.DataFrame([{'security_id':'SEC-X','action_type':'split',
+            'ex_date':str(dates[3].date()),'ratio':2.,'cash_amount':0.}])
+        row={'entry_time':str(dates[0]),'entry_price':100.,'initial_stop':80.,
+             'security_id':'SEC-X','price_basis':'raw_asof'}
+        result=simulate_daily(row,b,'E10',actions=actions)
+        self.assertEqual(result['exit_reason'],'GAP_STOP')
+        self.assertEqual(result['exit_price'],44.)
+        self.assertEqual(pd.Timestamp(result['exit_time']).date(),dates[5].date())
+
     def test_raw_entry_day_skips_pre_entry_open_stop_but_checks_intraday(self):
         dates=pd.bdate_range('2026-01-05',periods=2,tz='UTC')
         b=pd.DataFrame({'stock':'US.X','security_id':'SEC-X','date':dates,

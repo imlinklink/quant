@@ -43,5 +43,12 @@ class ResearchQualityIntervalTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'SYMBOL_MAPPING_NOT_UNIQUE'):
             build_intervals(audit,symbols,'2015-01-01','2026-08-31')
 
+    def test_incomplete_action_history_is_rejected(self):
+        audit=pd.DataFrame([{'code':'US.A','asset_type_audited':'stock',
+                            'listing_date':'2020-06-01','verified':True}])
+        symbols=pd.DataFrame([{'security_id':'A','symbol':'US.A','valid_from':'2020-06-01','valid_to':None}])
+        out=build_intervals(audit,symbols,'2015-01-01','2026-08-31',incomplete_actions=['A'])
+        self.assertEqual(out.iloc[0].reason,'ACTION_HISTORY_INCOMPLETE')
+
 
 if __name__=='__main__':unittest.main()
