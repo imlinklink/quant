@@ -81,7 +81,26 @@ class ExitMatrixTests(unittest.TestCase):
         row={'entry_time':'2026-01-05T14:30:00Z','entry_price':100,'initial_stop':1.}
         r=simulate_daily(row,b,'E4')     # 固定持有 40 日，数据不足
         self.assertEqual(r['exit_reason'],'DATA_END')
+        self.assertEqual(r['data_quality'],'right_censored')
+        self.assertIsNone(r['net_pnl_pct'])
         self.assertEqual(pd.Timestamp(r['exit_time']).date(),pd.Timestamp('2026-01-07').date())
+
+    def test_close_price_never_releases_position_at_open(self):
+        dates=pd.bdate_range('2026-01-05',periods=5,tz='UTC')
+        b=pd.DataFrame({'stock':'US.X','date':dates,'open':100.,'high':102.,'low':99.,
+                        'close':101.,'volume':1000})
+        row={'entry_time':'2026-01-05T14:30:00Z','entry_price':100,'initial_stop':90}
+        r=simulate_daily(row,b,'E1')
+        self.assertEqual(r['exit_reason'],'TIME_EXIT')
+        self.assertEqual(pd.Timestamp(r['exit_time']).hour,21)
+        # 收盘价退出当日的开盘不能释放仓位。
+        trades=pd.DataFrame([{'experiment':'A','exit_method':'E1','cost_scenario':.002,
+            'setup_id':f's{i}','stock':f'US.{i}',
+            'entry_time':'2026-01-05T14:30:00Z' if i<3 else '2026-01-09T14:30:00Z',
+            'exit_time':r['exit_time'] if i<3 else '2026-01-12T21:00:00Z',
+            'data_quality':'good'} for i in range(4)])
+        accepted=apply_matrix_portfolio(trades)
+        self.assertFalse(bool(accepted.loc[accepted.setup_id=='s3','portfolio_accepted'].iloc[0]))
 
     def test_three_position_limit_is_per_cell(self):
         def row(exp,sid,rank):

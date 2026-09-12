@@ -14,12 +14,14 @@
 
 ## 变更记录（2026-09-11 第二轮，优先于下文旧描述）
 
+> 2026-09-12 审核修正：旧 `BUY-WD-ABC-EXP-001` 的 manifest 使用临时容器绝对路径，跨环境校验失败；旧退出矩阵把收盘价退出记在开盘，并将 `DATA_END` 当作已结算交易。旧报告仅供问题追溯，不再作为有效实验产物。新代码使用相对路径 manifest、按退出类型记录可用时刻、对末端未完成交易右删失、对嵌套父子组联合重采样。修复后必须用新实验编号重新冻结并重跑，不得覆盖旧目录。
+
 本轮修复了退出模拟与增量分析，下文相关段落的旧描述以本节为准：
 
 | 项目 | 旧（首轮） | 现（本轮） | 影响章节 |
 |---|---|---|---|
 | 退出窗口 | `bars[date >= entry_time]` 把成交当日整根 K 线排除，退出从次日开始 | **含成交当日**：按交易日选取入场日及其后 40 个交易日 | §6 §12 |
-| 退出时刻 | 交易日 00:00，可能早于入场时刻 | 统一为交易日 09:30 ET，保证 `exit_time >= entry_time` | §12 |
+| 退出时刻 | 交易日 00:00，可能早于入场时刻 | 跳空止损为 09:30 ET；盘中触线与收盘价退出最早在 16:00 ET 释放仓位 | §12 |
 | 增量分析 | 同 setup 配对，嵌套分组下恒为 0 | 两组**聚合期望差**（独立组 bootstrap）+ 年份同向计数 | §13 |
 | 报告完整性 | 强制 A/B/C/D 四组共 176 单元 | 支持 `--groups ABC`，ABC 为 3×11×4 = **132 单元** | §8.3 §13 |
 | 集中度 | 按净收益总额（净额≈0 或为负时失真） | 按**毛利**（正贡献之和）比例 | §13 |
@@ -38,7 +40,7 @@
 - 历史行情统一采用 Futu `QFQ` 前复权日线；
 - Security Master、断点下载、标准化、交易日历、数据质量、T-1 流动性和历史时点 universe 已有脚本；
 - 历史 setup、A/B/C/D 入场、E1-E11 退出矩阵和统计报告已有脚本；
-- 最近一次全量测试结果为 `480 passed`（本轮修复后；首轮为 461）。
+- 最近一次全量测试结果为 `483 passed`（2026-09-12 修复后）。
 
 首轮交接时以下文件尚未提交；**本轮已全部提交**（当前实现提交见开头「变更记录」）：
 
@@ -150,7 +152,7 @@ python3 -m pytest -q
 验收：
 
 - 所有测试通过；
-- 当前参考值为 480 项（首轮 461；本轮新增资产切片/§12 校验/退出缺陷回归等测试）；新增合理测试后数量可以增加；
+- 当前参考值为 483 项；新增合理测试后数量可以增加；
 - 不允许通过跳过失败测试来提交。
 
 另外运行定向测试：
@@ -578,7 +580,7 @@ python3 scripts/exit_matrix.py \
 `--groups` 必须与 `manifest.experiment_groups` 一致（A/B/C 实验用 `ABC`；ABCD 实验用默认 `ABCD`）。退出引擎的两条口径（本轮修复）：
 
 - 模拟窗口**含成交当日**：从入场交易日（`next_open_time` 所在日）起的 40 个交易日，不得跳过成交当日；
-- 退出时刻统一为交易日的 09:30 ET，因此 `exit_time >= entry_time` 恒成立。
+- 跳空止损按当日 09:30 ET 释放仓位；盘中触线与收盘价退出按当日 16:00 ET 释放仓位，因此不能在当天开盘复用尚未释放的仓位。
 
 检查矩阵完整性：
 
@@ -592,7 +594,8 @@ expected={(g,f'E{i}',c) for g in GROUPS for i in range(1,12)
           for c in (.001,.002,.005,.01)}
 actual=set(zip(d.experiment,d.exit_method,d.cost_scenario.astype(float)))
 assert expected<=actual, expected-actual
-assert set(d.data_quality).issubset({'good','missing_future_bars'})
+assert set(d.data_quality).issubset({'good','missing_future_bars','right_censored'})
+assert d.loc[d.data_quality.eq('right_censored'),'net_pnl_pct'].isna().all()
 assert (d.exit_price.dropna()>0).all()
 assert (pd.to_datetime(d.exit_time,utc=True,errors='coerce')>=
         pd.to_datetime(d.entry_time,utc=True)).dropna().all()
@@ -629,7 +632,7 @@ python3 scripts/buy_strategy_report.py \
 
 - 单元数与所选组一致：`--groups ABC` 为 3 组 × 11 种退出 × 4 种成本 = 132；`ABCD` 为 176；
 - 报告包含 group bootstrap 95% 区间；
-- 增量采用**两组聚合期望差**（独立组 bootstrap）并给出**年份同向**计数；不是同 setup 配对——嵌套分组下配对差恒为 0，无法回答增量；
+- 增量采用**两组聚合期望差**，按共享独立组联合 bootstrap 保留嵌套样本相关性，并给出**年份同向**计数；不是同 setup 收益相减——嵌套分组下同 setup 的交易结果相同，无法回答筛选增量；
 - 多重比较使用 Holm 校正；
 - 分年份报告最好和最差年份；
 - 报告 top-2 股票、top-3 交易占**毛利**（正贡献之和）的比例，不是占净额（净额≈0 或为负时失真）；
@@ -756,7 +759,7 @@ report.md
 
 ### 进度（2026-09-11 第二轮）
 
-- **已完成**：1（审查/测试/提交）；3（setup 无未来数据抽查，28 条跨标的 0 失败，记录在 `backtests/buy_v2/setup-lookahead-audit-PILOT-QFQ-20260911-R2.csv`）；6/7/8 的 **A/B/C 部分**（实验 `BUY-WD-ABC-EXP-001`，132 单元，结论 `inconclusive`）。
+- **已完成的工程验证**：1（前轮审查/测试/提交）；3 已抽查 28 条跨标的记录，尚需按本手册补足至少 2 条及原始证据；旧 `BUY-WD-ABC-EXP-001` 曾生成 132 单元，但因上文所列退出时间、右删失和 Manifest 缺陷已失效，须用新编号重跑。
 - **需本机 Futu OpenD**：2（重跑 QFQ 试点）、9（shadow 联调）。
 - **需外部数据源**：4（历史时点 LLM 标签）、5（含退市的 point-in-time Security Master），二者是 D 组的阻断项。
 - 本轮同时修复了退出模拟成交当日缺失与增量配对两个缺陷（见开头「变更记录」）。

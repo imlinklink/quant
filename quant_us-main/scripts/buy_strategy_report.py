@@ -50,15 +50,6 @@ def group_bootstrap_ci(frame, value='net_pnl_pct', iterations=2000, seed=2026091
             'high':float(np.quantile(samples,.975)),'groups':len(values)}
 
 
-def _two_sample_p(a, b):
-    """以独立组均值为单位的双样本正态近似 p 值。"""
-    if len(a) < 2 or len(b) < 2: return 1.0
-    se = math.sqrt(a.var(ddof=1)/len(a) + b.var(ddof=1)/len(b))
-    if se == 0: return 0.0 if (float(b.mean())-float(a.mean())) != 0 else 1.0
-    z = abs(float(b.mean())-float(a.mean()))/se
-    return math.erfc(z/math.sqrt(2))
-
-
 def holm_adjust(pvalues):
     order=sorted(range(len(pvalues)),key=lambda i:pvalues[i]);out=[1.]*len(pvalues);running=0.
     m=len(pvalues)
@@ -73,7 +64,7 @@ def _arm_group_means(frame, experiment, value='net_pnl_pct'):
 
 
 def increment_rows(frame, child, parent, iterations=2000, seed=20260910):
-    """child 相对 parent 的**聚合期望增量**（独立组 bootstrap）+ 年份同方向计数。
+    """按共享独立组联合重采样，保留嵌套父子组的相关性。
 
     分组是嵌套的（child ⊆ parent），同一 setup 在两组结果相同，因此“同 setup 配对”
     的差值恒为 0、无法回答增量问题。这里改为比较两组各自的聚合期望。
@@ -83,7 +74,9 @@ def increment_rows(frame, child, parent, iterations=2000, seed=20260910):
     sub=sub.assign(_year=pd.to_datetime(sub['entry_time'],utc=True).dt.year)
     rows=[]
     for (exit_id,cost),g in sub.groupby(['exit_method','cost_scenario']):
-        p=_arm_group_means(g,parent); c=_arm_group_means(g,child)
+        cluster=g.groupby(['independence_group','experiment']).net_pnl_pct.mean().unstack()
+        p=cluster[parent].dropna().to_numpy(float) if parent in cluster else np.array([])
+        c=cluster[child].dropna().to_numpy(float) if child in cluster else np.array([])
         parent_trades=int((g.experiment==parent).sum()); child_trades=int((g.experiment==child).sum())
         if len(p)==0 or len(c)==0:
             rows.append({'exit_method':exit_id,'cost_scenario':float(cost),
@@ -92,9 +85,17 @@ def increment_rows(frame, child, parent, iterations=2000, seed=20260910):
                 'ci_low':None,'ci_high':None,'years_positive':0,'years_total':0,'p_value':1.0})
             continue
         rng=np.random.default_rng(seed)
-        cs=rng.choice(c,(iterations,len(c)),replace=True).mean(axis=1)
-        ps=rng.choice(p,(iterations,len(p)),replace=True).mean(axis=1)
-        diffs=cs-ps
+        paired=cluster.reindex(columns=[parent,child]).to_numpy(float)
+        draws=paired[rng.integers(0,len(paired),size=(iterations,len(paired)))]
+        with np.errstate(invalid='ignore'):
+            parent_n=np.isfinite(draws[:,:,0]).sum(axis=1)
+            child_n=np.isfinite(draws[:,:,1]).sum(axis=1)
+            valid=(parent_n>0)&(child_n>0)
+            diffs=(np.nansum(draws[:,:,1],axis=1)/np.maximum(child_n,1)
+                   -np.nansum(draws[:,:,0],axis=1)/np.maximum(parent_n,1))[valid]
+        observed=float(c.mean()-p.mean())
+        centered=diffs-observed
+        p_value=float((np.count_nonzero(np.abs(centered)>=abs(observed))+1)/(len(centered)+1)) if len(centered) else 1.0
         ytot=ypos=0
         for _,gy in g.groupby('_year'):
             pm=gy.loc[gy.experiment==parent,'net_pnl_pct'].mean();cm=gy.loc[gy.experiment==child,'net_pnl_pct'].mean()
@@ -102,9 +103,10 @@ def increment_rows(frame, child, parent, iterations=2000, seed=20260910):
         rows.append({'exit_method':exit_id,'cost_scenario':float(cost),
             'parent_trades':parent_trades,'child_trades':child_trades,
             'parent_mean':float(p.mean()),'child_mean':float(c.mean()),
-            'mean_diff':float(c.mean()-p.mean()),
-            'ci_low':float(np.quantile(diffs,.025)),'ci_high':float(np.quantile(diffs,.975)),
-            'years_positive':ypos,'years_total':ytot,'p_value':_two_sample_p(p,c)})
+            'mean_diff':observed,
+            'ci_low':float(np.quantile(diffs,.025)) if len(diffs) else None,
+            'ci_high':float(np.quantile(diffs,.975)) if len(diffs) else None,
+            'years_positive':ypos,'years_total':ytot,'p_value':p_value})
     adjusted=holm_adjust([r['p_value'] for r in rows]) if rows else []
     for r,a in zip(rows,adjusted):r['holm_p_value']=a
     return rows
@@ -175,6 +177,7 @@ def metrics(matrix, groups=GROUP_ORDER, asset_types=None):
     d_minus_c=next((i['rows'] for i in increments if i['child']=='D'),[])
     slices=asset_slices(accepted,groups,asset_types)
     return {'groups':rows,'yearly':yearly,'d_minus_c':d_minus_c,'increments':increments,
+            'right_censored':int((d['data_quality']=='right_censored').sum()),
             'asset_slices':slices,
             'asset_type_universe':sorted(set(asset_types.values())) if asset_types else [],
             'asset_types_missing':sorted(set(asset_types.values())-{s['asset_type'] for s in slices}) if asset_types else [],
@@ -297,7 +300,9 @@ def main():
     if not master:
         for rec in manifest.get('data_files') or []:
             pth=rec.get('path','')
-            if Path(pth).name=='security_master.csv' and Path(pth).is_file(): master=pth;break
+            from scripts.experiment_manifest import resolve_record_path
+            resolved=resolve_record_path(rec)
+            if resolved.name=='security_master.csv' and resolved.is_file(): master=resolved;break
     asset_types=load_asset_types(master)
     result=metrics(matrix,groups,asset_types=asset_types);out=Path(args.output_dir)
     write_new(out/'metrics.json',json.dumps(result,ensure_ascii=False,indent=2)+'\n')

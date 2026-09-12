@@ -63,7 +63,13 @@ def _session_open_times(dates):
     return et.dt.tz_convert('UTC').to_numpy()
 
 
-def _simulate_core(entry, exit_id, opens, highs, lows, closes, times, atrs, n):
+def _session_close_times(dates):
+    """日线收盘与盘中触线均在收盘时释放组合仓位（保守口径）。"""
+    et = _bar_days(dates).dt.tz_localize('America/New_York') + pd.Timedelta(hours=16)
+    return et.dt.tz_convert('UTC').to_numpy()
+
+
+def _simulate_core(entry, exit_id, opens, highs, lows, closes, open_times, close_times, atrs, n):
     """退出路径：与成本无关；先检查旧保护线，再更新当日保护线。"""
     ep = float(entry['entry_price']); raw_stop = entry.get('initial_stop')
     initial = float(raw_stop) if pd.notna(raw_stop) and float(raw_stop) > 0 else ep*.95
@@ -74,11 +80,13 @@ def _simulate_core(entry, exit_id, opens, highs, lows, closes, times, atrs, n):
         mfe = max(mfe, bh / ep - 1); mae = min(mae, bl / ep - 1)
         if exit_id not in FIXED_HOLDS:
             exit_px, reason = _fill_at_stop(opens[i], bl, stop)
-            if exit_px is not None: exit_time = times[i]; break
+            if exit_px is not None:
+                exit_time = open_times[i] if reason == 'GAP_STOP' else close_times[i]
+                break
         if exit_id in FIXED_HOLDS and i + 1 >= FIXED_HOLDS[exit_id]:
-            exit_px, exit_time, reason = closes[i], times[i], 'TIME_EXIT'; break
+            exit_px, exit_time, reason = closes[i], close_times[i], 'TIME_EXIT'; break
         if exit_id == 'E5' and i + 1 >= 20:
-            exit_px, exit_time, reason = closes[i], times[i], 'TIME_EXIT'; break
+            exit_px, exit_time, reason = closes[i], close_times[i], 'TIME_EXIT'; break
         # 今日完成后才更新，下一交易日生效。
         if bh > high: high = bh
         atr = atrs[i]
@@ -92,11 +100,12 @@ def _simulate_core(entry, exit_id, opens, highs, lows, closes, times, atrs, n):
             stop = structure_stop
             if exit_id == 'E11' and np.isfinite(atr): stop = max(stop, high - 2 * atr)
         if i == n - 1:
-            exit_px, exit_time, reason = closes[i], times[i], 'DATA_END'
+            exit_time, reason = close_times[i], 'DATA_END'
     gross = exit_px / ep - 1 if exit_px is not None else None
     return {'exit_method': exit_id, 'exit_time': exit_time, 'exit_price': exit_px,
             'exit_reason': reason, 'mfe_pct': mfe, 'mae_pct': mae,
-            'gross_pnl_pct': gross, 'data_quality': 'good'}
+            'gross_pnl_pct': gross, 'data_quality': 'right_censored' if reason == 'DATA_END' else 'good',
+            'mark_price': closes[n-1] if reason == 'DATA_END' else None}
 
 
 def _finalize(result, cost_pct, position_usd):
@@ -117,7 +126,7 @@ def simulate_daily(entry, bars, exit_id, cost_pct=.002):
         entry, exit_id,
         d['open'].to_numpy(float), d['high'].to_numpy(float), d['low'].to_numpy(float),
         d['close'].to_numpy(float),
-        _session_open_times(d['date']),
+        _session_open_times(d['date']), _session_close_times(d['date']),
         d['atr14'].to_numpy(float) if 'atr14' in d.columns else np.full(len(d), np.nan),
         len(d))
     return _finalize(result, cost_pct, float(entry.get('position_usd', 5000)))
@@ -129,7 +138,8 @@ def _stock_arrays(g):
             'low': g['low'].to_numpy(float), 'close': g['close'].to_numpy(float),
             'atr14': g['atr14'].to_numpy(float) if 'atr14' in g.columns else np.full(len(g), np.nan),
             'day': _bar_days(g['date']).astype('int64').to_numpy(),
-            'times': _session_open_times(g['date'])}
+            'open_times': _session_open_times(g['date']),
+            'close_times': _session_close_times(g['date'])}
 
 
 def run_exit_matrix(entries, daily_bars, costs=(.001,.002,.005,.01)):
@@ -154,11 +164,12 @@ def run_exit_matrix(entries, daily_bars, costs=(.001,.002,.005,.01)):
             continue
         sl=slice(start,end)
         opens=p['open'][sl]; highs=p['high'][sl]; lows=p['low'][sl]
-        closes=p['close'][sl]; atrs=p['atr14'][sl]; times=p['times'][sl]
+        closes=p['close'][sl]; atrs=p['atr14'][sl]
+        open_times=p['open_times'][sl]; close_times=p['close_times'][sl]
         n=end-start
         for exit_id in EXIT_IDS:
             # 退出路径与成本无关：只模拟一次，再按成本推导净收益。
-            result=_simulate_core(entry, exit_id, opens, highs, lows, closes, times, atrs, n)
+            result=_simulate_core(entry, exit_id, opens, highs, lows, closes, open_times, close_times, atrs, n)
             gross=result.get('gross_pnl_pct')
             for cost in costs:
                 row=dict(base, cost_scenario=cost, **result)

@@ -87,9 +87,25 @@ def git_is_dirty(root='.') -> bool:
     return bool(result.stdout.strip())
 
 
-def file_record(path) -> dict:
+def file_record(path, root='.') -> dict:
     p = Path(path).resolve()
-    return {'path': str(p), 'size': p.stat().st_size, 'sha256': sha256_file(p)}
+    base = Path(root).resolve()
+    try:
+        relative = p.relative_to(base)
+    except ValueError as exc:
+        raise ValueError(f'实验输入必须位于项目目录内: {p}') from exc
+    return {'path': str(relative), 'size': p.stat().st_size, 'sha256': sha256_file(p)}
+
+
+def resolve_record_path(record, root='.'):
+    path = Path(record.get('path') or '')
+    if path.is_absolute():
+        return path  # 兼容旧 manifest；新实验一律保存相对路径。
+    base = Path(root).resolve()
+    resolved = (base / path).resolve()
+    if not resolved.is_relative_to(base):
+        raise ValueError('实验输入路径越过项目目录')
+    return resolved
 
 
 def build_manifest(experiment_id: str, config_path, universe_path,
@@ -102,13 +118,13 @@ def build_manifest(experiment_id: str, config_path, universe_path,
         llm_evaluation = default_llm_evaluation(groups)
     return {
         'experiment_id': experiment_id,
-        'document_version': 'buy-strategy-validation-plan-2026-09-10',
+        'document_version': 'weekly-daily-strategy-test-handoff-manual-2026-09-11',
         'git_commit': git_commit(root), 'git_dirty': git_is_dirty(root),
         'random_seed': int(random_seed),
         'created_at': datetime.now(timezone.utc).isoformat(),
-        'config': file_record(config_path), 'universe': file_record(universe_path),
-        'data_files': [file_record(p) for p in sorted(map(str, data_paths))],
-        'quality_files': [file_record(p) for p in sorted(map(str, quality_paths))],
+        'config': file_record(config_path,root), 'universe': file_record(universe_path,root),
+        'data_files': [file_record(p,root) for p in sorted(map(str, data_paths))],
+        'quality_files': [file_record(p,root) for p in sorted(map(str, quality_paths))],
         'periods': periods, 'costs': list(map(float, costs)),
         'experiment_groups': list(groups), 'llm_evaluation': llm_evaluation,
     }
@@ -118,13 +134,15 @@ def validate_manifest(manifest: dict, root='.', require_git=True) -> list:
     errors = [f'MISSING_{key}' for key in REQUIRED if key not in manifest]
     for key in ('config', 'universe'):
         record = manifest.get(key) or {}
-        path = record.get('path')
+        try: path = resolve_record_path(record,root)
+        except ValueError: path = None
         if not path or not Path(path).is_file():
             errors.append(f'{key.upper()}_MISSING')
         elif sha256_file(path) != record.get('sha256'):
             errors.append(f'{key.upper()}_HASH_MISMATCH')
     for record in manifest.get('data_files') or []:
-        path = record.get('path')
+        try: path = resolve_record_path(record,root)
+        except ValueError: path = None
         if not path or not Path(path).is_file():
             errors.append('DATA_FILE_MISSING')
         elif sha256_file(path) != record.get('sha256'):
@@ -132,7 +150,8 @@ def validate_manifest(manifest: dict, root='.', require_git=True) -> list:
     if not manifest.get('quality_files'):
         errors.append('QUALITY_FILES_MISSING')
     for record in manifest.get('quality_files') or []:
-        path = record.get('path')
+        try: path = resolve_record_path(record,root)
+        except ValueError: path = None
         if not path or not Path(path).is_file(): errors.append('QUALITY_FILE_MISSING')
         elif sha256_file(path) != record.get('sha256'): errors.append('QUALITY_HASH_MISMATCH')
     periods = manifest.get('periods') or {}

@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import shutil
 from pathlib import Path
 from unittest.mock import patch
 
@@ -33,6 +34,21 @@ class ExperimentManifestTests(unittest.TestCase):
                 path=create_frozen_experiment(root/'exp','E1',cfg,uni,[data],periods,root,[quality])
             self.assertTrue(path.exists());self.assertTrue((root/'exp'/'config.yaml').exists())
             self.assertTrue((root/'exp'/'universe.csv').exists())
+
+    def test_manifest_paths_survive_workspace_move(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)/'original';root.mkdir()
+            cfg=root/'config.yaml';uni=root/'universe.csv';data=root/'daily.csv';q=root/'quality.csv'
+            for path in (cfg,uni,data,q):path.write_text('frozen',encoding='utf-8')
+            periods={'development_end':'2020','validation_start':'2021',
+                     'validation_end':'2023','test_start':'2024'}
+            with patch('scripts.experiment_manifest.git_commit',return_value='abc'), \
+                 patch('scripts.experiment_manifest.git_is_dirty',return_value=False):
+                m=build_manifest('E1',cfg,uni,[data],periods,[q],root=root)
+                self.assertEqual(validate_manifest(m,root),[])
+                moved=Path(tmp)/'moved';shutil.copytree(root,moved)
+                self.assertEqual(validate_manifest(m,moved),[])
+            self.assertFalse(Path(m['config']['path']).is_absolute())
 
 
     def test_experiment_groups_freeze_and_llm_inconclusive(self):

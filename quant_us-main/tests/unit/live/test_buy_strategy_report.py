@@ -1,10 +1,22 @@
 import unittest
 import pandas as pd
-from scripts.buy_strategy_report import (COSTS, EXIT_IDS, holm_adjust, metrics,
+from scripts.buy_strategy_report import (COSTS, EXIT_IDS, holm_adjust, increment_rows, metrics,
                                          render_report)
 
 
 class BuyStrategyReportTests(unittest.TestCase):
+    def test_increment_joint_bootstrap_keeps_shared_cluster_values(self):
+        rows=[]
+        for i in range(8):
+            for group in ('A','B'):
+                rows.append({'experiment':group,'independence_group':f'cluster-{i}',
+                             'entry_time':'2026-01-05T14:30:00Z','exit_method':'E1',
+                             'cost_scenario':.002,'net_pnl_pct':i/100})
+        result=increment_rows(pd.DataFrame(rows),'B','A',iterations=300)[0]
+        self.assertAlmostEqual(result['mean_diff'],0)
+        self.assertAlmostEqual(result['ci_low'],0)
+        self.assertAlmostEqual(result['ci_high'],0)
+        self.assertEqual(result['p_value'],1)
     def test_increment_is_aggregate_and_holm(self):
         rows=[]
         for i in range(4):
