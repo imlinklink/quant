@@ -4,6 +4,18 @@ from scripts.buy_strategy_experiment_runner import apply_universe,build_abcd_ent
 
 
 class ExperimentRunnerTests(unittest.TestCase):
+    def test_raw_setup_rejects_qfq_or_unversioned_universe(self):
+        entries=pd.DataFrame([{'experiment':'A','setup_id':'s1','stock':'US.X',
+            'entry_time':'2026-01-02T14:30:00Z','price_basis':'raw_asof'}])
+        u=pd.DataFrame([{'universe_date':'2026-01-02','code':'US.X','eligible':True,
+            'quality':'good','reason':'ELIGIBLE','price_version':'qfq-2026'}])
+        with self.assertRaisesRegex(ValueError,'RAW_ASOF_REQUIRES_RAW_UNIVERSE'):
+            apply_universe(entries,u)
+        u.price_version='raw-none-20260912'
+        accepted,rejected=apply_universe(entries,u)
+        self.assertEqual(len(accepted),1)
+        self.assertTrue(rejected.empty)
+
     def test_builds_all_groups_and_applies_universe(self):
         setups=pd.DataFrame([{'setup_id':'s1','stock':'US.X','setup_time':'2026-01-01T21:00:00Z',
           'next_open_time':'2026-01-02T14:30:00Z','next_open_price':100,'initial_stop':95,

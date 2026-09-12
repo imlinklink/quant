@@ -2,7 +2,7 @@
 
 ## 结论
 
-使用 `research_quality_intervals-v3.csv` 放行的15只普通股完成第二轮不可覆盖工程审计，状态为 **`engineering_pass`**。本轮没有质量区间拒绝；新旧 setup 在相同股票和截止日下 4,001/4,001 全部配对，证明首轮118个单边 setup 全部随 ORCL/QCOM/TSM/UNH 的行动历史缺口被隔离。
+使用 `research_quality_intervals-v3.csv` 放行的15只普通股完成第二轮工程审计。本轮没有质量区间拒绝；新旧 setup 在相同股票和截止日下 4,001/4,001 全部配对。**但本轮入场筛选误用了旧 QFQ 股票池；下表的入场及退出矩阵已被 [原始价股票池复核](m2-raw-asof-raw-universe-audit-2026-09-12.md)取代，不得作为最终 raw 口径结果。**
 
 这仍不是正式冻结收益实验：历史区间已经被查看，样本是当前存续股票，并且尚未创建绑定干净 commit、预登记和全部输入哈希的正式 Manifest。本文不报告或选择任何收益最优参数。
 
@@ -39,7 +39,7 @@
 - 相同15只、相同结束日、按 `stock + session + strategy` 去重：raw_asof 4,001，旧 QFQ/full-snapshot 4,001，共同4,001，双方单边均为0。
 - 这一配对只证明候选方向及时点在当前15只中保持一致；真实执行价、分红总回报和退出路径仍应以 raw_asof 矩阵为准。
 
-机器可读汇总与输入/输出 SHA-256 位于本机 `audit_summary.json`。核心矩阵为 `exit_matrix_raw_asof.csv.gz`。
+机器可读汇总与输入/输出 SHA-256 位于本机 `audit_summary.json`。核心矩阵为 `exit_matrix_raw_asof.csv.gz`；两者仅用于追溯被取代的筛选口径。
 
 ## 下一步放行条件
 

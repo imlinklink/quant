@@ -45,6 +45,11 @@ def apply_universe(entries: pd.DataFrame, universe: pd.DataFrame):
     if entries.empty:return entries.copy(),entries.copy()
     u=universe.copy()
     if not {'universe_date','code','eligible'}.issubset(u):raise ValueError('universe 需要 universe_date/code/eligible')
+    if 'price_basis' in entries and entries.price_basis.eq('raw_asof').any():
+        if not entries.price_basis.eq('raw_asof').all():
+            raise ValueError('MIXED_PRICE_BASIS')
+        if 'price_version' not in u or u.price_version.isna().any() or not u.price_version.astype(str).str.startswith('raw-none-').all():
+            raise ValueError('RAW_ASOF_REQUIRES_RAW_UNIVERSE')
     u['universe_date']=pd.to_datetime(u.universe_date).dt.date
     e=entries.copy();e['universe_date']=pd.to_datetime(e.entry_time,utc=True).dt.date
     joined=e.merge(u[['universe_date','code','eligible','quality','reason']],left_on=['universe_date','stock'],right_on=['universe_date','code'],how='left')
