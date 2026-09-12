@@ -11,7 +11,7 @@ DAYS = pd.bdate_range('2020-02-24', '2020-03-06')
 
 def qfq():
     # QFQ 锚定最新：拆股使拆股前价格减半 → 全期 50
-    return pd.DataFrame({'stock': 'US.A', 'date': DAYS, 'close': 50.0})
+    return pd.DataFrame({'stock': 'US.A', 'date': DAYS, 'open': 50.0, 'close': 50.0})
 
 
 def raw():
@@ -49,6 +49,16 @@ class ExecutionPriceTests(unittest.TestCase):
     def test_missing_price_gives_none(self):
         out = attach_execution_prices(setups('2020-01-02'), qfq(), raw())   # 窗口外
         self.assertTrue(pd.isna(out.iloc[0]['exec_conv']))
+
+    def test_uses_open_ratio_without_future_close(self):
+        q = qfq(); r = raw()
+        r.loc[r.date == pd.Timestamp('2020-02-28'), 'close'] = 500.0
+        row = attach_execution_prices(setups('2020-02-28'), q, r).iloc[0]
+        self.assertAlmostEqual(row['exec_conv'], 2.0)
+
+    def test_duplicate_daily_key_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, 'DUPLICATE_DAILY_PRICE_KEY'):
+            attach_execution_prices(setups('2020-02-28'), pd.concat([qfq(), qfq().iloc[[0]]]), raw())
 
 
 if __name__ == '__main__':

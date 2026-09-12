@@ -11,7 +11,111 @@ def daily():
                          'low':close-.5,'close':close,'volume':1000})
 
 
+def verified_quality():
+    return pd.DataFrame([{'security_id':'SEC-X','from_session':'2020-01-01',
+        'to_session':'2030-12-31','quality_status':'verified','reason':''}])
+
+
 class ExitMatrixTests(unittest.TestCase):
+    def test_raw_asof_requires_actions(self):
+        entries=pd.DataFrame([{'experiment':'A','setup_id':'s1','stock':'US.X',
+          'entry_time':'2026-01-02T14:30:00Z','entry_price':101,'initial_stop':95,
+          'price_basis':'raw_asof'}])
+        with self.assertRaisesRegex(ValueError,'RAW_ASOF_ACTIONS_REQUIRED'):
+            run_exit_matrix(entries,daily())
+
+    def test_split_preserves_equity_and_does_not_trigger_false_stop(self):
+        dates=pd.bdate_range('2026-01-05',periods=5,tz='UTC')
+        b=pd.DataFrame({'stock':'US.X','security_id':'SEC-X','date':dates,
+            'open':[100.,50.,50.,50.,50.],'high':[100.,50.,50.,50.,50.],
+            'low':[100.,49.,50.,50.,50.],'close':[100.,50.,50.,50.,50.],
+            'volume':1000.,'atr14':1.})
+        actions=pd.DataFrame([{'security_id':'SEC-X','action_type':'split',
+            'ex_date':'2026-01-06','ratio':2.,'cash_amount':0.}])
+        row={'entry_time':'2026-01-05T14:30:00Z','entry_price':100.,'initial_stop':95.,
+             'security_id':'SEC-X','price_basis':'raw_asof'}
+        result=simulate_daily(row,b,'E1',actions=actions)
+        self.assertEqual(result['exit_reason'],'TIME_EXIT')
+        self.assertAlmostEqual(result['gross_pnl_pct'],0.)
+        self.assertEqual(result['shares_at_exit'],2.)
+        self.assertEqual(result['split_factor_cumulative'],2.)
+
+    def test_cash_dividend_is_included_in_total_return(self):
+        dates=pd.bdate_range('2026-01-05',periods=5,tz='UTC')
+        b=pd.DataFrame({'stock':'US.X','security_id':'SEC-X','date':dates,
+            'open':[100.,98.,98.,98.,98.],'high':[100.,98.,98.,98.,98.],
+            'low':[100.,98.,98.,98.,98.],'close':[100.,98.,98.,98.,98.],
+            'volume':1000.,'atr14':1.})
+        actions=pd.DataFrame([{'security_id':'SEC-X','action_type':'cash_dividend',
+            'ex_date':'2026-01-06','ratio':0.,'cash_amount':2.}])
+        row={'entry_time':'2026-01-05T14:30:00Z','entry_price':100.,'initial_stop':95.,
+             'security_id':'SEC-X','price_basis':'raw_asof'}
+        result=simulate_daily(row,b,'E1',actions=actions)
+        self.assertAlmostEqual(result['gross_pnl_pct'],0.)
+        self.assertEqual(result['cash_dividend_per_initial_share'],2.)
+
+    def test_raw_entry_day_skips_pre_entry_open_stop_but_checks_intraday(self):
+        dates=pd.bdate_range('2026-01-05',periods=2,tz='UTC')
+        b=pd.DataFrame({'stock':'US.X','security_id':'SEC-X','date':dates,
+            'open':[100.,100.],'high':[101.,101.],'low':[94.,100.],
+            'close':[100.,100.],'volume':1000.,'atr14':1.})
+        row={'entry_time':'2026-01-05T14:30:00Z','entry_price':100.,'initial_stop':95.,
+             'security_id':'SEC-X','price_basis':'raw_asof'}
+        result=simulate_daily(row,b,'E5',actions=pd.DataFrame())
+        self.assertEqual(result['exit_reason'],'STOP')
+        self.assertEqual(result['exit_price'],95.)
+
+    def test_raw_matrix_runs_all_cells_with_action_accounting(self):
+        dates=pd.bdate_range('2026-01-01',periods=60,tz='UTC')
+        prices=np.array([100. if i < 10 else 50. for i in range(60)])
+        b=pd.DataFrame({'stock':'US.X','security_id':'SEC-X','date':dates,
+            'open':prices,'high':prices*1.01,'low':prices*.99,'close':prices,'volume':1000.})
+        actions=pd.DataFrame([{'security_id':'SEC-X','action_type':'split',
+            'ex_date':str(dates[10].date()),'ratio':2.,'cash_amount':0.}])
+        entry=pd.DataFrame([{'experiment':'A','setup_id':'s1','stock':'US.X',
+            'security_id':'SEC-X','entry_time':str(dates[5]),'entry_price':100.,
+            'initial_stop':80.,'price_basis':'raw_asof','portfolio_rank':1}])
+        out=run_exit_matrix(entry,b,actions=actions,quality=verified_quality())
+        self.assertEqual(len(out),44)
+        fixed=out[(out.exit_method=='E2')&(out.cost_scenario==.001)].iloc[0]
+        self.assertAlmostEqual(fixed.gross_pnl_pct,0.)
+        self.assertEqual(fixed.split_factor_cumulative,2.)
+
+    def test_raw_matrix_rejects_registered_entry_that_differs_from_raw_open(self):
+        dates=pd.bdate_range('2026-01-01',periods=20,tz='UTC')
+        b=pd.DataFrame({'stock':'US.X','security_id':'SEC-X','date':dates,
+            'open':100.,'high':101.,'low':99.,'close':100.,'volume':1000.})
+        entry=pd.DataFrame([{'experiment':'A','setup_id':'s1','stock':'US.X',
+            'security_id':'SEC-X','entry_time':str(dates[5]),'entry_price':101.,
+            'initial_stop':90.,'price_basis':'raw_asof'}])
+        with self.assertRaisesRegex(ValueError,'RAW_ASOF_ENTRY_OPEN_MISMATCH'):
+            run_exit_matrix(entry,b,actions=pd.DataFrame(),quality=verified_quality())
+
+    def test_quality_rejection_is_preserved_in_matrix_denominator(self):
+        dates=pd.bdate_range('2026-01-01',periods=20,tz='UTC')
+        b=pd.DataFrame({'stock':'US.X','security_id':'SEC-X','date':dates,
+            'open':100.,'high':101.,'low':99.,'close':100.,'volume':1000.})
+        entry=pd.DataFrame([{'experiment':'A','setup_id':'s1','stock':'US.X',
+            'security_id':'SEC-X','entry_time':str(dates[5]),'entry_price':100.,
+            'initial_stop':90.,'price_basis':'raw_asof'}])
+        quality=verified_quality().assign(quality_status='unverified',reason='UNKNOWN_LISTING_DATE')
+        out=run_exit_matrix(entry,b,actions=pd.DataFrame(),quality=quality)
+        self.assertEqual(len(out),44)
+        self.assertTrue((out.data_quality=='quality_rejected').all())
+        self.assertTrue((out.quality_reject_reason=='UNKNOWN_LISTING_DATE').all())
+        self.assertFalse(out.portfolio_accepted.any())
+
+    def test_quality_interval_must_cover_full_observation_window(self):
+        dates=pd.bdate_range('2026-01-01',periods=60,tz='UTC')
+        b=pd.DataFrame({'stock':'US.X','security_id':'SEC-X','date':dates,
+            'open':100.,'high':101.,'low':99.,'close':100.,'volume':1000.})
+        entry=pd.DataFrame([{'experiment':'A','setup_id':'s1','stock':'US.X',
+            'security_id':'SEC-X','entry_time':str(dates[5]),'entry_price':100.,
+            'initial_stop':90.,'price_basis':'raw_asof'}])
+        quality=verified_quality().assign(to_session=str(dates[20].date()))
+        out=run_exit_matrix(entry,b,actions=pd.DataFrame(),quality=quality)
+        self.assertTrue((out.quality_reject_reason=='QUALITY_INTERVAL_MISSING').all())
+
     def test_all_exit_and_cost_cells_exist(self):
         entries=pd.DataFrame([{'experiment':'C','setup_id':'s1','stock':'US.X',
           'entry_time':'2026-01-02T00:00:00Z','entry_price':101,'initial_stop':95,

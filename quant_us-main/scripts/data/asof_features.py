@@ -41,18 +41,20 @@ def asof_features(bars: pd.DataFrame, actions: pd.DataFrame, decision_day, *,
     return _features_on(view, ma_windows, atr_period)
 
 
-def full_snapshot_features(bars: pd.DataFrame, actions: pd.DataFrame, *,
+def full_snapshot_features(bars: pd.DataFrame, actions: pd.DataFrame, decision_day=None, *,
                            ma_windows=MA_WINDOWS, atr_period=ATR_PERIOD) -> dict:
-    """对照用的**错法**：把最新日期当作 as_of（含未来行动）。仅供差异量化与测试。"""
+    """同一决策日的错法对照：行情截到当日，却套用最终快照中的未来行动。"""
     last = pd.to_datetime(bars['session']).max()
     view = build_price_view(bars, actions, price_basis='asof_adjusted', as_of=last)
+    if decision_day is not None:
+        view = view[pd.to_datetime(view['session']) <= pd.Timestamp(decision_day).normalize()]
     return _features_on(view, ma_windows, atr_period)
 
 
 def feature_drift(bars: pd.DataFrame, actions: pd.DataFrame, decision_day, **kw) -> dict:
     """返回 as-of 与"错法"在决策日的相对差异，用于量化前视影响。"""
     good = asof_features(bars, actions, decision_day, **kw)
-    naive = full_snapshot_features(bars, actions, **kw)
+    naive = full_snapshot_features(bars, actions, decision_day, **kw)
     drift = {}
     for key, value in good.items():
         other = naive.get(key)

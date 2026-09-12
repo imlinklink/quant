@@ -55,6 +55,15 @@ class AsofFeatureTests(unittest.TestCase):
         drift = feature_drift(data, SPLIT, '2020-02-28')
         self.assertAlmostEqual(drift['relative_drift']['close'], 1.0)   # 错法高估 100%
 
+    def test_drift_uses_same_decision_day_not_last_bar(self):
+        data = bars(split=False)
+        data.loc[data.session > pd.Timestamp('2020-02-28'), ['open', 'high', 'low', 'close']] = 200.0
+        empty = pd.DataFrame(columns=SPLIT.columns)
+        drift = feature_drift(data, empty, '2020-02-28')
+        self.assertAlmostEqual(drift['asof']['close'], 100.0)
+        self.assertAlmostEqual(drift['full_snapshot']['close'], 100.0)
+        self.assertAlmostEqual(drift['relative_drift']['close'], 0.0)
+
 
 if __name__ == '__main__':
     unittest.main()

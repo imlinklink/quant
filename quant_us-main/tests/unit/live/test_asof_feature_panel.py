@@ -65,6 +65,26 @@ class AsofPanelTests(unittest.TestCase):
         self.assertTrue((panel.scale_to_next == 1.0).all())
         self.assertTrue((panel.asof_close == panel.raw_close).all())
 
+    def test_unresolved_dividend_factor_blocks_panel(self):
+        data = raw_bars().iloc[10:].reset_index(drop=True)
+        action = pd.DataFrame([{'security_id': 'SEC-A', 'action_type': 'cash_dividend',
+                                'ex_date': str(data.session.iloc[0].date()),
+                                'ratio': 0.0, 'cash_amount': 1.0}])
+        with self.assertRaisesRegex(ValueError, 'ACTION_FACTOR_UNRESOLVED'):
+            build_asof_panel(data, action)
+
+    def test_other_security_actions_do_not_change_panel(self):
+        other = SPLIT.assign(security_id='SEC-B')
+        panel = build_asof_panel(raw_bars(split=False), other)
+        self.assertTrue((panel.asof_close == 100.0).all())
+        self.assertTrue((panel.scale_to_next == 1.0).all())
+
+    def test_merger_in_window_blocks_panel(self):
+        merger = pd.DataFrame([{'security_id': 'SEC-A', 'action_type': 'merger',
+                                'ex_date': '2020-03-02', 'ratio': None, 'cash_amount': None}])
+        with self.assertRaisesRegex(ValueError, 'ACTION_TYPE_UNSUPPORTED'):
+            build_asof_panel(raw_bars(), merger)
+
 
 if __name__ == '__main__':
     unittest.main()

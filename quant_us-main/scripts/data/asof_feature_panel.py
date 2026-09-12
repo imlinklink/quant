@@ -23,13 +23,18 @@ def _factors_by_ex_date(actions: pd.DataFrame, raw: pd.DataFrame) -> dict:
     """每个 ex_date 对应 (作用于该日之前 bar 的因子)。
 
     只保留**落在价格窗口内、且有前收可算**的行动：窗口外的行动不影响本段序列；
-    缺少除权前收盘的股息无法换算，直接跳过（由调用方/审计另行标注）。
+    缺少除权前收盘的股息无法换算，必须阻断该面板，不能默默保留错误特征。
     """
     out = {}
     if actions is None or actions.empty:
         return out
     first = pd.Timestamp(raw['session'].min())
     last = pd.Timestamp(raw['session'].max())
+    unsupported = actions[actions['action_type'].astype(str).str.lower().eq('merger')]
+    for record in unsupported.to_dict('records'):
+        ex = pd.Timestamp(record['ex_date']).normalize()
+        if first <= ex <= last:
+            raise ValueError(f'ACTION_TYPE_UNSUPPORTED:{record.get("security_id")}:{ex.date()}')
     use = actions[actions['action_type'].astype(str).str.lower().isin(ADJUSTABLE_ACTIONS)]
     for record in use.to_dict('records'):
         ex = pd.Timestamp(record['ex_date']).normalize()
@@ -37,8 +42,10 @@ def _factors_by_ex_date(actions: pd.DataFrame, raw: pd.DataFrame) -> dict:
             continue                                   # 窗口外的行动与本段无关
         try:
             factor = action_factor(record, raw)
-        except ValueError:
-            continue                                   # 缺前收（如股息）→ 跳过，另行标注
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f'ACTION_FACTOR_UNRESOLVED:{record.get("security_id")}:{ex.date()}') from exc
+        if not np.isfinite(factor) or factor <= 0:
+            raise ValueError(f'ACTION_FACTOR_INVALID:{record.get("security_id")}:{ex.date()}')
         out.setdefault(ex, []).append(factor)
     return out
 
@@ -50,8 +57,25 @@ def build_asof_panel(raw: pd.DataFrame, actions: pd.DataFrame, *,
     raw 需含 session/open/high/low/close/volume，按 session 升序。
     """
     d = raw.copy()
+    if 'security_id' in d.columns:
+        ids = d['security_id'].dropna().astype(str).unique()
+        if len(ids) != 1:
+            raise ValueError('ASOF_PANEL_REQUIRES_ONE_SECURITY')
+        if actions is not None and not actions.empty:
+            if 'security_id' not in actions.columns:
+                raise ValueError('ACTION_SECURITY_ID_MISSING')
+            actions = actions[actions['security_id'].astype(str) == ids[0]]
+    elif actions is not None and not actions.empty and 'security_id' in actions.columns:
+        raise ValueError('RAW_SECURITY_ID_MISSING')
     d['session'] = pd.to_datetime(d['session']).dt.normalize()
     d = d.sort_values('session').reset_index(drop=True)
+    if d.empty:
+        raise ValueError('RAW_BARS_EMPTY')
+    if d['session'].duplicated().any():
+        raise ValueError('DUPLICATE_RAW_SESSION')
+    prices = d[['open', 'high', 'low', 'close']].astype(float).to_numpy()
+    if not np.isfinite(prices).all() or (prices <= 0).any():
+        raise ValueError('INVALID_RAW_PRICE')
     n = len(d)
     raw_close = d['close'].astype(float).to_numpy()
     raw_high = d['high'].astype(float).to_numpy()

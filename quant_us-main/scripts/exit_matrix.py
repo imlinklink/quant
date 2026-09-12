@@ -11,6 +11,8 @@ import pandas as pd
 
 ROOT=Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path: sys.path.insert(0,str(ROOT))
+from scripts.data.asof_feature_panel import build_asof_panel
+from scripts.data.io_utils import read_frame
 
 EXIT_IDS = tuple(f'E{i}' for i in range(1, 12))
 FIXED_HOLDS = {'E1': 5, 'E2': 10, 'E3': 20, 'E4': 40}
@@ -69,17 +71,42 @@ def _session_close_times(dates):
     return et.dt.tz_convert('UTC').to_numpy()
 
 
-def _simulate_core(entry, exit_id, opens, highs, lows, closes, open_times, close_times, atrs, n):
+def _simulate_core(entry, exit_id, opens, highs, lows, closes, open_times, close_times, atrs, n,
+                   action_events=None, raw_accounting=False):
     """退出路径：与成本无关；先检查旧保护线，再更新当日保护线。"""
     ep = float(entry['entry_price']); raw_stop = entry.get('initial_stop')
     initial = float(raw_stop) if pd.notna(raw_stop) and float(raw_stop) > 0 else ep*.95
     stop = initial; high = ep; structure_stop = initial
     exit_px = exit_time = reason = None; mfe = 0.; mae = 0.
+    shares = 1.; cash = 0.; split_factor = 1.; initial_notional = ep
+    events = action_events or {}
+    comparable_lows = []
     for i in range(n):
+        if raw_accounting and i:
+            for event in events.get(i, ()):
+                kind = event['action_type']
+                if kind in ('split', 'reverse_split'):
+                    ratio = float(event['ratio'])
+                    shares *= ratio; split_factor *= ratio
+                    stop /= ratio; high /= ratio; structure_stop /= ratio
+                    comparable_lows = [value / ratio for value in comparable_lows]
+                elif kind == 'cash_dividend':
+                    amount = float(event['cash_amount'])
+                    cash += shares * amount
+                    stop = max(0., stop - amount)
+                    high = max(0., high - amount)
+                    structure_stop = max(0., structure_stop - amount)
+                    comparable_lows = [max(0., value - amount) for value in comparable_lows]
         bh = highs[i]; bl = lows[i]
-        mfe = max(mfe, bh / ep - 1); mae = min(mae, bl / ep - 1)
+        comparable_lows.append(bl)
+        mfe = max(mfe, (shares * bh + cash) / initial_notional - 1)
+        mae = min(mae, (shares * bl + cash) / initial_notional - 1)
         if exit_id not in FIXED_HOLDS:
-            exit_px, reason = _fill_at_stop(opens[i], bl, stop)
+            # raw_asof 的入场成交发生在首日开盘；当天只能检查成交后的盘中低点。
+            if raw_accounting and i == 0:
+                exit_px, reason = (stop, 'STOP') if bl <= stop else (None, None)
+            else:
+                exit_px, reason = _fill_at_stop(opens[i], bl, stop)
             if exit_px is not None:
                 exit_time = open_times[i] if reason == 'GAP_STOP' else close_times[i]
                 break
@@ -94,18 +121,21 @@ def _simulate_core(entry, exit_id, opens, highs, lows, closes, open_times, close
             stop = max(stop, high - ATR_MULTS[exit_id] * atr)
         if exit_id in ('E10', 'E11') and i >= 4:
             pivot_i = i - 2
-            if (lows[pivot_i] < lows[pivot_i-2:pivot_i].min() and
-                    lows[pivot_i] < lows[pivot_i+1:pivot_i+3].min()):
-                structure_stop = max(structure_stop, lows[pivot_i])
+            if (comparable_lows[pivot_i] < min(comparable_lows[pivot_i-2:pivot_i]) and
+                    comparable_lows[pivot_i] < min(comparable_lows[pivot_i+1:pivot_i+3])):
+                structure_stop = max(structure_stop, comparable_lows[pivot_i])
             stop = structure_stop
             if exit_id == 'E11' and np.isfinite(atr): stop = max(stop, high - 2 * atr)
         if i == n - 1:
             exit_time, reason = close_times[i], 'DATA_END'
-    gross = exit_px / ep - 1 if exit_px is not None else None
+    gross = ((shares * exit_px + cash) / initial_notional - 1
+             if exit_px is not None else None)
     return {'exit_method': exit_id, 'exit_time': exit_time, 'exit_price': exit_px,
             'exit_reason': reason, 'mfe_pct': mfe, 'mae_pct': mae,
             'gross_pnl_pct': gross, 'data_quality': 'right_censored' if reason == 'DATA_END' else 'good',
-            'mark_price': closes[n-1] if reason == 'DATA_END' else None}
+            'mark_price': closes[n-1] if reason == 'DATA_END' else None,
+            'cash_dividend_per_initial_share': cash,
+            'split_factor_cumulative': split_factor, 'shares_at_exit': shares}
 
 
 def _finalize(result, cost_pct, position_usd):
@@ -116,19 +146,62 @@ def _finalize(result, cost_pct, position_usd):
     return result
 
 
-def simulate_daily(entry, bars, exit_id, cost_pct=.002):
+def _action_events(actions, days, security_id):
+    if actions is None:
+        raise ValueError('RAW_ASOF_ACTIONS_REQUIRED')
+    if actions.empty:
+        return {}
+    required = {'security_id', 'action_type', 'ex_date', 'ratio', 'cash_amount'}
+    if not required.issubset(actions):
+        raise ValueError('ACTIONS_MISSING_FIELDS:' + ','.join(sorted(required-set(actions))))
+    use = actions[actions.security_id.astype(str) == str(security_id)].copy()
+    use['ex_date'] = pd.to_datetime(use.ex_date).dt.tz_localize(None).dt.normalize()
+    day_index = {pd.Timestamp(day).tz_localize(None).normalize(): i for i, day in enumerate(days)}
+    result = {}
+    for record in use.to_dict('records'):
+        idx = day_index.get(pd.Timestamp(record['ex_date']).tz_localize(None).normalize())
+        if idx is None:
+            continue
+        kind = str(record['action_type']).lower()
+        if kind in ('split', 'reverse_split'):
+            ratio = pd.to_numeric(record.get('ratio'), errors='coerce')
+            if not np.isfinite(ratio) or ratio <= 0:
+                raise ValueError(f'ACTION_FACTOR_INVALID:{security_id}:{record["ex_date"]}')
+            record['ratio'] = float(ratio)
+        elif kind == 'cash_dividend':
+            cash = pd.to_numeric(record.get('cash_amount'), errors='coerce')
+            if not np.isfinite(cash) or cash < 0:
+                raise ValueError(f'ACTION_CASH_INVALID:{security_id}:{record["ex_date"]}')
+            record['cash_amount'] = float(cash)
+        else:
+            raise ValueError(f'ACTION_TYPE_UNSUPPORTED:{security_id}:{kind}')
+        record['action_type'] = kind
+        result.setdefault(idx, []).append(record)
+    return result
+
+
+def simulate_daily(entry, bars, exit_id, cost_pct=.002, actions=None):
     d = _prepare_bars(bars)
     entry_day = _entry_day(entry['entry_time'])
     d = d[_bar_days(d['date']) >= entry_day].head(40).reset_index(drop=True)
     if d.empty:
         return {'data_quality': 'missing_future_bars', 'exit_method': exit_id}
+    raw = str(entry.get('price_basis', '')) == 'raw_asof'
+    if raw:
+        if not entry.get('security_id'):
+            raise ValueError('RAW_ASOF_SECURITY_ID_REQUIRED')
+        if 'security_id' not in d or d.security_id.astype(str).nunique() != 1:
+            raise ValueError('RAW_ASOF_DAILY_SECURITY_ID_REQUIRED')
+        if not np.isclose(float(entry['entry_price']), float(d.open.iloc[0]), rtol=1e-6):
+            raise ValueError('RAW_ASOF_ENTRY_OPEN_MISMATCH')
+    events = _action_events(actions, _bar_days(d.date), entry.get('security_id')) if raw else {}
     result = _simulate_core(
         entry, exit_id,
         d['open'].to_numpy(float), d['high'].to_numpy(float), d['low'].to_numpy(float),
         d['close'].to_numpy(float),
         _session_open_times(d['date']), _session_close_times(d['date']),
         d['atr14'].to_numpy(float) if 'atr14' in d.columns else np.full(len(d), np.nan),
-        len(d))
+        len(d), events, raw)
     return _finalize(result, cost_pct, float(entry.get('position_usd', 5000)))
 
 
@@ -139,21 +212,106 @@ def _stock_arrays(g):
             'atr14': g['atr14'].to_numpy(float) if 'atr14' in g.columns else np.full(len(g), np.nan),
             'day': _bar_days(g['date']).astype('int64').to_numpy(),
             'open_times': _session_open_times(g['date']),
-            'close_times': _session_close_times(g['date'])}
+            'close_times': _session_close_times(g['date']),
+            'security_id': str(g.security_id.iloc[0]) if 'security_id' in g else None}
 
 
-def run_exit_matrix(entries, daily_bars, costs=(.001,.002,.005,.01)):
+def _prepare_quality(quality):
+    if quality is None:
+        raise ValueError('RAW_ASOF_QUALITY_REQUIRED')
+    required={'security_id','from_session','to_session','quality_status','reason'}
+    if not required.issubset(quality):
+        raise ValueError('QUALITY_MISSING_FIELDS:' + ','.join(sorted(required-set(quality))))
+    q=quality.copy()
+    q['security_id']=q.security_id.astype(str)
+    q['from_session']=pd.to_datetime(q.from_session,errors='coerce').dt.normalize()
+    q['to_session']=pd.to_datetime(q.to_session,errors='coerce').dt.normalize()
+    q['quality_status']=q.quality_status.astype(str).str.lower()
+    return q
+
+
+def _quality_verdict(entry, stock_bars, quality):
+    """核验区间必须覆盖入场日起可见的最多 40 个退出交易日。"""
+    sec=str(entry.get('security_id','')); start=_entry_day(entry['entry_time'])
+    days=_bar_days(stock_bars.date)
+    future=days[days>=start].head(40)
+    if future.empty:
+        return False,'MISSING_FUTURE_BARS'
+    end=pd.Timestamp(future.iloc[-1]).normalize()
+    candidates=quality[(quality.security_id==sec)&
+        (quality.from_session.notna())&(quality.from_session<=start)&
+        (quality.to_session.isna()|(quality.to_session>=end))]
+    if candidates.empty:
+        return False,'QUALITY_INTERVAL_MISSING'
+    if len(candidates)!=1:
+        return False,'QUALITY_INTERVAL_AMBIGUOUS'
+    row=candidates.iloc[0]; reason=str(row.reason).strip()
+    if row.quality_status!='verified' or (reason and reason.lower()!='nan'):
+        return False,reason if reason and reason.lower()!='nan' else 'QUALITY_NOT_VERIFIED'
+    return True,''
+
+
+def run_exit_matrix(entries, daily_bars, costs=(.001,.002,.005,.01), actions=None,
+                    quality=None):
+    raw_mode = 'price_basis' in entries and entries['price_basis'].eq('raw_asof').any()
+    if raw_mode and not entries['price_basis'].eq('raw_asof').all():
+        raise ValueError('MIXED_PRICE_BASIS')
+    if raw_mode and actions is None:
+        raise ValueError('RAW_ASOF_ACTIONS_REQUIRED')
     daily = daily_bars.copy(); daily['date'] = pd.to_datetime(daily['date'], utc=True)
-    enriched = [add_atr(g).assign(stock=code) for code,g in daily.groupby('stock')]
+    quality_table=_prepare_quality(quality) if raw_mode else None
+    quality_verdicts={}
+    if raw_mode:
+        for idx,entry in entries.iterrows():
+            stock_bars=daily[daily.stock==entry.stock]
+            quality_verdicts[idx]=_quality_verdict(entry,stock_bars,quality_table)
+        eligible_ids={str(entries.loc[idx].get('security_id')) for idx,(ok,_) in quality_verdicts.items() if ok}
+    if raw_mode:
+        required = {'security_id','date','open','high','low','close','volume'}
+        if not required.issubset(daily):
+            raise ValueError('RAW_DAILY_MISSING_FIELDS:' + ','.join(sorted(required-set(daily))))
+        enriched=[]
+        for code,g in daily.groupby('stock'):
+            if g.security_id.astype(str).nunique() != 1:
+                raise ValueError(f'RAW_DAILY_SECURITY_ID_AMBIGUOUS:{code}')
+            sec=str(g.security_id.iloc[0])
+            if sec not in eligible_ids:
+                enriched.append(g.assign(atr14=np.nan)); continue
+            if not actions.empty and 'security_id' not in actions:
+                raise ValueError('ACTION_SECURITY_ID_MISSING')
+            sec_actions=(actions[actions.security_id.astype(str)==sec] if not actions.empty else actions)
+            raw=g.rename(columns={'date':'session'}).copy()
+            raw['session']=pd.to_datetime(raw.session).dt.tz_localize(None)
+            panel=build_asof_panel(raw,sec_actions)
+            item=g.sort_values('date').reset_index(drop=True).copy()
+            item['atr14']=panel.asof_atr.to_numpy(); enriched.append(item)
+    else:
+        enriched = [add_atr(g).assign(stock=code) for code,g in daily.groupby('stock')]
     daily = pd.concat(enriched, ignore_index=True) if enriched else daily
     prep = {code: _stock_arrays(g.reset_index(drop=True)) for code, g in daily.groupby('stock')}
+    action_maps={}
+    if raw_mode:
+        for code,p in prep.items():
+            action_maps[code]=_action_events(actions,pd.to_datetime(p['day']),p['security_id'])
     missing = {'data_quality': 'missing_future_bars'}
     rows=[]
-    for _, entry in entries.iterrows():
+    for entry_idx, entry in entries.iterrows():
         base=entry.to_dict(); position_usd=float(entry.get('position_usd',5000))
+        if raw_mode and not quality_verdicts[entry_idx][0]:
+            rejected=dict(base,data_quality='quality_rejected',
+                          quality_reject_reason=quality_verdicts[entry_idx][1],
+                          exit_time=None,exit_price=None,exit_reason='QUALITY_REJECTED',
+                          gross_pnl_pct=None,net_pnl_pct=None,net_pnl_usd=None,
+                          mfe_pct=None,mae_pct=None)
+            for exit_id in EXIT_IDS:
+                for cost in costs:
+                    rows.append(dict(rejected,cost_scenario=cost,exit_method=exit_id))
+            continue
         p=prep.get(entry.stock)
         start=end=0
         if p is not None:
+            if raw_mode and str(entry.get('security_id')) != p['security_id']:
+                raise ValueError(f'ENTRY_DAILY_SECURITY_ID_MISMATCH:{entry.stock}')
             # 含成交当日：从入场交易日开始的 40 个交易日。
             start=int(np.searchsorted(p['day'], _entry_day(entry['entry_time']).value, side='left'))
             end=min(start+40, len(p['day']))
@@ -167,9 +325,14 @@ def run_exit_matrix(entries, daily_bars, costs=(.001,.002,.005,.01)):
         closes=p['close'][sl]; atrs=p['atr14'][sl]
         open_times=p['open_times'][sl]; close_times=p['close_times'][sl]
         n=end-start
+        if raw_mode and not np.isclose(float(entry['entry_price']), float(opens[0]), rtol=1e-6):
+            raise ValueError(f'RAW_ASOF_ENTRY_OPEN_MISMATCH:{entry.stock}:{entry.entry_time}')
         for exit_id in EXIT_IDS:
             # 退出路径与成本无关：只模拟一次，再按成本推导净收益。
-            result=_simulate_core(entry, exit_id, opens, highs, lows, closes, open_times, close_times, atrs, n)
+            events = ({absolute-start: records for absolute,records in action_maps[entry.stock].items()
+                       if start <= absolute < end} if raw_mode else {})
+            result=_simulate_core(entry, exit_id, opens, highs, lows, closes, open_times,
+                                  close_times, atrs, n, events, raw_mode)
             gross=result.get('gross_pnl_pct')
             for cost in costs:
                 row=dict(base, cost_scenario=cost, **result)
@@ -213,6 +376,8 @@ def apply_matrix_portfolio(matrix: pd.DataFrame, max_positions: int = 3) -> pd.D
 def main():
     p=argparse.ArgumentParser(description='运行 E1-E11 日线退出矩阵')
     p.add_argument('--manifest',required=True);p.add_argument('--entries',required=True);p.add_argument('--daily',required=True)
+    p.add_argument('--actions', help='raw_asof 必填，公司行动表')
+    p.add_argument('--quality', help='raw_asof 必填，逐 security_id 核验区间表')
     p.add_argument('--output',required=True)
     p.add_argument('--groups',default='ABCD',
                    help='实验分组，A/B/C/D 的有序子集，默认 ABCD（例如 ABC）')
@@ -235,7 +400,12 @@ def main():
     missing=set(groups)-set(entries.experiment)
     if missing:
         raise SystemExit(f'entries 缺少实验分组: {",".join(sorted(missing))}')
-    out=run_exit_matrix(entries,pd.read_csv(args.daily))
+    raw_mode='price_basis' in entries and entries.price_basis.eq('raw_asof').any()
+    if raw_mode and (not args.actions or not args.quality):
+        p.error('raw_asof entries 必须指定 --actions 与 --quality')
+    out=run_exit_matrix(entries,read_frame(args.daily),
+                        actions=read_frame(args.actions) if args.actions else None,
+                        quality=read_frame(args.quality) if args.quality else None)
     target=Path(args.output)
     if target.exists(): raise FileExistsError(f'禁止覆盖实验产物: {target}')
     target.parent.mkdir(parents=True,exist_ok=True);out.to_csv(target,index=False)

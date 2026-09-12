@@ -13,6 +13,8 @@ import yaml
 
 ROOT=Path(__file__).resolve().parents[2];sys.path.insert(0,str(ROOT))
 from scripts.data.io_utils import read_frame,write_frame
+from scripts.data.asof_feature_panel import build_asof_panel, _factors_by_ex_date
+from scripts.data.price_views import build_price_view, ADJUSTABLE_ACTIONS
 from scripts.live_trading.setup_features import FEATURE_VERSION
 from scripts.live_trading.setup_state_machine import build_setup_candidate,transition
 
@@ -88,7 +90,47 @@ def _snapshots(bars,cfg):
             'quality':{'status':'pass' if finite else 'fail','reasons':[] if finite else ['NON_FINITE_REQUIRED_FEATURE']}}
 
 
-def generate(daily:pd.DataFrame,config:dict,llm_labels=None,start=None,end=None,progress=False):
+def _raw_asof_snapshots(bars, actions, cfg):
+    """按行动生效日分段；段内无新行动，可共享同一 as-of 视图但只取当日快照。"""
+    raw = bars.rename(columns={'date': 'session'})
+    panel = build_asof_panel(raw, actions)
+    by_ex = _factors_by_ex_date(actions, raw)
+    starts = [0] + [i for i, day in enumerate(bars.date) if i and day in by_ex]
+    starts = sorted(set(starts))
+    result = [None] * len(bars)
+    filtered = (actions[actions.action_type.astype(str).str.lower().isin(ADJUSTABLE_ACTIONS)].copy()
+                if actions is not None and not actions.empty else pd.DataFrame(
+                    columns=['security_id', 'action_type', 'ex_date', 'ratio', 'cash_amount']))
+    if not filtered.empty:
+        # 窗口开始前的行动不作用于任何输入 bar；尤其不能要求窗口外股息的前收盘。
+        filtered = filtered[pd.to_datetime(filtered.ex_date).dt.normalize() > bars.date.min()].copy()
+    for pos, begin in enumerate(starts):
+        end = starts[pos + 1] if pos + 1 < len(starts) else len(bars)
+        cutoff = bars.date.iloc[end - 1]
+        view = build_price_view(raw, filtered, price_basis='asof_adjusted', as_of=cutoff)
+        adjusted = view.rename(columns={'session': 'date'})
+        segment = list(_snapshots(adjusted, cfg))
+        for i in range(begin, end):
+            snapshot = segment[i]
+            if snapshot is not None:
+                snapshot['feature_version'] = FEATURE_VERSION + '-raw-asof-v1'
+                for key, column in (('close', 'asof_close'), ('ma20', 'asof_ma20'),
+                                    ('ma50', 'asof_ma50'), ('ma200', 'asof_ma200'),
+                                    ('atr14', 'asof_atr')):
+                    actual, expected = snapshot['features'][key], panel.loc[i, column]
+                    if pd.notna(actual) and pd.notna(expected) and not np.isclose(
+                            actual, expected, rtol=1e-6, atol=1e-8):
+                        raise ValueError(f'ASOF_FEATURE_MISMATCH:{bars.stock.iloc[0]}:{bars.date.iloc[i]}:{key}')
+            result[i] = snapshot
+    return result, panel
+
+
+def generate(daily:pd.DataFrame,config:dict,llm_labels=None,start=None,end=None,progress=False,
+             *, price_basis='legacy_qfq', actions=None, excluded_security_ids=()):
+    if price_basis not in ('legacy_qfq', 'raw_asof'):
+        raise ValueError('INVALID_PRICE_BASIS')
+    if price_basis == 'raw_asof' and actions is None:
+        raise ValueError('RAW_ASOF_ACTIONS_REQUIRED')
     required={'stock','date','open','high','low','close','volume'}
     if not required.issubset(daily):raise ValueError('daily 缺字段: '+','.join(sorted(required-set(daily))))
     d=daily.copy();d['date']=pd.to_datetime(d.date).dt.tz_localize(None).dt.normalize()
@@ -101,7 +143,22 @@ def generate(daily:pd.DataFrame,config:dict,llm_labels=None,start=None,end=None,
     rows=[]
     for code,bars in d.groupby('stock'):
         if code=='US.SPY':continue
-        bars=bars.reset_index(drop=True);state='FALLING';snapshots=_snapshots(bars,baseline_cfg)
+        bars=bars.reset_index(drop=True);state='FALLING'
+        if price_basis == 'raw_asof':
+            if 'security_id' not in bars or bars.security_id.nunique() != 1:
+                raise ValueError(f'SECURITY_ID_REQUIRED:{code}')
+            sec_id = str(bars.security_id.iloc[0])
+            if sec_id in set(map(str, excluded_security_ids)):
+                continue
+            if actions.empty:
+                sec_actions = actions
+            else:
+                if 'security_id' not in actions:
+                    raise ValueError('ACTION_SECURITY_ID_MISSING')
+                sec_actions = actions[actions.security_id.astype(str) == sec_id].copy()
+            snapshots, panel = _raw_asof_snapshots(bars, sec_actions, baseline_cfg)
+        else:
+            snapshots = _snapshots(bars,baseline_cfg)
         for i,snapshot in enumerate(snapshots):
             if snapshot is None or i<minimum-1 or i>=len(bars)-1:continue
             session=bars.date.iloc[i]
@@ -112,12 +169,21 @@ def generate(daily:pd.DataFrame,config:dict,llm_labels=None,start=None,end=None,
             candidate=build_setup_candidate(code,snapshot,state,config=baseline_cfg)
             if not candidate:continue
             nxt=bars.iloc[i+1];setup_id=candidate['setup_id']
-            rows.append(dict(candidate,stock=code,
+            scale = float(panel.loc[i, 'scale_to_next']) if price_basis == 'raw_asof' else 1.0
+            if price_basis == 'raw_asof':
+                for field in ('trigger_price', 'invalidation_price', 'initial_stop',
+                              'max_chase_price', 'risk_per_share'):
+                    if candidate.get(field) is not None:
+                        candidate[field] = float(candidate[field]) * scale
+            row = dict(candidate,stock=code,
                 setup_time=as_of.isoformat(),next_open_time=_market_time(nxt.date,9,30).tz_convert('UTC').isoformat(),
-                next_open_price=float(nxt.open),signal_close=float(bars.close.iloc[i]),
-                atr14=float(snapshot['features']['atr14']),
+                next_open_price=float(nxt.open),signal_close=float(snapshot['features']['close']) * scale,
+                atr14=float(snapshot['features']['atr14']) * scale,
                 weekly_gate=bool(snapshot['features']['weekly_gate']),
-                daily_confirmed=state=='CONFIRMED',llm_decision=labels.get(setup_id,'missing')))
+                daily_confirmed=state=='CONFIRMED',llm_decision=labels.get(setup_id,'missing'))
+            if price_basis == 'raw_asof':
+                row.update(price_basis=price_basis, scale_to_next=scale, security_id=sec_id)
+            rows.append(row)
         if progress:print(f'processed {code}: bars={len(bars)} setups={sum(r["stock"]==code for r in rows)}',flush=True)
     return pd.DataFrame(rows)
 
@@ -125,10 +191,19 @@ def generate(daily:pd.DataFrame,config:dict,llm_labels=None,start=None,end=None,
 def main():
     p=argparse.ArgumentParser(description='从冻结日线生成历史周线/日线Setup')
     p.add_argument('--daily',required=True);p.add_argument('--config',required=True);p.add_argument('--llm-labels')
+    p.add_argument('--price-basis', choices=('legacy_qfq','raw_asof'), default='legacy_qfq')
+    p.add_argument('--actions', help='raw_asof 必填，按 security_id 连接的公司行动表')
+    p.add_argument('--exclude-security-id', action='append', default=[],
+                   help='公司行动或上市日未核验的证券 ID；可重复指定')
     p.add_argument('--start');p.add_argument('--end');p.add_argument('--output',required=True);args=p.parse_args()
     with open(args.config,encoding='utf-8') as fh:cfg=yaml.safe_load(fh) or {}
     labels=read_frame(args.llm_labels) if args.llm_labels else None
-    out=generate(read_frame(args.daily),cfg,labels,args.start,args.end,progress=True)
+    if args.price_basis == 'raw_asof' and not args.actions:
+        p.error('--price-basis raw_asof 必须指定 --actions')
+    out=generate(read_frame(args.daily),cfg,labels,args.start,args.end,progress=True,
+                 price_basis=args.price_basis,
+                 actions=read_frame(args.actions) if args.actions else None,
+                 excluded_security_ids=args.exclude_security_id)
     write_frame(out,args.output);print(f'wrote {len(out)} historical setups to {args.output}')
 
 

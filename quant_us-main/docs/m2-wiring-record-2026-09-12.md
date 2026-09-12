@@ -10,6 +10,7 @@
 | `scripts/data/asof_features.py` | 单决策日的 as-of 特征 + 前视量化 | `21c4978` |
 | `scripts/data/asof_feature_panel.py` | **逐日面板**：每交易日的原始价 + as-of 特征 + 跨日尺度因子 | `0252701` |
 | `scripts/data/price_views.py`（复核修正） | `asof_adjusted` 必须显式 `--as-of`，且只保留 `session <= as_of` | `12c06a7` |
+| `scripts/data/generate_historical_setups.py --price-basis raw_asof` | 由不复权日线逐决策日构造完整周线/日线/枢轴快照；T+1 使用原始开盘，跨行动日换算价格门 | 本轮未提交 |
 
 ## 关键不变量（真实数据已验证）
 
@@ -22,10 +23,9 @@
 
 ## 执行日尺度换算与影响面（真实数据）
 
-新增 `scripts/data/attach_execution_prices.py` + 4 项测试：把 QFQ 口径的价格水平换算到**执行日原始尺度**
-（`level_raw = level_qfq × conv(执行日)`，`conv = raw_close/qfq_close`），并给出 `entry_price_raw`。
+新增 `scripts/data/attach_execution_prices.py`：把**旧 QFQ setup** 的价格水平换算到执行日原始尺度，供迁移诊断；不能代替从逐日 as-of 面板重建 setup。复核后改用执行日**开盘**比率 `conv = raw_open/qfq_open`，避免依赖执行日收盘信息；重复日线键会显式失败。as-of 面板遇行动因子无法计算、跨证券行动或窗口内并购时会隔离或阻断。新实验不得把已经是原始尺度的 as-of 水平再次乘 `conv`。
 
-对样本 11290 个 setup 计算 `exec_conv`（0 缺失）：
+此前用**收盘**比率对样本 11290 个 setup 计算 `exec_conv`（0 缺失），下表是旧数据的**价格尺度差异诊断**，改开盘比率后须重新生成才可沿用具体数字：
 
 | 偏离幅度 | setup 数 | 占比 |
 |---|---:|---:|
@@ -37,21 +37,21 @@
 
 最大偏离：NVDA **40×**、GOOGL 19×、AMZN 19×、AVGO 12×、NFLX 9×。
 
-**这修正了先前的判断**：只要**执行日之后**还有任何行动（**含分红**）就会产生尺度差，因此受影响面是
-**84%，不是 13.5%**；其中 15.7% 的 setup 价格水平相差 2 倍以上。唯一"影响很小"的说法**不成立**——
-必须由修正口径后的**配对重跑**给出结论。注意旧管线在 QFQ 内部自洽，所以这不代表旧结果"错"，
-但**不可与原始价口径的结果直接比较**（尤其 $5 价格门按原始价重新判定、分红不计入原始价收益）。
+**解释边界**：84.2% 衡量的是旧 QFQ 与原始价的单位尺度不同；13.5% 衡量的是 setup 位于**后续拆股**之前。两者分母相同但事件定义不同，不能互相替代，也不能直接推出 84.2% 的交易方向或收益被前视改变。旧管线在 QFQ 内部可能自洽，但其价格门、执行成交与分红处理不能直接拿来声称真实可成交收益。方向和收益影响只能由使用不复权执行价与逐日 as-of 特征的配对重跑确定。
+
+复核又修正 `feature_drift` 的对照日期：旧函数把决策日 as-of 特征与**样本最后一日**的全快照特征比较，混入后续行情变化；现在错法对照也截在同一决策日，只让行动集合不同。此前如有从旧 `feature_drift` 导出的实际样本差异值必须重算；上表的 QFQ/原始价尺度统计与拆股前 setup 计数不由该函数生成，仍保留为各自定义下的诊断数。
 
 ## 尚未完成（M2 的集成步骤）
 
 仍待把上述构件接到实验链，使 A/B/C 重建为：
-1. `generate_historical_setups`：特征取 **as-of 面板**（而非 QFQ 全快照）；`next_open_price`/`signal_close` 取**不复权原始价**；高开/止损门用 `level × scale_to_next` 与 T+1 原始价比较。
-2. `buy_strategy_experiment_runner` / `exit_matrix`：执行价与退出价改用**不复权**日线。
-3. 另建实验编号（如 `BUY-WD-ABC-SURVIVOR-RAW-001`）冻结重跑；与 `SURVIVOR-003` 分离，不覆盖。
+1. `generate_historical_setups` 的 `raw_asof` 模式已接入：按行动生效日切分价格视图，只从决策日当时可见的历史构造完整特征，保留旧 `legacy_qfq` 默认模式供复现。**仍需**对实际 39 只做逐股产物审计，并把主数据质量清单接成自动排除门；目前 `--exclude-security-id` 是人工隔离接口。
+2. `buy_strategy_experiment_runner` 可沿用同一价格口径的 setup 字段；`exit_matrix` 已完成第一版不复权退出会计：拆股/反向拆股换算股数及保护线，现金分红计入总回报并调整保护线，退出 ATR 来自逐日 as-of 面板，入场日只检查成交后的盘中区间。raw 路径要求显式公司行动表、一致的 `security_id` 和覆盖完整观察窗的质量区间，不再允许静默退回旧模拟。质量失败会保留为每个退出/成本单元的 `quality_rejected` 行。
+3. 新增 `build_research_quality_intervals.py`，把证券审计与 symbol→security_id 映射转换成不可覆盖的质量区间。实际 40 只结果：**19 verified / 21 rejected**；拒绝包括 17 个未知上市日、2 个仅首根日线推断的上市日、SPY（非交易样本且上市日未知）和 HON 未解析行动。产物为本机 `research_quality_intervals-v2.csv`。
+4. **尚需**对实际 39 只逐股运行 raw setup/退出审计，再另建实验编号（如 `BUY-WD-ABC-SURVIVOR-RAW-001`）冻结重跑；与 `SURVIVOR-003` 分离，不覆盖。
 
 ## 放行与结论纪律
 
 - **M1 未放行 → M2 `blocked`**：18 只上市日未核验、旧实验用 QFQ 执行价与全快照特征。
 - 在本轮修正口径重跑完成**之前**，不得发布新的 A/B/C 收益结论；`1526/11290` 的前视影响面须由修正后的**配对重跑**检验，不得沿用"影响很小"的推测。
 
-全量测试：**558 passed**。面板产物：`data/survivor_sample_audit/asof_panels/*.csv.gz` 与 `asof_panel_summary.csv`（本机，gitignore）。
+原接线提交时全量测试为 **558 passed**；本轮新增完整 setup 构造器、退出公司行动会计和自动质量区间测试。退出与质量构造器针对性测试为 **21 passed**；最新全量测试为 **584 passed、16 warnings**。面板产物：`data/survivor_sample_audit/asof_panels/*.csv.gz`、`asof_panel_summary.csv` 与 `research_quality_intervals-v2.csv`（本机，gitignore）。
