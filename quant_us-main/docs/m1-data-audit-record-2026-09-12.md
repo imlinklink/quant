@@ -66,6 +66,30 @@ US.JPM  US.KO    US.NBIS  US.NEE  US.PG    US.PLD  US.SHW  US.SPY  US.XOM
 1. **ticker 映射失败清单** `ticker_mapping_failures.csv`。
 2. **`source_manifest.json`**（原始响应与哈希、下载时间、请求参数）。
 
+## 完成（M1 全部审计产物）
+
+| 产物 | 结果 |
+|---|---|
+| `security_quality.csv` | 40 只；资产类型/交易所/上市日质量；2 只 ETF 误标已纠正 |
+| `price_action_checks.csv` / `price_action_mismatches.csv` | 窗口内 850 条行动，843 一致（99.2%），3 条不一致（全在 HON） |
+| `ticker_mapping_failures.csv` | **空**（40/40 映射成功，0 未映射/0 歧义） |
+| `source_manifest.json` | QFQ 520 分区、不复权 449 分区、检查点、basicinfo 归档、公司行动原始响应的聚合哈希 |
+| `quality_summary.json` | 汇总（含 `corporate_action_unresolved: [US.HON]`） |
+
+全部位于 `data/survivor_sample_audit/`（本机，gitignore）。
+
+## M1 放行判定（§4.3）
+
+| 门 | 状态 |
+|---|---|
+| `security_id` 映射无歧义 | **通过**（0 失败） |
+| T 日 universe 只用 T−1 价格/流动性 | **通过**（代码强制 + 测试） |
+| 未解析公司行动计数并阻断 | **通过**（US.HON 已标） |
+| 执行价来自**不复权**序列、特征价按决策时点构造 | **未通过**——SURVIVOR-003 用的是 QFQ 执行价与全快照特征；已备好不复权数据与 as-of 构造器，须在 M2 重建 |
+| 18 只上市日未知的历史区间不得标 `verified` | **已登记缺口**，M2 须据此排除或降级 |
+
+**结论：M1 未放行 → 按方案 M2 标 `blocked`**。可在 M2 前完成的前置已就绪（不复权数据、as-of 特征构造器、行动对账）；M2 需用**不复权执行价 + 逐决策日 as-of 特征**重建 A/B/C，并与 `BUY-WD-ABC-SURVIVOR-003` 分离、另建实验编号。
+
 ## 放行判定（§4.3）
 
 **M1 未放行**：a) 18 只上市日未核验（历史区间不得入 M2 的已核验集）；b) 不复权执行价与逐日 as-of 特征价尚未构造。按方案，此时 **M2 标 `blocked`**，可并行推进 M3 前向 shadow（但须在拥有账本的本机执行）。
