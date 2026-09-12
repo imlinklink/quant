@@ -18,7 +18,8 @@
 | 历史退市证券 | **不提供**（待探针确认） | `build_security_master_from_futu.py` 只取 `get_stock_basicinfo` 的**当前**目录 |
 | ticker 变更历史 | **不提供** | 富途无 symbol-history 映射接口 |
 | 历史上市/退市日期 | 上市日**提供**；退市日**不提供** | `listing_date`/`list_time` 可用；脚本把 `delisting_date` 写成空字符串 |
-| 公司行动（拆股/股息/…） | **不直接提供**；可由 QFQ 与不复权价差**反推** | `derive_corporate_actions.py`；反推结果标 `unverified`，需人工复核 |
+| 公司行动（拆股/股息/…） | **直接提供**（2026-09-12 实测） | `get_corporate_actions_stock_splits`（`dir_deci_pub_date`/`rate`）、`get_corporate_actions_dividends`（`pub_date`/`ex_date`/`statement`）、`get_corporate_actions_buybacks`；仍无 `observed_at` |
+| 财报日历 | **提供（日期级）** | `get_earnings_calendar` 可回溯多年；含 `earnings_date`/`earnings_timestamp`(≈当日 00:00 ET)/`pub_type`/实际与预测 EPS·营收；**不是精确发布时刻** |
 | 历史日线 | **提供** | `request_history_kline` 支持 `AuType.QFQ` 与不复权 |
 | 原始可交易价 | **提供** | 取不复权（`AuType.NONE`）序列 |
 | 下载权 / 长期保存权 / 研究用途许可 | **需使用者确认** | 由富途条款决定，非 API 能力 |
