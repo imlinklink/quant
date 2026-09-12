@@ -60,7 +60,8 @@ def propagate_quality(liquidity, quality):
 def run_pipeline(*,master_path,start,end,universe_start,universe_end,run_id,
                  raw_root='data/market_history/raw',runs_root='data/market_history/runs',
                  checkpoint='data/market_history/checkpoints/download_state.json',
-                 skip_download=False,ctx=None,min_price=5.,min_dollar_volume=5_000_000.):
+                 skip_download=False,ctx=None,min_price=5.,min_dollar_volume=5_000_000.,
+                 verified_master=False):
     run_dir=Path(runs_root)/run_id
     if run_dir.exists() and any(run_dir.iterdir()):raise FileExistsError(f'run-id 已存在，禁止覆盖: {run_dir}')
     run_dir.mkdir(parents=True,exist_ok=False)
@@ -96,8 +97,13 @@ def run_pipeline(*,master_path,start,end,universe_start,universe_end,run_id,
         daily=_filter_daily(normalize(raw,'day'),master,start,end)
         if daily.empty:raise ValueError('标准化后没有日线数据')
         write_frame(daily,run_dir/'daily.csv.gz')
-        master=reconcile_listing_dates(master,daily,start)
-        master.to_csv(run_dir/'security_master.csv',index=False)
+        if verified_master:
+            # 已核验上市日：不用首根历史日线覆盖真实上市日（设计 §0 组件表）。
+            master.to_csv(run_dir/'security_master.csv',index=False)
+            state['stages']['listing_dates']={'status':'preserved_verified'}
+        else:
+            master=reconcile_listing_dates(master,daily,start)
+            master.to_csv(run_dir/'security_master.csv',index=False)
         state['stages']['normalize']={'status':'complete','rows':len(daily)};_write_json(run_dir/'pipeline.json',state)
 
         spy=daily[daily.stock=='US.SPY']
@@ -140,6 +146,8 @@ def main():
     p.add_argument('--raw-root',default='data/market_history/raw');p.add_argument('--runs-root',default='data/market_history/runs')
     p.add_argument('--checkpoint',default='data/market_history/checkpoints/download_state.json')
     p.add_argument('--skip-download',action='store_true');p.add_argument('--host',default='127.0.0.1');p.add_argument('--port',type=int,default=11111)
+    p.add_argument('--verified-master',action='store_true',
+                   help='已核验主数据模式：不覆盖真实上市日，供 v2（security_id 键）正式流程使用')
     p.add_argument('--min-price',type=float,default=5.);p.add_argument('--min-dollar-volume',type=float,default=5_000_000.)
     args=p.parse_args();ctx=None
     try:
@@ -150,7 +158,7 @@ def main():
             universe_start=args.universe_start,universe_end=args.universe_end,run_id=args.run_id,
             raw_root=args.raw_root,runs_root=args.runs_root,checkpoint=args.checkpoint,
             skip_download=args.skip_download,ctx=ctx,min_price=args.min_price,
-            min_dollar_volume=args.min_dollar_volume)
+            min_dollar_volume=args.min_dollar_volume,verified_master=args.verified_master)
         print(json.dumps({'run_id':args.run_id,'status':result['status'],'stages':result['stages']},ensure_ascii=False,indent=2));return 0
     finally:
         if ctx is not None:ctx.close()
