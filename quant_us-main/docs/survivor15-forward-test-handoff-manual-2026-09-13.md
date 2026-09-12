@@ -18,7 +18,7 @@
 
 **2026-09-13 实施更新：**B1 的不可覆盖 `AuType.NONE` 日快照、行动快照和哈希校验已由 `capture_forward_raw_day.py` 实现；B2 的 T日 pending/T+1 原始开盘结算由 `run_forward_raw_day.py` 实现；B3 已支持 `--periods-json` 并校验冻结早于前向起点；B4 对 2026-06-22→23 做了15只工程回放，3/3 setup ID 与批处理一致、5条 A/B/C 入场、0拒绝。前向登记模板位于 `experiments/forward-survivor15-20260914/`。这轮历史回放约544秒；结算改为直接换算后降至约1.7秒，T日完整状态重建仍约271秒。
 
-当前状态为 **`forward_frozen / awaiting_first_collection_session`**。正式实验 `FWD-SURV15-20260914-001` 已在提交 `22f39d6` 上冻结，Manifest 位于 `data/forward_runs/FWD-SURV15-20260914-001/frozen/manifest.json`，`formal=true`，校验结果为 `valid=true`，收集期为 2026-09-14—2027-03-14。本轮代码基线全量测试为600项通过；结果成熟前不执行“正式前向绩效报告”。
+当前状态为 **`forward_frozen / awaiting_first_collection_session`**。正式实验统一使用 `FWD-SURV15-20260914-003`，Manifest 位于 `data/forward_runs/FWD-SURV15-20260914-003/frozen/manifest.json`，`formal=true`，收集期为 2026-09-14—2027-03-14。本轮代码基线全量测试为600项通过；结果成熟前不执行“正式前向绩效报告”。`001` 是首日前预检目录；`002` 是发现纯文档提交也会触发严格 `GIT_COMMIT_MISMATCH` 后保留的冻结演练，不作为正式运行。手册提交完成后才最后生成 `003`，此后正式收集期间不得切换 HEAD；若必须提交修复，关闭该 run-id 并创建新批次。
 
 2026-09-13 已完成首日前工程预检：归档 2026-09-11 的 `AuType.NONE` 日线和行动快照，15/15 证券成功、哈希齐全；决策重建产生1条 `US.BAC` pending setup。预检产物固定放在 `preflight/2026-09-11/`，**不计入**正式 A/B/C 样本。2026-09-14 日线完成并归档后，可以单独结算该预检信号以验证 T+1 链路，但结算输出也必须留在 `preflight/`，不得写入正式 `entries/`。
 
