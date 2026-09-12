@@ -139,3 +139,17 @@ python3 scripts/experiment_manifest.py ... --formal --run-id ... --master-versio
 ```
 
 测试：520 passed（含本追加的 5+5 项）。状态仍为 **engineering_pass**；即便跑通，结论也只是"当前存续样本、存在幸存者偏差"。
+
+## 契约对齐（2026-09-12，提交 `8f7d65b`）
+
+用户把技术设计收窄为**固定存续普通股样本**（不纳入退市）后，代码已对齐新契约：
+
+- `security_master_v2`：主表去掉 `delisted_at` / `delisting_reason` / `source_published_at`；`HASH_FIELDS` 同步收窄；`ACTION_TYPES` 去掉 `delisting_settlement`。
+- 审计：`TERMINAL_OUTCOME_UNKNOWN` → **`corporate_action_unresolved`**（并购/分拆无 ratio/cash 即视为价格无法衔接，排除绩效）。
+- `price_views.terminal_outcome_flags` → **`corporate_action_flags`**（标记 `corporate_action_unresolved` / `NO_BARS`）。
+- universe v2 原因枚举去掉 `DELISTED`，新增 **`CORPORATE_ACTION_UNRESOLVED`**；该类证券一律不 eligible。
+- `experiment_manifest` 正式字段新增 **`sample_selection_date`** 与 **`survivor_scope`**（`--sample-selection-date` / `--survivor-scope`），`formal=true` 时必填。
+- 富途导入器主数据行同步去掉退市字段。
+- 顺带修掉一个真实缺陷：universe v2 原先 `eligible` 未排除未解析公司行动，会被 `np.where(eligible,'ELIGIBLE',…)` 覆盖；现已把排除并进 `tradable`。
+
+重复提醒的结论边界：历史回测只能说明策略在**所选存续股票**中的表现，不代表当时全市场，也不能消除幸存者偏差；更强的验证应从样本冻结后开始前瞻运行。
