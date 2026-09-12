@@ -109,3 +109,33 @@ python3 scripts/data/audit_security_master_v2.py \
 | `docs/source-assessment-template-2026-09-12.md` | §2.3 数据源能力与许可评估模板（退市/ticker/行动/日线/下载与保存权/研究许可） |
 
 两份均为**待用户决策**项：仓库内无覆盖退市/ticker 变更/公司行动的来源，阶段 1 未决前真实数据管道不能推进。
+
+## 数据源选定与富途接入（2026-09-12 追加，提交 `7081c84` / `df21707`）
+
+**使用者决定：使用富途，且不引入退市样本（范围 = 当前存续证券）。** 结论必须显式标注幸存者偏差。
+
+富途能给 / 不能给（代码查证）：
+
+- 给：当前证券基本资料（含上市日、类型）、历史日线（`AuType.QFQ` 与不复权）。
+- 不给：退市记录、ticker 变更历史、公司行动表。
+
+为在富途数据上真正跑通新管道，新增：
+
+| 文件 | 作用 |
+|---|---|
+| `scripts/data/derive_corporate_actions.py` | 由 QFQ 与不复权价差**反推**公司行动（拆股可靠、股息近似），标 `unverified` |
+| `scripts/data/probe_futu_source.py` | 富途能力探针（只读，本机 OpenD 运行），输出 `source_assessment.json` |
+| `scripts/data/import_security_master_v2_from_futu.py` | 富途当前目录 → `security_master_v2.csv` / `symbol_history.csv`（`delisted_at` 留空），并归档原始响应 |
+
+已知局限（写入评估）：`security_id` 由代码确定性生成（`SEC-US-AAPL`），富途无改名映射，故**改名会表现为新证券**；公司行动为反推未核验；`source_observed_at` 不可证 → `quality_status=unverified`。
+
+富途路线下的完整命令链（本机 OpenD）：
+
+```bash
+python3 scripts/data/import_security_master_v2_from_futu.py --output-dir data/security_master_runs/futu-2026-09-12
+python3 scripts/data/build_price_views.py --bars <不复权日线> --actions <反推行动> --as-of <日期> --output-dir <双视图>
+python3 scripts/data/build_historical_universe_v2.py --master ... --symbols ... --liquidity ... --calendar ...
+python3 scripts/experiment_manifest.py ... --formal --run-id ... --master-version ... --raw-price-version ... --asof-price-version ... --acceptance <json>
+```
+
+测试：520 passed（含本追加的 5+5 项）。状态仍为 **engineering_pass**；即便跑通，结论也只是"当前存续样本、存在幸存者偏差"。
