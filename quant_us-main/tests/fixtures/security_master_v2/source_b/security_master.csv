@@ -1,0 +1,2 @@
+security_id,issuer_id,asset_type,exchange,currency,valid_from,valid_to,listed_at,delisted_at,delisting_reason,source_record_id,source_published_at,source_observed_at,quality_status
+SEC-000004,ISS-000004,stock,NYSE,USD,2017-01-01,,2017-01-01,,,m-5,2017-01-01T12:00:00Z,2017-01-01T12:05:00Z,verified

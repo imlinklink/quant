@@ -1,0 +1,7 @@
+security_id,symbol,exchange,valid_from,valid_to,source_record_id,quality_status
+SEC-000001,US.OLD,NASDAQ,2014-01-01,2019-01-01,rec-1,verified
+SEC-000001,US.NEW,NASDAQ,2019-01-01,,rec-2,verified
+SEC-000002,US.DEL,NASDAQ,2015-06-01,2020-03-15,rec-3,verified
+SEC-000003,US.REUSE,NYSE,2016-01-01,2018-01-01,rec-4,verified
+SEC-000003,US.KEEP,NYSE,2018-01-01,,rec-5,verified
+SEC-000004,US.REUSE,NASDAQ,2018-01-01,,rec-6,verified

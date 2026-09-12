@@ -1,0 +1,5 @@
+security_id,issuer_id,asset_type,exchange,currency,valid_from,valid_to,listed_at,delisted_at,delisting_reason,source_record_id,source_published_at,source_observed_at,quality_status
+SEC-000001,ISS-000001,stock,NASDAQ,USD,2014-01-01,,2014-01-01,,,m-1,2014-01-01T12:00:00Z,2014-01-01T12:05:00Z,verified
+SEC-000002,ISS-000002,stock,NASDAQ,USD,2015-06-01,,2015-06-01,2020-03-15,merger,m-2,2015-06-01T12:00:00Z,2015-06-01T12:05:00Z,verified
+SEC-000003,ISS-000003,stock,NYSE,USD,2016-01-01,,2016-01-01,,,m-3,2016-01-01T12:00:00Z,2016-01-01T12:05:00Z,verified
+SEC-000004,ISS-000004,stock,NASDAQ,USD,2017-01-01,,2017-01-01,,,m-4,2017-01-01T12:00:00Z,2017-01-01T12:05:00Z,verified

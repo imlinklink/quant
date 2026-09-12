@@ -1,0 +1,4 @@
+security_id,action_type,ex_date,effective_at,ratio,cash_amount,source_record_id,source_published_at,source_observed_at
+SEC-000001,split,2018-05-01,2018-05-01T13:30:00Z,2,0,act-1,2018-04-20T12:00:00Z,2018-04-20T12:05:00Z
+SEC-000002,merger,2020-03-15,2020-03-15T13:30:00Z,1.5,0,act-2,2020-03-01T12:00:00Z,2020-03-01T12:05:00Z
+SEC-000003,reverse_split,2019-06-01,2019-06-01T13:30:00Z,0.5,0,act-3,2019-05-20T12:00:00Z,2019-05-20T12:05:00Z

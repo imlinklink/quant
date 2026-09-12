@@ -1,0 +1,3 @@
+security_id,symbol,exchange,valid_from,valid_to,source_record_id,quality_status
+SEC-000009,US.SAME,NASDAQ,2016-01-01,2020-01-01,rec-a,verified
+SEC-000010,US.SAME,NASDAQ,2018-01-01,,rec-b,verified
