@@ -26,12 +26,21 @@ US.JPM  US.KO    US.NBIS  US.NEE  US.PG    US.PLD  US.SHW  US.SPY  US.XOM
 
 （`US.SPY` 仅作交易日历，不入主样本。）有真实上市日的 22 只可直接用于区间判定。
 
+## 已完成：不复权日线与价格/行动对账（§4.2）
+
+- 下载器新增 `--autype none`（`download_market_history.py`）；为 40 只下载**不复权**日线：**449 个分区、0 失败**，落在 `raw/day/none/year=YYYY/`（与 QFQ 分目录，互不覆盖）。
+- 为 39 只取公司行动 **1601 条**（1545 分红 + 56 拆股）。
+- 逐条核对窗口内（2015 起）行动：把 QFQ/不复权 的复权因子步长与行动预期对比。
+  - **窗口内行动 850 条，一致 843 条（99.2%），不一致 3 条**。
+  - 不一致**全部在 `US.HON`**：2026-06-29 的"拆股"步长 0.916≠0.5，且其因子出现 >1（0.75~1.09），符合**分拆/非简单拆股**特征 → 标 **`corporate_action_unresolved`**，M2 中剔除其绩效。
+  - （先前看起来"不一致"的 BAC/CAT/AMZN 等，是**窗口外的历史拆股**，属正常，不计入。）
+- 产出：`data/survivor_sample_audit/price_action_checks.csv`、`price_action_mismatches.csv`、`quality_summary.json`。
+
 ## 尚未完成（M1 剩余项）
 
-1. **不复权日线批次 + 公司行动原始响应 + 哈希**：需按 §4.2 为 39 只另存**同一批次的不复权日线**（QFQ 只作交叉比较，不得充当原始成交价）。此前仅下载了 QFQ；不复权需另跑一次下载（`fetch_pages(..., autype=AuType.NONE)`）。
-2. **价格/行动逐只审计**：除权日前后股数与价格转换、美元成交额、跳空退出、分红处理；未解析并购/分拆标 `corporate_action_unresolved` 并剔除绩效。产出 `price_action_checks.csv`。
-3. **ticker 映射失败清单** `ticker_mapping_failures.csv`。
-4. **`source_manifest.json` / `quality_summary.json`**，逐项注明证据来源、问题证券/日期、处理决定与复核人。
+1. **逐日 as-of 特征价**：`build_price_views.py` 现要求 `--as-of`，多年回放须**按每个决策时点重建** as-of 视图（不得用 2026 年一张快照算所有历史均线）。
+2. **ticker 映射失败清单** `ticker_mapping_failures.csv`。
+3. **`source_manifest.json`**（原始响应与哈希、下载时间、请求参数）。
 
 ## 放行判定（§4.3）
 

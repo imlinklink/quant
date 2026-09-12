@@ -81,11 +81,14 @@ def failures_for_request(state, codes, kinds, start, end, adjustment):
 
 
 def download(ctx, codes, start, end, output_root, checkpoint, *, kinds=('day',),
-             overwrite=False, futu_types=None, listing_dates=None):
+             overwrite=False, futu_types=None, listing_dates=None, autype='qfq'):
     if futu_types is None:
         from futu import AuType, KLType, Session
-        futu_types = {'day': KLType.K_DAY, 'autype': AuType.QFQ,
-                      'autype_name': 'qfq', 'session': Session.RTH}
+        _AUTYPES = {'qfq': AuType.QFQ, 'none': AuType.NONE, 'hfq': AuType.HFQ}
+        if autype not in _AUTYPES:
+            raise ValueError(f'未知 autype: {autype}（可选 {" / ".join(_AUTYPES)}）')
+        futu_types = {'day': KLType.K_DAY, 'autype': _AUTYPES[autype],
+                      'autype_name': autype, 'session': Session.RTH}
     autype_name=str(futu_types.get('autype_name') or futu_types['autype']).lower().split('.')[-1]
     state = _load_checkpoint(checkpoint); root = Path(output_root)
     for code in codes:
@@ -161,6 +164,8 @@ def main():
         default='data/market_history/raw'); parser.add_argument('--checkpoint',
         default='data/market_history/checkpoints/download_state.json')
     parser.add_argument('--overwrite', action='store_true')
+    parser.add_argument('--autype', default='qfq', choices=('qfq', 'none', 'hfq'),
+                        help='复权口径；正式执行价需用 none（原始可交易价），特征价用 qfq')
     parser.add_argument('--host', default='127.0.0.1'); parser.add_argument('--port', type=int, default=11111)
     args = parser.parse_args()
     master = read_frame(args.master); codes = master.code.dropna().astype(str).unique().tolist()
@@ -171,10 +176,11 @@ def main():
     ctx = OpenQuoteContext(host=args.host, port=args.port)
     try:
         state = download(ctx, codes, args.start, args.end, args.output_root,
-                         args.checkpoint, kinds=('day',), overwrite=args.overwrite)
+                         args.checkpoint, kinds=('day',), overwrite=args.overwrite,
+                         autype=args.autype)
     finally:
         ctx.close()
-    active_failures=failures_for_request(state,codes,('day',),args.start,args.end,'qfq')
+    active_failures=failures_for_request(state,codes,('day',),args.start,args.end,args.autype)
     print(json.dumps({'completed': len(state['completed']), 'failed': len(active_failures)},
                      ensure_ascii=False))
     return 1 if active_failures else 0
