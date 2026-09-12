@@ -21,7 +21,6 @@ from mutifactor.llm.schemas import (
     CANDIDATE_VERDICT_SCHEMA,
     BUY_VETO_SCHEMA,
     MARKET_STATUS_SCHEMA,
-    MARKET_BRIEF_SCHEMA,
 )
 from mutifactor.llm.prompts import DEFAULT_SYSTEM_PROMPT
 
@@ -40,7 +39,6 @@ SCHEMA_MAP = {
     'candidate_review': CANDIDATE_VERDICT_SCHEMA,
     'buy_veto': BUY_VETO_SCHEMA,
     'market_status': MARKET_STATUS_SCHEMA,
-    'market_brief': MARKET_BRIEF_SCHEMA,
 }
 
 
@@ -146,8 +144,7 @@ class LLMAdvisor:
                 last_error = e
 
             if attempt < self.max_retries - 1:
-                # 短退避：避免长 sleep 阻塞 30 秒交易检查热路径
-                time.sleep(0.5)
+                time.sleep(1 * (attempt + 1))
 
         logger.error(f"[LLM] 全部 {self.max_retries} 次尝试失败: {last_error}")
         return None
