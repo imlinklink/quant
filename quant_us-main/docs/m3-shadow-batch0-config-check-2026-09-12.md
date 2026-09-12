@@ -28,10 +28,18 @@
 
 ### 处理（§6 要求：第一批**之前**登记并一致，不得事后换池）
 
-在**第一次前向批次前**二选一并登记配置版本：
+**决策（使用者 2026-09-12）：采用方案 A —— 三池都设为登记的 39 只。**
 
-- **方案 A（推荐，跑同一研究群组）**：把 `dip_buy.watch_list` 与 `trend_breakout.watch_list`（选股）和 `buy_strategy_v2.watch_list`（setup）**都设为登记的 39 只**。需你确认后再改 `config.yaml`。
-- **方案 B（保留现状）**：前向只对 4 只共同候选做增量比较，并分别报告各自分母；与 39 只样本的关系在报告中说明。
+- 已生成 `data/shadow/config_shadow.yaml`（**gitignored**，`data/` 在 `.gitignore:30`）：`dip_buy.watch_list` = `trend_breakout.watch_list` = `buy_strategy_v2.watch_list` = 登记的 39 只；`futu.host=127.0.0.1`（本机运行）。
+- 文件 sha256 前缀：`99fedbb23f8bead2`（登记为配置版本）。
+- **未修改被跟踪的 `config.yaml`**（见下方安全提示）。
+- 每日命令改为带 `--config data/shadow/config_shadow.yaml`（三个脚本均支持 `--config`）。
+
+### 安全提示（既有问题，非本次引入）
+
+`quant_us-main/config.yaml` **被 git 跟踪**，且 `llm.api_key` 是**真实密钥**（非占位/env），自 **initial commit `eba1eda`** 起即存在于仓库历史。建议：轮换该密钥；把密钥改为环境变量或外部引用；将本地配置纳入 `.gitignore`。本次不改动该文件以**避免再次提交密钥**。
+
+原二选一（供记录）：方案 B 为保留现状、只对 4 只共同候选做增量比较。
 
 ## 3. 现有账本批次状态（只读对账）
 
