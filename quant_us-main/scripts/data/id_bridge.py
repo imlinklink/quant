@@ -15,6 +15,14 @@ import pandas as pd
 LIQUIDITY_RENAME = {'previous_close': 'previous_raw_close', 'adv20': 'adv20_usd'}
 
 
+def _naive_dates(series) -> pd.Series:
+    """统一成无时区的自然日，避免 tz-aware 与 naive 比较报错。"""
+    stamps = pd.to_datetime(series, errors='coerce')
+    if getattr(stamps.dt, 'tz', None) is not None:
+        stamps = stamps.dt.tz_convert('UTC').dt.tz_localize(None)
+    return stamps.dt.normalize()
+
+
 def attach_security_id(frame: pd.DataFrame, symbols: pd.DataFrame, *,
                        symbol_col: str, date_col: str) -> tuple:
     """按 (symbol, 日期) 在 symbol_history 中定位 security_id。
@@ -28,10 +36,10 @@ def attach_security_id(frame: pd.DataFrame, symbols: pd.DataFrame, *,
         raise ValueError('symbol_history 缺 security_id/symbol/valid_from/valid_to')
     d = frame.copy().reset_index(drop=True)
     d['_row'] = d.index
-    d['_date'] = pd.to_datetime(d[date_col], errors='coerce').dt.normalize()
+    d['_date'] = _naive_dates(d[date_col])
     s = symbols.copy()
-    s['_from'] = pd.to_datetime(s['valid_from'], errors='coerce').dt.normalize()
-    s['_to'] = pd.to_datetime(s['valid_to'], errors='coerce').dt.normalize()
+    s['_from'] = _naive_dates(s['valid_from'])
+    s['_to'] = _naive_dates(s['valid_to'])
     merged = d.merge(s[['security_id', 'symbol', '_from', '_to']],
                      left_on=symbol_col, right_on='symbol', how='left')
     hit = merged[merged['_from'].notna() & (merged['_from'] <= merged['_date']) &
