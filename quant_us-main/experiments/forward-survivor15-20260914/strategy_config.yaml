@@ -1,0 +1,27 @@
+buy_strategy_v2:
+  enabled: true
+  mode: shadow
+  schedule_time: '16:30'
+  standalone_dip_buy: false
+  shadow_dip_buy_baseline: true
+  max_positions: 3
+  min_daily_bars: 250
+  require_weekly_gate: true
+  drawdown_window: 60
+  stabilization_days: 5
+  max_stop_atr: 2.0
+  max_chase_atr: 0.5
+  capitulation_return: -0.08
+  capitulation_volume: 1.5
+  trend_pullback:
+    enabled: true
+  reversal_confirmed:
+    enabled: true
+  execution:
+    method: next_open
+    max_gap_atr: 0.75
+  exits:
+    probe_timeout_sessions: 10
+    confirmed_timeout_sessions: 40
+    atr_period: 14
+    atr_multiple: 2.0

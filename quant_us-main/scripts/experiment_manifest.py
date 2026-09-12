@@ -197,6 +197,12 @@ def validate_manifest(manifest: dict, root='.', require_git=True) -> list:
         errors.append('PERIOD_OVERLAP_DEVELOPMENT_VALIDATION')
     if periods.get('validation_end', '') >= periods.get('test_start', '9999'):
         errors.append('PERIOD_OVERLAP_VALIDATION_TEST')
+    if periods.get('protocol') == 'forward':
+        start, end = periods.get('collection_start'), periods.get('collection_end')
+        if not start or not end or str(start) > str(end) or periods.get('max_holding_sessions') != 40:
+            errors.append('FORWARD_PERIODS_INVALID')
+        elif str(manifest.get('created_at', ''))[:10] >= str(start):
+            errors.append('FORWARD_FREEZE_NOT_BEFORE_START')
     if set(map(float, manifest.get('costs') or [])) != {.001, .002, .005, .01}:
         errors.append('COST_MATRIX_INCOMPLETE')
     if 'experiment_groups' in manifest:
@@ -259,6 +265,8 @@ def create_frozen_experiment(output_dir, experiment_id, config_path, universe_pa
                             evidence_version=evidence_version,acceptance=acceptance,formal=formal,
                             sample_selection_date=sample_selection_date,
                             survivor_scope=survivor_scope)
+    errors=validate_manifest(manifest,root,require_git=False)
+    if errors:raise ValueError('manifest 无效: '+','.join(errors))
     path=out/'manifest.json'
     path.write_text(json.dumps(manifest,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
     return path
@@ -278,6 +286,7 @@ def main():
     p.add_argument('--asof-price-version', default='', help='as-of 特征价版本')
     p.add_argument('--evidence-version', default=None, help='历史证据快照版本（D 组用）')
     p.add_argument('--acceptance', help='预登记验收标准 JSON 文件路径（正式实验必填）')
+    p.add_argument('--periods-json', help='显式实验时间窗 JSON；前向实验必须包含 protocol=forward 与收集起止日')
     p.add_argument('--formal', action='store_true',
                    help='正式实验：强制校验 run-id/主数据版本/价格版本/验收标准/样本选择日/存续样本限定齐全')
     p.add_argument('--sample-selection-date', default='',
@@ -300,9 +309,10 @@ def main():
     acceptance = None
     if args.acceptance:
         acceptance = json.loads(Path(args.acceptance).read_text(encoding='utf-8'))
-    periods = {'development_start': '2016-01-01', 'development_end': '2020-12-31',
-               'validation_start': '2021-01-01', 'validation_end': '2023-12-31',
-               'test_start': '2024-01-01', 'test_end': '2026-08-31'}
+    periods = (json.loads(Path(args.periods_json).read_text(encoding='utf-8')) if args.periods_json else
+               {'development_start': '2016-01-01', 'development_end': '2020-12-31',
+                'validation_start': '2021-01-01', 'validation_end': '2023-12-31',
+                'test_start': '2024-01-01', 'test_end': '2026-08-31'})
     try:
         path=create_frozen_experiment(args.output_dir,args.experiment_id,args.config,
                                       args.universe,args.data or [],periods,args.root,args.quality,

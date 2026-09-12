@@ -112,5 +112,22 @@ class ExperimentManifestTests(unittest.TestCase):
                 self.assertFalse(any(e.startswith('PROVENANCE_INCOMPLETE')
                                      for e in validate_manifest(plain,root)))
 
+    def test_forward_periods_require_pre_start_freeze_and_40_sessions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);files=[root/name for name in ('config.yaml','universe.csv','bars.csv','quality.csv')]
+            for path in files:path.write_text('frozen')
+            periods={'protocol':'forward','collection_start':'2027-01-04',
+                     'collection_end':'2027-07-04','max_holding_sessions':40}
+            with patch('scripts.experiment_manifest.git_commit',return_value='abc'), \
+                 patch('scripts.experiment_manifest.git_is_dirty',return_value=False):
+                m=build_manifest('FORWARD-001',files[0],files[1],[files[2]],periods,[files[3]],root=root)
+                m['created_at']='2027-01-03T12:00:00+00:00'
+                self.assertEqual(validate_manifest(m,root),[])
+                m['created_at']='2027-01-04T00:00:00+00:00'
+                self.assertIn('FORWARD_FREEZE_NOT_BEFORE_START',validate_manifest(m,root))
+                m['created_at']='2027-01-03T12:00:00+00:00'
+                m['periods']['max_holding_sessions']=20
+                self.assertIn('FORWARD_PERIODS_INVALID',validate_manifest(m,root))
+
 
 if __name__=='__main__':unittest.main()

@@ -16,7 +16,42 @@
 | 当前 `data/shadow/config_shadow.yaml` | 39只观察池 | 前向15只实验须单独冻结15只列表与哈希；39只运行结果只能算系统 shadow 联调 |
 | Futu 2026-09-12 当前 basicinfo | 15/15 与本地映射、首根日线一致，历史 `source_observed_at` 为空 | 不得把当前目录回填说成历史时点核实；前向每日归档真实采集时间 |
 
-**因此现在的状态是 `engineering_ready / forward_validation_blocked`。**没有补齐表中前三个接线项前，不执行“正式前向绩效报告”。这不是停止收集：可以立即做冻结准备、只读采集与无订单 shadow 联调。
+**2026-09-13 实施更新：**B1 的不可覆盖 `AuType.NONE` 日快照、行动快照和哈希校验已由 `capture_forward_raw_day.py` 实现；B2 的 T日 pending/T+1 原始开盘结算由 `run_forward_raw_day.py` 实现；B3 已支持 `--periods-json` 并校验冻结早于前向起点；B4 对 2026-06-22→23 做了15只工程回放，3/3 setup ID 与批处理一致、5条 A/B/C 入场、0拒绝。前向登记模板位于 `experiments/forward-survivor15-20260914/`。这轮历史回放约544秒；结算改为直接换算后降至约1.7秒，T日完整状态重建仍约271秒。
+
+当前状态为 **`forward_capture_code_ready / formal_freeze_pending`**。本轮全量测试为599项通过；正式 Manifest 尚未完成前，不执行“正式前向绩效报告”。
+
+实现后的每日命令骨架如下；`SESSION` 必须是已收盘的纽约交易日，`RUN_ID` 与输出目录每日唯一。结算命令在 T+1 快照完成后执行，`--pending` 和 `--prior-actions` 必须指向 T 日产物：
+
+```bash
+python3 scripts/data/capture_forward_raw_day.py \
+  --codes experiments/forward-survivor15-20260914/codes.csv \
+  --symbols data/security_master_runs/futu-survivor39-20260912/symbol_history.csv \
+  --session SESSION --output-dir data/forward_runs/RUN_ID/snapshots/SESSION
+
+python3 scripts/data/run_forward_raw_day.py --mode decision --day SESSION \
+  --baseline-daily data/m2_raw_audit/M2-RAW-AUDIT-20260912-002/raw_daily_verified_v3.csv.gz \
+  --baseline-actions data/corporate_actions_runs/futu-survivor39-20260912/corporate_actions.csv \
+  --snapshots-dir data/forward_runs/RUN_ID/snapshots \
+  --codes experiments/forward-survivor15-20260914/codes.csv \
+  --config experiments/forward-survivor15-20260914/strategy_config.yaml \
+  --master data/security_master_runs/futu-survivor39-20260912/security_master_v2.csv \
+  --symbols data/security_master_runs/futu-survivor39-20260912/symbol_history.csv \
+  --output-dir data/forward_runs/RUN_ID/decisions/SESSION
+
+python3 scripts/data/run_forward_raw_day.py --mode settle --day NEXT_SESSION \
+  --baseline-daily data/m2_raw_audit/M2-RAW-AUDIT-20260912-002/raw_daily_verified_v3.csv.gz \
+  --baseline-actions data/corporate_actions_runs/futu-survivor39-20260912/corporate_actions.csv \
+  --snapshots-dir data/forward_runs/RUN_ID/snapshots \
+  --codes experiments/forward-survivor15-20260914/codes.csv \
+  --config experiments/forward-survivor15-20260914/strategy_config.yaml \
+  --master data/security_master_runs/futu-survivor39-20260912/security_master_v2.csv \
+  --symbols data/security_master_runs/futu-survivor39-20260912/symbol_history.csv \
+  --pending data/forward_runs/RUN_ID/decisions/SESSION/pending_setups.csv \
+  --prior-actions data/forward_runs/RUN_ID/snapshots/SESSION/corporate_actions.csv \
+  --output-dir data/forward_runs/RUN_ID/entries/NEXT_SESSION
+```
+
+当前决策实现为确定性全历史重建，15只约271秒；只运行一个实例，不用并发任务写同一 run-id。T+1 结算约1.7秒。实际首次运行前先执行各脚本 `--help` 并保存退出码。
 
 ## 1. 环境、责任人与安全边界
 
@@ -127,4 +162,4 @@ python3 scripts/data/download_market_history.py \
 
 每周交接一页状态：负责人和时间、run-id、commit、配置/15只清单/数据哈希、准确命令与退出码、已完成/缺失交易日数、候选和拒绝漏斗、质量异常证券/日期、是否发生订单事件、下一步。最终交付原始日快照、质量与拒绝表、冻结 Manifest、每日账本、退出矩阵、统计脚本输出及结论记录；`data/` 被 gitignore 时需另行按团队方式备份，但不得把密钥写入共享仓库。
 
-**接手人第一个具体动作：**先跑 §2 并确认基线，然后完成 §3 的 B1–B4 接线与测试。只有 §4 在首个新增交易日前真正冻结，§5—§6 才能成为独立前向验证。
+**当前下一动作：**提交代码后，在首个新增交易日前按 §4 建立正式 Manifest；随后才运行真实 Futu 日快照。若未能在 `2026-09-14` 收盘前冻结，应提升 run-id 并把 `collection_start` 顺延到冻结后的下一个美股交易日，不能回填。

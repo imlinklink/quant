@@ -1,0 +1,13 @@
+{
+  "status_before_outcomes": "inconclusive",
+  "primary_comparison": "C_minus_A",
+  "primary_exit": "E5",
+  "primary_cost_pct": 0.002,
+  "bootstrap_unit": "security_strategy_iso_week",
+  "confidence_interval": 0.95,
+  "minimum_mature_trades_per_arm": 100,
+  "minimum_independent_week_groups": 30,
+  "maximum_missing_candidate_fraction": 0.05,
+  "support_rule": "ci_lower_gt_0_and_portfolio_direction_positive",
+  "llm_increment_status": "inconclusive"
+}

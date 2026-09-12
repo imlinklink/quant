@@ -74,6 +74,24 @@ class RawAsofGeneratorTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'ACTION_TYPE_UNSUPPORTED'):
             generate(data, {}, price_basis='raw_asof', actions=actions)
 
+    def test_pending_decision_precedes_next_open_and_matches_later_setup(self):
+        data=bars()
+        decision=data.date.iloc[209]
+        def candidate(code,snapshot,state,config):
+            return {'setup_id':'same-id','trigger_price':100.,'initial_stop':95.,
+                    'risk_per_share':5.} if snapshot['session']==str(decision.date()) else None
+        with patch('scripts.data.generate_historical_setups.build_setup_candidate',side_effect=candidate):
+            pending=generate(data.iloc[:210],{'buy_strategy_v2':{'min_daily_bars':200}},
+                             start=decision,end=decision,price_basis='raw_asof',
+                             actions=split(data),include_pending=True)
+            filled=generate(data.iloc[:211],{'buy_strategy_v2':{'min_daily_bars':200}},
+                            start=decision,end=decision,price_basis='raw_asof',actions=split(data))
+        self.assertEqual(pending.setup_id.iloc[0],filled.setup_id.iloc[0])
+        self.assertTrue(pd.isna(pending.next_open_price.iloc[0]))
+        self.assertEqual(pending.execution_status.iloc[0],'pending_next_open')
+        self.assertEqual(pending.initial_stop.iloc[0],95.)
+        self.assertEqual(filled.initial_stop.iloc[0],47.5)
+
 
 if __name__ == '__main__':
     unittest.main()

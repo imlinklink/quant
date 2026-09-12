@@ -36,14 +36,15 @@ def _weekly_series(bars):
                                 'close':row.close,'prev_close':completed[-1]['close'] if completed else row.close}
         else:
             current['high']=max(current['high'],row.high);current['low']=min(current['low'],row.low);current['close']=row.close
-        weeks=completed+[current];cl=np.array([float(x['close']) for x in weeks])
+        # 下面最长只读取 52 周；避免每个日线 bar 都重建全部历史周数组。
+        weeks=completed[-52:]+[current];cl=np.array([float(x['close']) for x in weeks])
         tr=np.array([max(float(x['high'])-float(x['low']),abs(float(x['high'])-float(x['prev_close'])),
                          abs(float(x['low'])-float(x['prev_close']))) for x in weeks])
-        if len(cl)<40:
+        if len(completed)+1<40:
             out.append({'weekly_gate':False,'weekly_regime':'falling','weekly_ma10':np.nan,
                         'weekly_ma20':np.nan,'weekly_ma40':np.nan,'weekly_atr14':np.nan,
                         'weekly_ma20_slope_4w':np.nan,'weekly_drawdown_52w':np.nan,
-                        'weekly_volatility_contracting':False,'weekly_bar_count':len(cl)});continue
+                        'weekly_volatility_contracting':False,'weekly_bar_count':len(completed)+1});continue
         ma10=cl[-10:].mean();ma20=cl[-20:].mean();ma40=cl[-40:].mean()
         prior20=cl[-24:-4].mean();slope=ma20/prior20-1;atr=tr[-14:].mean()
         prior_atr=tr[-18:-4].mean() if len(tr)>=18 else np.nan
@@ -56,24 +57,26 @@ def _weekly_series(bars):
             'weekly_ma10':float(ma10),'weekly_ma20':float(ma20),'weekly_ma40':float(ma40),
             'weekly_atr14':float(atr),'weekly_ma20_slope_4w':float(slope),
             'weekly_drawdown_52w':dd,'weekly_volatility_contracting':bool(np.isfinite(prior_atr) and atr<=prior_atr),
-            'weekly_bar_count':len(cl)})
+            'weekly_bar_count':len(completed)+1})
     return out
 
 
-def _snapshots(bars,cfg):
+def _snapshots(bars,cfg,emit_start=0,emit_end=None):
     """O(n)滚动特征和O(1)状态所需结构，替代逐日重算整张DataFrame。"""
     d=bars.reset_index(drop=True).copy();close=d.close.astype(float);high=d.high.astype(float);low=d.low.astype(float)
     ma20=close.rolling(20).mean();ma50=close.rolling(50).mean();ma200=close.rolling(200).mean()
     prev=close.shift(1);tr=pd.concat([high-low,(high-prev).abs(),(low-prev).abs()],axis=1).max(axis=1);atr=tr.rolling(14).mean()
     vol=d.volume.astype(float);volmean=vol.shift(1).rolling(20).mean();reversal=high.shift(1).rolling(5).max()
-    weekly=_weekly_series(d);pivots=[];lookback=int(cfg.get('drawdown_window',60));stable=int(cfg.get('stabilization_days',5))
-    for i in range(len(d)):
-        if i>=4:
-            j=i-2
-            if low.iloc[j]<low.iloc[j-2:j].min() and low.iloc[j]<low.iloc[j+1:j+3].min():pivots.append(j)
+    weekly=_weekly_series(d);lookback=int(cfg.get('drawdown_window',60));stable=int(cfg.get('stabilization_days',5))
+    pivots=[j for j in range(2,len(d)-2)
+            if low.iloc[j]<low.iloc[j-2:j].min() and low.iloc[j]<low.iloc[j+1:j+3].min()]
+    emit_end=len(d) if emit_end is None else min(int(emit_end),len(d))
+    for i in range(max(0,int(emit_start)),emit_end):
         if i<200:yield None;continue
         recent=low.iloc[max(0,i-lookback+1):i+1].to_numpy();days_since=len(recent)-1-int(np.argmin(recent))
-        swing=float(low.iloc[pivots[-1]]) if pivots else None;prior_swing=float(low.iloc[pivots[-2]]) if len(pivots)>1 else None
+        known=[j for j in pivots if j<=i-2]
+        swing=float(low.iloc[known[-1]]) if known else None
+        prior_swing=float(low.iloc[known[-2]]) if len(known)>1 else None
         w=weekly[i];features={'close':float(close.iloc[i]),'ma20':float(ma20.iloc[i]),'ma50':float(ma50.iloc[i]),
             'ma200':float(ma200.iloc[i]),'ma20_slope_5d':float(ma20.iloc[i]/ma20.iloc[i-5]-1),
             'ma50_slope_20d':float(ma50.iloc[i]/ma50.iloc[i-20]-1),'atr14':float(atr.iloc[i]),
@@ -109,9 +112,8 @@ def _raw_asof_snapshots(bars, actions, cfg):
         cutoff = bars.date.iloc[end - 1]
         view = build_price_view(raw, filtered, price_basis='asof_adjusted', as_of=cutoff)
         adjusted = view.rename(columns={'session': 'date'})
-        segment = list(_snapshots(adjusted, cfg))
-        for i in range(begin, end):
-            snapshot = segment[i]
+        segment = list(_snapshots(adjusted, cfg, begin, end))
+        for i,snapshot in zip(range(begin,end),segment):
             if snapshot is not None:
                 snapshot['feature_version'] = FEATURE_VERSION + '-raw-asof-v1'
                 for key, column in (('close', 'asof_close'), ('ma20', 'asof_ma20'),
@@ -126,7 +128,8 @@ def _raw_asof_snapshots(bars, actions, cfg):
 
 
 def generate(daily:pd.DataFrame,config:dict,llm_labels=None,start=None,end=None,progress=False,
-             *, price_basis='legacy_qfq', actions=None, excluded_security_ids=()):
+             *, price_basis='legacy_qfq', actions=None, excluded_security_ids=(),
+             include_pending=False):
     if price_basis not in ('legacy_qfq', 'raw_asof'):
         raise ValueError('INVALID_PRICE_BASIS')
     if price_basis == 'raw_asof' and actions is None:
@@ -160,7 +163,8 @@ def generate(daily:pd.DataFrame,config:dict,llm_labels=None,start=None,end=None,
         else:
             snapshots = _snapshots(bars,baseline_cfg)
         for i,snapshot in enumerate(snapshots):
-            if snapshot is None or i<minimum-1 or i>=len(bars)-1:continue
+            pending=i==len(bars)-1
+            if snapshot is None or i<minimum-1 or (pending and not include_pending):continue
             session=bars.date.iloc[i]
             if end and session>pd.Timestamp(end):break
             as_of=_market_time(session,16).tz_convert('UTC')
@@ -168,21 +172,24 @@ def generate(daily:pd.DataFrame,config:dict,llm_labels=None,start=None,end=None,
             if start and session<pd.Timestamp(start):continue
             candidate=build_setup_candidate(code,snapshot,state,config=baseline_cfg)
             if not candidate:continue
-            nxt=bars.iloc[i+1];setup_id=candidate['setup_id']
-            scale = float(panel.loc[i, 'scale_to_next']) if price_basis == 'raw_asof' else 1.0
+            nxt=None if pending else bars.iloc[i+1];setup_id=candidate['setup_id']
+            scale = float(panel.loc[i, 'scale_to_next']) if price_basis == 'raw_asof' and not pending else 1.0
             if price_basis == 'raw_asof':
                 for field in ('trigger_price', 'invalidation_price', 'initial_stop',
                               'max_chase_price', 'risk_per_share'):
                     if candidate.get(field) is not None:
                         candidate[field] = float(candidate[field]) * scale
             row = dict(candidate,stock=code,
-                setup_time=as_of.isoformat(),next_open_time=_market_time(nxt.date,9,30).tz_convert('UTC').isoformat(),
-                next_open_price=float(nxt.open),signal_close=float(snapshot['features']['close']) * scale,
+                setup_time=as_of.isoformat(),
+                next_open_time=None if pending else _market_time(nxt.date,9,30).tz_convert('UTC').isoformat(),
+                next_open_price=None if pending else float(nxt.open),
+                signal_close=float(snapshot['features']['close']) * scale,
                 atr14=float(snapshot['features']['atr14']) * scale,
                 weekly_gate=bool(snapshot['features']['weekly_gate']),
                 daily_confirmed=state=='CONFIRMED',llm_decision=labels.get(setup_id,'missing'))
             if price_basis == 'raw_asof':
                 row.update(price_basis=price_basis, scale_to_next=scale, security_id=sec_id)
+            if pending:row['execution_status']='pending_next_open'
             rows.append(row)
         if progress:print(f'processed {code}: bars={len(bars)} setups={sum(r["stock"]==code for r in rows)}',flush=True)
     return pd.DataFrame(rows)
