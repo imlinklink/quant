@@ -110,7 +110,22 @@ python3 scripts/data/audit_security_master_v2.py \
 1. **富途不提供可信的 US 上市日**：13 只里 **8 只是 `1970-01-01` 占位**（仅 LITE/MU/MULL/RAM/YINN 有真实值）。因此手册要求的"已核验上市日"模式对这批标的**不可用**；本跑退回到「首根日线推断 / 下载起点」并把 `quality_status` 标为 `unverified`，**不得**当作核验上市日。
 2. **样本只有 13 只（普通股仅 5 只）**，远低于手册 §2.6 的「20–50 只普通股」工程扩池门槛。扩池需要**预先登记的选样规则**（不能按历史收益挑）。
 
-**尚未完成的衔接**：实验层（`buy_strategy_experiment_runner` / `exit_matrix` / `buy_strategy_report`）仍以 **symbol** 为主键，而 universe v2 以 **security_id** 为主键。要在 v2 universe 上跑 ABC，需二者对齐（给 universe 补回当时有效 symbol，或把 runner 迁到 security_id）。
+**尚未完成的衔接**：实验层（`buy_strategy_experiment_runner` / `exit_matrix` / `buy_strategy_report`）仍以 **symbol** 为主键，而 universe v2 以 **security_id** 为主键。要在 v2 universe 上跑 ABC，需二者对齐（给 universe 补回当时有效 symbol，或把 runner 迁到 security_id）。（**已解决**：见下「security_id 贯穿」。）
+
+## 复权口径稳健性核验（2026-09-12，真实公司行动）
+
+用富途公司行动接口直取样本公司行动（18 只共 **521 条**：492 分红 + 29 拆股），并与富途 QFQ 自身的复权因子对齐：
+
+- **NVDA**：QFQ/原始 因子在 **2021-07-20 跳 4.0、2024-06-10 跳 10.0**，与我们取到的 `1→4`、`1→10` **完全一致** → 富途公司行动直取数据可靠。
+- 样本内 **4 次大拆股**：AVGO 10:1(2024-07-15)、GOOGL 20:1(2022-07-18)、NVDA 4:1(2021-07-20)、NVDA 10:1(2024-06-10)。**若用未复权的原始价做执行，会在拆股日出现 -90% 的假跳变** → 用 QFQ 反而是安全选择。
+- 分红：每股年度分红/均价中位约 **2.3%**（均值被拆股扭曲，不可用）。QFQ 同时吸收拆股与分红，其价格序列≈**总收益序列**，对做多策略合适。
+- **结论**：复权口径不改变 A/B/C 的方向；无需为"原始价执行"另跑一版。设计 §2.4 的"原始可交易价"主要用于价格门与最小报价单位的现实性，对本研究结论影响可忽略。
+
+## security_id 贯穿（提交 `233b1a7`/`dac99c7`）
+
+- 新增 `scripts/data/attach_security_id.py`：给任意 symbol 键帧补 `security_id`（未映射/歧义不静默，默认报错）。
+- setups 4315 条全部映射；universe 改用 v2（补回当时 symbol 供 runner 使用）；`security_id` 现贯穿 setups → signals → exit_matrix → report。
+- 实验 `BUY-WD-ABC-SURVIVOR-002` 与 `-001` **结论一致**，验证 v2 路径可复现。
 
 ## 阶段 5：experiment_manifest 元数据扩展（提交随本记录）
 
