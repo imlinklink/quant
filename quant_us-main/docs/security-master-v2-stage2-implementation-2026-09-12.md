@@ -69,4 +69,24 @@ python3 scripts/data/audit_security_master_v2.py \
 - 一致性：拆股后 as-of 复权序列连续，且跨行动的总收益与原始价×股数变化一致；成交量按因子反向调整，**美元成交额守恒**。
 - **终局结算**：`terminal_outcome_flags` 检查日线是否覆盖到最后可交易日、是否有 `merger/delisting_settlement`；缺失即 `terminal_outcome_unknown`，不得把最后一根收盘价当默认盈利退出。
 
-全量测试：501 passed。状态仍为 **engineering_pass**（无真实数据源，不作策略结论）。未做：universe v2 与扩池（阶段 4）、manifest 元数据扩展与正式 ABC 冻结（阶段 5）、证据快照（阶段 6–7）。
+## 阶段 4：历史时点 universe v2（提交 `c6250ff`）
+
+依据 §2.5。按设计在现有 `scripts/historical_universe.py` 上新增 v2 函数，**v1 接口原样保留**供试点复现。
+
+| 文件 | 作用 |
+|---|---|
+| `scripts/historical_universe.py` | 新增 `build_point_in_time_universe_v2`、`universe_reason_summary`、`_symbol_as_of` |
+| `scripts/data/build_historical_universe_v2.py` | CLI：输出 `universe.csv.gz`、`universe_reasons.csv`、`summary.json` |
+| `tests/unit/live/test_universe_v2.py` | 8 项测试 |
+
+要点（输出列与 §2.5 一致）：`universe_date,security_id,symbol_as_of,asset_type,listed,tradable,previous_raw_close,adv20_usd,liquidity_as_of,eligible,reason,master_version,price_version,quality_status`。
+
+- **键为 `security_id`**：ticker 改名不产生两只“新股票”，`symbol_as_of` 取当时有效 ticker。
+- **退市窗口**：退市日之后 `eligible=False`、`reason=DELISTED`；最后可交易日仍保留。
+- **T−1 流动性**：只用 `liquidity_as_of < universe_date` 的价格/流动性；违反直接 `LOOKAHEAD_LIQUIDITY`；改变 T 日成交额不改变 T 日 universe（有测试）。
+- **拒绝记录全部保留**并标注 `reason`：`NOT_LISTED / DELISTED / MASTER_CONFLICT / SYMBOL_UNAVAILABLE / MISSING_BARS / ACTION_UNRESOLVED / PRICE_TOO_LOW / DOLLAR_VOLUME_TOO_LOW / ELIGIBLE`，并输出原因计数。
+- **主样本分层**：主样本 = `eligible & asset_type=='stock'`；普通 ETF 与杠杆 ETF 输出独立切片，不提高普通股结论。
+
+全量测试：509 passed。状态 **engineering_pass**。未做：20–50 只真实普通股扩池所需的真实数据源（阶段 1 待用户决策）、experiment_manifest 元数据扩展与正式 ABC 冻结（阶段 5）、证据快照（阶段 6–7）。
+
+**阶段 1–5 的工程代码至此可全部用 fixture 验证；真实数据接入前不能产出历史样本或策略结论。**
