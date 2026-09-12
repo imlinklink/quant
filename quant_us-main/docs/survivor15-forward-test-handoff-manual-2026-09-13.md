@@ -18,7 +18,9 @@
 
 **2026-09-13 实施更新：**B1 的不可覆盖 `AuType.NONE` 日快照、行动快照和哈希校验已由 `capture_forward_raw_day.py` 实现；B2 的 T日 pending/T+1 原始开盘结算由 `run_forward_raw_day.py` 实现；B3 已支持 `--periods-json` 并校验冻结早于前向起点；B4 对 2026-06-22→23 做了15只工程回放，3/3 setup ID 与批处理一致、5条 A/B/C 入场、0拒绝。前向登记模板位于 `experiments/forward-survivor15-20260914/`。这轮历史回放约544秒；结算改为直接换算后降至约1.7秒，T日完整状态重建仍约271秒。
 
-当前状态为 **`forward_capture_code_ready / formal_freeze_pending`**。本轮全量测试为599项通过；正式 Manifest 尚未完成前，不执行“正式前向绩效报告”。
+当前状态为 **`forward_frozen / awaiting_first_collection_session`**。正式实验 `FWD-SURV15-20260914-001` 已在提交 `22f39d6` 上冻结，Manifest 位于 `data/forward_runs/FWD-SURV15-20260914-001/frozen/manifest.json`，`formal=true`，校验结果为 `valid=true`，收集期为 2026-09-14—2027-03-14。本轮代码基线全量测试为600项通过；结果成熟前不执行“正式前向绩效报告”。
+
+2026-09-13 已完成首日前工程预检：归档 2026-09-11 的 `AuType.NONE` 日线和行动快照，15/15 证券成功、哈希齐全；决策重建产生1条 `US.BAC` pending setup。预检产物固定放在 `preflight/2026-09-11/`，**不计入**正式 A/B/C 样本。2026-09-14 日线完成并归档后，可以单独结算该预检信号以验证 T+1 链路，但结算输出也必须留在 `preflight/`，不得写入正式 `entries/`。
 
 实现后的每日命令骨架如下；`SESSION` 必须是已收盘的纽约交易日，`RUN_ID` 与输出目录每日唯一。结算命令在 T+1 快照完成后执行，`--pending` 和 `--prior-actions` 必须指向 T 日产物：
 
@@ -162,4 +164,4 @@ python3 scripts/data/download_market_history.py \
 
 每周交接一页状态：负责人和时间、run-id、commit、配置/15只清单/数据哈希、准确命令与退出码、已完成/缺失交易日数、候选和拒绝漏斗、质量异常证券/日期、是否发生订单事件、下一步。最终交付原始日快照、质量与拒绝表、冻结 Manifest、每日账本、退出矩阵、统计脚本输出及结论记录；`data/` 被 gitignore 时需另行按团队方式备份，但不得把密钥写入共享仓库。
 
-**当前下一动作：**提交代码后，在首个新增交易日前按 §4 建立正式 Manifest；随后才运行真实 Futu 日快照。若未能在 `2026-09-14` 收盘前冻结，应提升 run-id 并把 `collection_start` 顺延到冻结后的下一个美股交易日，不能回填。
+**当前下一动作：**不要提前采集或推断 2026-09-14 的完成日 K。等该纽约交易日收盘且 Futu 返回完整日线后，先写入 `snapshots/2026-09-14/`，再运行正式 `decisions/2026-09-14/`；同时可用同一份已归档快照将 2026-09-11 的预检 pending 结算到 `preflight/2026-09-14-entry/`。正式信号只能在下一实际交易日快照到来后结算，所有操作保持只读行情、shadow/DRY-RUN，不产生订单或真实资金流。
