@@ -14,7 +14,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.data.io_utils import read_frame, write_frame
-from scripts.data.price_views import build_price_views, terminal_outcome_flags
+from scripts.data.price_views import build_price_views, corporate_action_flags
 
 
 def main():
@@ -49,10 +49,10 @@ def main():
     summary = {'rows': int(len(views)), 'as_of': args.as_of,
                'price_basis': sorted(views['price_basis'].unique().tolist())}
     if args.master and Path(args.master).is_file():
-        flags = terminal_outcome_flags(bars, read_frame(args.master), actions)
-        write_frame(flags, out / 'terminal_outcome.csv')
-        summary['terminal_outcome_unknown'] = int(flags['problems'].str.contains(
-            'terminal_outcome_unknown', na=False).sum())
+        flags = corporate_action_flags(bars, read_frame(args.master), actions)
+        write_frame(flags, out / 'corporate_action_flags.csv')
+        summary['corporate_action_unresolved'] = int(flags['problems'].str.contains(
+            'corporate_action_unresolved', na=False).sum())
     (out / 'summary.json').write_text(
         json.dumps(summary, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
     print(json.dumps(summary, ensure_ascii=False))

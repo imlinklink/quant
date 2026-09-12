@@ -14,10 +14,9 @@ from pathlib import Path
 
 import pandas as pd
 
-# 一行代表一只证券的一个有效属性区间。
+# 一行代表一只证券的一个有效属性区间（范围：当前存续普通股样本，不含退市字段）。
 MASTER_COLUMNS = ('security_id', 'issuer_id', 'asset_type', 'exchange', 'currency',
-                  'valid_from', 'valid_to', 'listed_at', 'delisted_at', 'delisting_reason',
-                  'source_id', 'source_record_id', 'source_published_at',
+                  'valid_from', 'valid_to', 'listed_at', 'source_id', 'source_record_id',
                   'source_observed_at', 'ingested_at', 'record_hash', 'quality_status')
 # 一行一个 ticker 有效区间。
 SYMBOL_COLUMNS = ('security_id', 'symbol', 'exchange', 'valid_from', 'valid_to',
@@ -28,14 +27,15 @@ ACTION_COLUMNS = ('security_id', 'action_type', 'ex_date', 'effective_at', 'rati
                   'source_published_at', 'source_observed_at', 'record_hash')
 
 ASSET_TYPES = ('stock', 'etf', 'leveraged_etf', 'adr', 'other')
+# 优先覆盖拆股/反向拆股/股息；并购与分拆单独处理（见 UNRESOLVED_ACTION_TYPES）。
 ACTION_TYPES = ('split', 'reverse_split', 'cash_dividend', 'stock_dividend',
-                'merger', 'spinoff', 'delisting_settlement')
-# 退市必须具备的终局结算类行动；缺失即 TERMINAL_OUTCOME_UNKNOWN。
-TERMINAL_ACTION_TYPES = ('merger', 'delisting_settlement')
+                'merger', 'spinoff')
 QUALITY_STATUS = ('verified', 'unverified', 'conflict', 'missing_history')
+# 退市结算不在范围；样本期内并购/分拆无法核实价格衔接时标此原因并排除绩效。
+UNRESOLVED_ACTION_TYPES = ('merger', 'spinoff')
 # 记录哈希覆盖的稳定字段（不含来源时间与哈希本身，保证跨源/跨运行稳定）。
 HASH_FIELDS = ('security_id', 'issuer_id', 'asset_type', 'exchange', 'currency',
-               'valid_from', 'valid_to', 'listed_at', 'delisted_at', 'delisting_reason')
+               'valid_from', 'valid_to', 'listed_at')
 PLACEHOLDER_DATES = ('1970-01-01', '1970-01-01T00:00:00', '1900-01-01')
 
 
@@ -90,10 +90,9 @@ def normalize_master(frame: pd.DataFrame, source_id: str, ingested_at=None) -> p
     d['ingested_at'] = _norm_time(ingested_at) or datetime.now(timezone.utc).isoformat()
     d['asset_type'] = d['asset_type'].astype(str).str.strip().str.lower()
     d['quality_status'] = d['quality_status'].astype(str).str.strip().str.lower()
-    for column in ('valid_from', 'valid_to', 'listed_at', 'delisted_at'):
+    for column in ('valid_from', 'valid_to', 'listed_at'):
         d[column] = d[column].map(_norm_date)
-    for column in ('source_published_at', 'source_observed_at'):
-        d[column] = d[column].map(_norm_time)
+    d['source_observed_at'] = d['source_observed_at'].map(_norm_time)
     d['security_id'] = d['security_id'].astype(str).str.strip()
     d['record_hash'] = [canonical_record_hash(row) for row in d.to_dict('records')]
     return d[list(MASTER_COLUMNS)]
@@ -170,7 +169,7 @@ def validate_master(master: pd.DataFrame) -> list:
         errors.append('BAD_QUALITY_STATUS:' + ','.join(bad_status))
     if master['valid_from'].map(_empty).any():
         errors.append('VALID_FROM_EMPTY')
-    for column in ('valid_from', 'valid_to', 'listed_at', 'delisted_at'):
+    for column in ('valid_from', 'valid_to', 'listed_at'):
         for value in master[column].dropna():
             if str(value)[:10] in PLACEHOLDER_DATES or str(value).startswith('1970'):
                 errors.append('PLACEHOLDER_DATE:' + column)
@@ -179,10 +178,6 @@ def validate_master(master: pd.DataFrame) -> list:
     to_ts = pd.to_datetime(master['valid_to'], errors='coerce')
     if ((to_ts.notna()) & (to_ts <= from_ts)).any():
         errors.append('VALID_TO_NOT_AFTER_FROM')
-    listed = pd.to_datetime(master['listed_at'], errors='coerce')
-    delisted = pd.to_datetime(master['delisted_at'], errors='coerce')
-    if ((delisted.notna()) & (listed.notna()) & (delisted < listed)).any():
-        errors.append('DELISTED_BEFORE_LISTED')
     if master['record_hash'].map(_empty).any():
         errors.append('RECORD_HASH_EMPTY')
     else:
@@ -278,38 +273,47 @@ def merge_sources(masters: list, source_priority: list):
         pd.DataFrame(conflicts, columns=['security_id', 'field', 'sources', 'values'])
 
 
-def audit_master(master: pd.DataFrame, symbols: pd.DataFrame, actions: pd.DataFrame) -> tuple:
-    """逐证券×年份输出质量问题，并给出汇总。缺失行动/退市标记为缺口而非默认无。"""
+def audit_master(master: pd.DataFrame, symbols: pd.DataFrame, actions: pd.DataFrame,
+                 unresolved_actions=()) -> tuple:
+    """逐证券输出质量问题并汇总。范围不含退市；并购/分拆无法核实价格衔接时标此原因。"""
     rows = []
     sec_ids = sorted(set(master.get('security_id', pd.Series(dtype=str))))
     symbol_ids = set(symbols.get('security_id', pd.Series(dtype=str)))
-    terminal_ids = set(actions.loc[actions.get('action_type', pd.Series(dtype=str))
-                                   .isin(TERMINAL_ACTION_TYPES), 'security_id']) \
-        if not actions.empty else set()
+    unresolved = set(map(str, unresolved_actions))
+    if actions is not None and not actions.empty:
+        special = actions[actions['action_type'].astype(str).str.lower()
+                          .isin(UNRESOLVED_ACTION_TYPES)]
+        for record in special.to_dict('records'):
+            ratio = pd.to_numeric(record.get('ratio'), errors='coerce')
+            cash = pd.to_numeric(record.get('cash_amount'), errors='coerce')
+            has_terms = (pd.notna(ratio) and float(ratio) > 0) or \
+                (pd.notna(cash) and float(cash) > 0)
+            if not has_terms:
+                unresolved.add(str(record.get('security_id')))
     for sec_id in sec_ids:
         row = master[master['security_id'] == sec_id].iloc[0]
         problems = []
-        if not _empty(row.get('delisted_at')) and sec_id not in terminal_ids:
-            problems.append('TERMINAL_OUTCOME_UNKNOWN')  # 退市但无并购/结算行动
+        if sec_id in unresolved:
+            problems.append('corporate_action_unresolved')  # 价格衔接不可核实 → 排除绩效
         if sec_id not in symbol_ids:
             problems.append('MISSING_SYMBOL_HISTORY')
         if _empty(row.get('listed_at')):
-            problems.append('MISSING_HISTORY')  # 上市日未知；仍上市的 delisted_at 为空属正常
+            problems.append('MISSING_HISTORY')
         rows.append({'security_id': sec_id, 'asset_type': row.get('asset_type'),
                      'quality_status': row.get('quality_status'),
                      'problems': ';'.join(problems)})
     quality = pd.DataFrame(rows, columns=['security_id', 'asset_type', 'quality_status', 'problems'])
+
+    def _count(token):
+        return int(quality.problems.str.contains(token).sum()) if not quality.empty else 0
+
     summary = {
         'securities': int(len(sec_ids)),
         'master_errors': validate_master(master) if not master.empty else [],
         'symbol_errors': validate_symbols(symbols) if not symbols.empty else [],
-        'delisted': int((~master.get('delisted_at', pd.Series(dtype=object)).map(_empty)).sum())
-        if not master.empty else 0,
-        'with_terminal_action': len(terminal_ids & set(sec_ids)),
-        'missing_symbol_history': int((quality.problems.str.contains('MISSING_SYMBOL_HISTORY')).sum())
-        if not quality.empty else 0,
-        'terminal_outcome_unknown': int((quality.problems.str.contains('TERMINAL_OUTCOME_UNKNOWN')).sum())
-        if not quality.empty else 0,
+        'corporate_action_unresolved': _count('corporate_action_unresolved'),
+        'missing_symbol_history': _count('MISSING_SYMBOL_HISTORY'),
+        'missing_history': _count('MISSING_HISTORY'),
     }
     return quality, summary
 

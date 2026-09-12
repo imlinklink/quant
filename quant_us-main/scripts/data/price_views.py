@@ -17,9 +17,10 @@ import numpy as np
 import pandas as pd
 
 PRICE_BASES = ('raw', 'asof_adjusted')
-# 会改变价格连续性的行动；merger/delisting_settlement 属于终局结算，另行处理。
+# 会改变价格连续性的行动，可用 ratio/cash 直接复权。
 ADJUSTABLE_ACTIONS = ('split', 'reverse_split', 'cash_dividend', 'spinoff')
-TERMINAL_ACTIONS = ('merger', 'delisting_settlement')
+# 并购/分拆若无法核实价格衔接，标 corporate_action_unresolved 并排除该证券绩效。
+UNRESOLVED_ACTIONS = ('merger', 'spinoff')
 BAR_COLUMNS = ('security_id', 'session', 'open', 'high', 'low', 'close', 'volume')
 
 
@@ -121,27 +122,31 @@ def build_price_views(bars: pd.DataFrame, actions: pd.DataFrame, *, as_of=None) 
                      ignore_index=True)
 
 
-def terminal_outcome_flags(bars: pd.DataFrame, master: pd.DataFrame,
-                           actions: pd.DataFrame) -> pd.DataFrame:
-    """退市证券的终局结算检查：日线是否覆盖到最后可交易日，是否存在结算行动。
+def corporate_action_flags(bars: pd.DataFrame, master: pd.DataFrame, actions: pd.DataFrame,
+                           unresolved=()) -> pd.DataFrame:
+    """标记样本期内价格无法正确衔接的证券（并购/分拆未核实），供排除绩效使用。
 
-    不得把最后一根收盘价默认当作盈利退出；缺失结算行动即 `terminal_outcome_unknown`。
+    固定存续样本不开发退市结算；但不得把无法衔接的最后一根 K 线当作正常退出。
     """
     d = _prepare_bars(bars)
-    terminal_ids = set(actions.loc[actions['action_type'].astype(str).str.lower()
-                                   .isin(TERMINAL_ACTIONS), 'security_id']) if not actions.empty else set()
+    unresolved = set(map(str, unresolved))
+    if actions is not None and not actions.empty:
+        special = actions[actions['action_type'].astype(str).str.lower().isin(UNRESOLVED_ACTIONS)]
+        for record in special.to_dict('records'):
+            ratio = pd.to_numeric(record.get('ratio'), errors='coerce')
+            cash = pd.to_numeric(record.get('cash_amount'), errors='coerce')
+            if not ((pd.notna(ratio) and float(ratio) > 0) or (pd.notna(cash) and float(cash) > 0)):
+                unresolved.add(str(record.get('security_id')))
     rows = []
-    for _, row in master.iterrows():
-        sec = row['security_id']
+    for sec in master['security_id']:
+        sec = str(sec)
         last_bar = d.loc[d['security_id'] == sec, 'session'].max()
-        delisted = pd.to_datetime(row.get('delisted_at'), errors='coerce')
         problems = []
-        if pd.notna(delisted):
-            if pd.isna(last_bar) or pd.Timestamp(last_bar) < pd.Timestamp(delisted) - pd.Timedelta(days=4):
-                problems.append('MISSING_LAST_TRADING_DAY')
-            if sec not in terminal_ids:
-                problems.append('terminal_outcome_unknown')
-        rows.append({'security_id': sec, 'last_bar': None if pd.isna(last_bar) else str(pd.Timestamp(last_bar).date()),
-                     'delisted_at': None if pd.isna(delisted) else str(pd.Timestamp(delisted).date()),
+        if pd.isna(last_bar):
+            problems.append('NO_BARS')
+        if sec in unresolved:
+            problems.append('corporate_action_unresolved')
+        rows.append({'security_id': sec,
+                     'last_bar': None if pd.isna(last_bar) else str(pd.Timestamp(last_bar).date()),
                      'problems': ';'.join(problems)})
-    return pd.DataFrame(rows, columns=['security_id', 'last_bar', 'delisted_at', 'problems'])
+    return pd.DataFrame(rows, columns=['security_id', 'last_bar', 'problems'])

@@ -109,7 +109,8 @@ def resolve_record_path(record, root='.'):
 
 
 # 正式实验（formal）必须显式冻结的来源与预登记信息（技术设计 §4.1）。
-FORMAL_FIELDS = ('run_id', 'master_version', 'price_versions', 'acceptance')
+FORMAL_FIELDS = ('run_id', 'master_version', 'price_versions', 'acceptance',
+                 'sample_selection_date', 'survivor_scope')
 SCHEMA_VERSION = '2'
 
 
@@ -126,6 +127,10 @@ def provenance_completeness(manifest: dict) -> list:
             missing.append(f'price_versions.{basis}')
     if not isinstance(manifest.get('acceptance'), dict) or not manifest.get('acceptance'):
         missing.append('acceptance')
+    if not str(manifest.get('sample_selection_date') or '').strip():
+        missing.append('sample_selection_date')
+    if manifest.get('survivor_scope') is None:
+        missing.append('survivor_scope')
     return missing
 
 
@@ -135,7 +140,8 @@ def build_manifest(experiment_id: str, config_path, universe_path,
                    random_seed=20260910, root='.',
                    experiment_groups=GROUP_ORDER, llm_evaluation=None,
                    run_id='UNSET', master_version='', price_versions=None,
-                   evidence_version=None, acceptance=None, formal=False) -> dict:
+                   evidence_version=None, acceptance=None, formal=False,
+                   sample_selection_date='', survivor_scope=None) -> dict:
     groups = parse_groups(experiment_groups)
     if llm_evaluation is None:
         llm_evaluation = default_llm_evaluation(groups)
@@ -157,6 +163,8 @@ def build_manifest(experiment_id: str, config_path, universe_path,
         'price_versions': dict(price_versions or {'raw': '', 'asof_adjusted': ''}),
         'evidence_version': evidence_version,
         'acceptance': dict(acceptance or {}),
+        'sample_selection_date': str(sample_selection_date),
+        'survivor_scope': survivor_scope,
     }
 
 
@@ -233,7 +241,8 @@ def create_frozen_experiment(output_dir, experiment_id, config_path, universe_pa
                              data_paths, periods, root='.', quality_paths=(),
                              experiment_groups=GROUP_ORDER, llm_evaluation=None,
                              run_id='UNSET', master_version='', price_versions=None,
-                             evidence_version=None, acceptance=None, formal=False) -> Path:
+                             evidence_version=None, acceptance=None, formal=False,
+                             sample_selection_date='', survivor_scope=None) -> Path:
     """复制小型冻结输入到实验目录，再基于最终路径生成 manifest。"""
     out=Path(output_dir)
     if out.exists() and any(out.iterdir()):
@@ -247,7 +256,9 @@ def create_frozen_experiment(output_dir, experiment_id, config_path, universe_pa
                             quality_paths=quality_paths,root=root,
                             experiment_groups=experiment_groups,llm_evaluation=llm_evaluation,
                             run_id=run_id,master_version=master_version,price_versions=price_versions,
-                            evidence_version=evidence_version,acceptance=acceptance,formal=formal)
+                            evidence_version=evidence_version,acceptance=acceptance,formal=formal,
+                            sample_selection_date=sample_selection_date,
+                            survivor_scope=survivor_scope)
     path=out/'manifest.json'
     path.write_text(json.dumps(manifest,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
     return path
@@ -268,7 +279,11 @@ def main():
     p.add_argument('--evidence-version', default=None, help='历史证据快照版本（D 组用）')
     p.add_argument('--acceptance', help='预登记验收标准 JSON 文件路径（正式实验必填）')
     p.add_argument('--formal', action='store_true',
-                   help='正式实验：强制校验 run-id/主数据版本/价格版本/验收标准齐全')
+                   help='正式实验：强制校验 run-id/主数据版本/价格版本/验收标准/样本选择日/存续样本限定齐全')
+    p.add_argument('--sample-selection-date', default='',
+                   help='存续样本选择日（YYYY-MM-DD；正式实验必填）')
+    p.add_argument('--survivor-scope', action='store_true', default=None,
+                   help='声明样本为固定存续普通股（正式实验必填，存在幸存者偏差）')
     p.add_argument('--output-dir'); p.add_argument('--root', default='.')
     args = p.parse_args()
     if args.validate:
@@ -296,7 +311,9 @@ def main():
                                       price_versions={'raw': args.raw_price_version,
                                                       'asof_adjusted': args.asof_price_version},
                                       evidence_version=args.evidence_version,
-                                      acceptance=acceptance, formal=args.formal)
+                                      acceptance=acceptance, formal=args.formal,
+                                      sample_selection_date=args.sample_selection_date,
+                                      survivor_scope=args.survivor_scope)
     except RuntimeError as exc:
         raise SystemExit(str(exc))
     print(path)

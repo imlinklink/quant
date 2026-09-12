@@ -60,8 +60,7 @@ def master_from_basicinfo(frame: pd.DataFrame, codes, *, as_of=None, leveraged=(
         master_rows.append({'security_id': sec, 'issuer_id': sec,
                             'asset_type': _asset_type(row, lev), 'exchange': exchange,
                             'currency': 'USD', 'valid_from': valid or as_of, 'valid_to': '',
-                            'listed_at': valid, 'delisted_at': '', 'delisting_reason': '',
-                            'source_record_id': code, 'source_published_at': '',
+                            'listed_at': valid, 'source_record_id': code,
                             'source_observed_at': '', 'quality_status': quality})
         symbol_rows.append({'security_id': sec, 'symbol': code, 'exchange': exchange,
                             'valid_from': valid or as_of, 'valid_to': '',

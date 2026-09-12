@@ -21,9 +21,8 @@ from scripts.data.source_archive import archive_source
 BASE_ROW = {
     'security_id': 'SEC-900001', 'issuer_id': 'ISS-900001', 'asset_type': 'stock',
     'exchange': 'NASDAQ', 'currency': 'USD', 'valid_from': '2014-01-01', 'valid_to': '',
-    'listed_at': '2014-01-01', 'delisted_at': '', 'delisting_reason': '',
-    'source_record_id': 'm-9',
-    'source_published_at': '2014-01-01T12:00:00Z', 'source_observed_at': '2014-01-01T12:05:00Z',
+    'listed_at': '2014-01-01', 'source_record_id': 'm-9',
+    'source_observed_at': '2014-01-01T12:05:00Z',
     'quality_status': 'verified',
 }
 
@@ -107,18 +106,20 @@ class SecurityMasterV2Tests(unittest.TestCase):
             self.assertTrue((conflicts['field'] == 'symbol_reuse').any())
             self.assertEqual(symbol_reuse_conflicts(symbols)[0]['symbol'], 'US.SAME')
 
-    def test_audit_flags_terminal_and_history_gaps(self):
-        rows = [dict(BASE_ROW),
-                dict(BASE_ROW, security_id='SEC-900002', listed_at='', delisted_at='2020-03-15')]
+    def test_audit_flags_corporate_action_and_history_gaps(self):
+        rows = [dict(BASE_ROW), dict(BASE_ROW, security_id='SEC-900002', listed_at='')]
         master = normalize_master(pd.DataFrame(rows), 'src', ingested_at='2026-01-01T00:00:00Z')
-        quality, summary = audit_master(master, pd.DataFrame(columns=list(SYMBOL_COLUMNS)),
-                                        pd.DataFrame(columns=list(ACTION_COLUMNS)))
-        problems = ';'.join(quality['problems'])
-        self.assertIn('MISSING_SYMBOL_HISTORY', problems)
-        self.assertIn('TERMINAL_OUTCOME_UNKNOWN', problems)   # 退市但无结算行动
-        self.assertIn('MISSING_HISTORY', problems)            # 上市日未知
-        self.assertEqual(summary['delisted'], 1)
-        self.assertEqual(summary['terminal_outcome_unknown'], 1)
+        actions = pd.DataFrame([{'security_id': 'SEC-900001', 'action_type': 'merger',
+                                 'ex_date': '2020-03-15', 'cash_amount': None, 'ratio': None,
+                                 'source_id': 'src', 'source_record_id': 'a-1',
+                                 'source_observed_at': ''}])
+        quality, summary = audit_master(master, pd.DataFrame(columns=list(SYMBOL_COLUMNS)), actions)
+        by_id = quality.set_index('security_id')
+        self.assertIn('corporate_action_unresolved', by_id.loc['SEC-900001', 'problems'])
+        self.assertIn('MISSING_SYMBOL_HISTORY', by_id.loc['SEC-900001', 'problems'])
+        self.assertIn('MISSING_HISTORY', by_id.loc['SEC-900002', 'problems'])   # 上市日未知
+        self.assertEqual(summary['corporate_action_unresolved'], 1)
+        self.assertEqual(summary['missing_history'], 1)
 
     def test_cli_import_and_audit_and_no_overwrite(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -145,7 +146,7 @@ class SecurityMasterV2Tests(unittest.TestCase):
                 cwd=ROOT, capture_output=True, text=True)
             self.assertEqual(audit.returncode, 0, audit.stderr)
             summary = json.loads((Path(tmp) / 'qa' / 'summary.json').read_text())
-            self.assertEqual(summary['with_terminal_action'], 1)   # SEC-000002 有 merger 结算
+            self.assertEqual(summary['corporate_action_unresolved'], 1)   # SEC-000002 的 merger 无 ratio/cash
 
 
 if __name__ == '__main__':

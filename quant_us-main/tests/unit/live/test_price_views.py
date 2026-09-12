@@ -8,7 +8,7 @@ from pathlib import Path
 import pandas as pd
 
 from scripts.data.price_views import (action_version, build_price_view, build_price_views,
-                                      terminal_outcome_flags)
+                                      corporate_action_flags)
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -106,21 +106,24 @@ class PriceViewTests(unittest.TestCase):
         self.assertEqual(adj['adjustment_as_of'].iloc[0], '2020-01-31')
         self.assertEqual(adj['action_version'].nunique(), 1)
 
-    def test_terminal_outcome_flags(self):
-        master = pd.DataFrame([{'security_id': 'SEC-A', 'delisted_at': '2020-01-10'}])
-        # 无结算行动 → terminal_outcome_unknown
-        flags = terminal_outcome_flags(split_bars(), master, ACTIONS).set_index('security_id')
-        self.assertIn('terminal_outcome_unknown', flags.loc['SEC-A', 'problems'])
-        # 有并购结算 → 清除
-        settled = pd.concat([ACTIONS, pd.DataFrame([{'security_id': 'SEC-A', 'action_type': 'merger',
-                                                     'ex_date': '2020-01-10', 'ratio': 1.0,
-                                                     'cash_amount': 0.0}])], ignore_index=True)
-        flags = terminal_outcome_flags(split_bars(), master, settled).set_index('security_id')
-        self.assertNotIn('terminal_outcome_unknown', flags.loc['SEC-A', 'problems'])
-        # 日线未覆盖到最后可交易日 → MISSING_LAST_TRADING_DAY
-        short = split_bars().iloc[:3].reset_index(drop=True)
-        flags = terminal_outcome_flags(short, master, settled).set_index('security_id')
-        self.assertIn('MISSING_LAST_TRADING_DAY', flags.loc['SEC-A', 'problems'])
+    def test_corporate_action_flags(self):
+        master = pd.DataFrame([{'security_id': 'SEC-A'}])
+        # 无并购/分拆 → 不标记
+        flags = corporate_action_flags(split_bars(), master, ACTIONS).set_index('security_id')
+        self.assertNotIn('corporate_action_unresolved', flags.loc['SEC-A', 'problems'])
+        # 并购无 ratio/cash → 无法核实价格衔接 → 标记
+        unresolved = pd.concat([ACTIONS, pd.DataFrame([{'security_id': 'SEC-A', 'action_type': 'merger',
+                                                        'ex_date': '2020-01-10', 'ratio': None,
+                                                        'cash_amount': None}])], ignore_index=True)
+        flags = corporate_action_flags(split_bars(), master, unresolved).set_index('security_id')
+        self.assertIn('corporate_action_unresolved', flags.loc['SEC-A', 'problems'])
+        # 显式传入的样本同样标记
+        flags = corporate_action_flags(split_bars(), master, ACTIONS,
+                                       unresolved=('SEC-A',)).set_index('security_id')
+        self.assertIn('corporate_action_unresolved', flags.loc['SEC-A', 'problems'])
+        # 无日线 → NO_BARS
+        flags = corporate_action_flags(split_bars().iloc[0:0], master, ACTIONS).set_index('security_id')
+        self.assertIn('NO_BARS', flags.loc['SEC-A', 'problems'])
 
 
     def test_build_price_views_cli(self):

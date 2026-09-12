@@ -37,8 +37,9 @@ class FutuMasterTests(unittest.TestCase):
         self.assertEqual(by_id.loc['SEC-US-SPY', 'asset_type'], 'etf')
         self.assertEqual(by_id.loc['SEC-US-SOXL', 'asset_type'], 'leveraged_etf')
         self.assertEqual(by_id.loc['SEC-US-AAPL', 'listed_at'], '1980-12-12')
-        # 范围：当前存续，退市日一律留空
-        self.assertTrue((master['delisted_at'].fillna('') == '').all())
+        # 范围：当前存续，主数据不含退市字段
+        self.assertNotIn('delisted_at', master.columns)
+        self.assertNotIn('delisting_reason', master.columns)
         # observed_at 不可证 → unverified
         self.assertEqual(by_id.loc['SEC-US-AAPL', 'quality_status'], 'unverified')
         # symbol 映射

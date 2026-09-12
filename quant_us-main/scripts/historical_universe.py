@@ -103,9 +103,9 @@ V2_UNIVERSE_COLUMNS = ('universe_date', 'security_id', 'symbol_as_of', 'asset_ty
                        'liquidity_as_of', 'eligible', 'reason',
                        'master_version', 'price_version', 'quality_status')
 
-V2_REASONS = ('NOT_LISTED', 'DELISTED', 'MASTER_CONFLICT', 'SYMBOL_UNAVAILABLE',
-              'MISSING_BARS', 'ACTION_UNRESOLVED', 'PRICE_TOO_LOW',
-              'DOLLAR_VOLUME_TOO_LOW', 'ELIGIBLE')
+V2_REASONS = ('NOT_LISTED', 'MASTER_CONFLICT', 'SYMBOL_UNAVAILABLE', 'MISSING_BARS',
+              'CORPORATE_ACTION_UNRESOLVED', 'PRICE_TOO_LOW', 'DOLLAR_VOLUME_TOO_LOW',
+              'ELIGIBLE')
 
 
 def _symbol_as_of(symbols: pd.DataFrame, session) -> dict:
@@ -123,15 +123,17 @@ def build_point_in_time_universe_v2(master: pd.DataFrame, symbols: pd.DataFrame,
                                     liquidity: pd.DataFrame, sessions, *,
                                     min_price=5.0, min_dollar_volume=5_000_000.0,
                                     main_asset_type='stock', master_version='',
-                                    price_version='', unresolved_actions=()):
+                                    price_version='', corporate_action_unresolved=()):
     """按 security_id 构建历史时点 universe；只用 T−1 已知价格与流动性。
 
-    - 退市日之后不得 eligible；ticker 改名不产生两只“新股票”（键为 security_id）。
+    - 范围为固定存续普通股样本（不开发退市结算）；上市日之前不得 eligible。
+    - ticker 改名不产生两只“新股票”（键为 security_id）。
     - 无法证明交易状态（无有效 symbol）的日期不进入主样本，原因记为 SYMBOL_UNAVAILABLE。
     - 被拒绝记录全部保留并标注 reason；`liquidity_as_of < universe_date` 强制成立。
     - 主样本 = `eligible & asset_type == main_asset_type`；ETF/杠杆 ETF 输出独立切片。
+    - `corporate_action_unresolved` 中的证券在样本期内价格无法衔接，一律不 eligible。
     """
-    for column in ('security_id', 'asset_type', 'listed_at', 'delisted_at', 'quality_status'):
+    for column in ('security_id', 'asset_type', 'listed_at', 'quality_status'):
         if column not in master.columns:
             raise ValueError(f'security master 缺字段: {column}')
     required_liq = {'security_id', 'date', 'previous_raw_close', 'adv20_usd', 'liquidity_as_of'}
@@ -149,8 +151,7 @@ def build_point_in_time_universe_v2(master: pd.DataFrame, symbols: pd.DataFrame,
     m['vfrom'] = pd.to_datetime(m['valid_from'], errors='coerce') if 'valid_from' in m else pd.NaT
     m['vto'] = pd.to_datetime(m['valid_to'], errors='coerce') if 'valid_to' in m else pd.NaT
     m['listed_at'] = pd.to_datetime(m['listed_at'], errors='coerce')
-    m['delisted_at'] = pd.to_datetime(m['delisted_at'], errors='coerce')
-    unresolved = set(map(str, unresolved_actions))
+    unresolved = set(map(str, corporate_action_unresolved))
 
     rows = []
     for session in pd.to_datetime(list(sessions)).normalize():
@@ -163,11 +164,11 @@ def build_point_in_time_universe_v2(master: pd.DataFrame, symbols: pd.DataFrame,
         day = liq[liq['date'] == session]
         joined = active.merge(day, on='security_id', how='left')
 
-        listed = (joined['listed_at'].notna() & (joined['listed_at'] <= session) &
-                  (joined['delisted_at'].isna() | (joined['delisted_at'] >= session)))
+        listed = joined['listed_at'].notna() & (joined['listed_at'] <= session)
         symbol_ok = joined['security_id'].astype(str).isin(symbols_today)
         joined['symbol_as_of'] = joined['security_id'].astype(str).map(symbols_today)
-        tradable = listed & symbol_ok & joined['quality_status'].ne('conflict')
+        tradable = (listed & symbol_ok & joined['quality_status'].ne('conflict') &
+                    ~joined['security_id'].astype(str).isin(unresolved))
         has_bars = joined['previous_raw_close'].notna() & joined['adv20_usd'].notna()
         price_ok = joined['previous_raw_close'].ge(min_price)
         volume_ok = joined['adv20_usd'].ge(min_dollar_volume)
@@ -175,16 +176,16 @@ def build_point_in_time_universe_v2(master: pd.DataFrame, symbols: pd.DataFrame,
         joined['tradable'] = tradable
         joined['eligible'] = tradable & has_bars & price_ok & volume_ok
         joined['reason'] = np.select(
-            [~listed & joined['listed_at'].notna() & (joined['listed_at'] > session),
-             joined['delisted_at'].notna() & (joined['delisted_at'] < session),
+            [~listed,
              joined['quality_status'].eq('conflict'),
              ~symbol_ok,
              joined['security_id'].astype(str).isin(unresolved),
              ~has_bars,
              tradable & ~price_ok,
              tradable & ~volume_ok],
-            ['NOT_LISTED', 'DELISTED', 'MASTER_CONFLICT', 'SYMBOL_UNAVAILABLE',
-             'ACTION_UNRESOLVED', 'MISSING_BARS', 'PRICE_TOO_LOW', 'DOLLAR_VOLUME_TOO_LOW'],
+            ['NOT_LISTED', 'MASTER_CONFLICT', 'SYMBOL_UNAVAILABLE',
+             'CORPORATE_ACTION_UNRESOLVED', 'MISSING_BARS', 'PRICE_TOO_LOW',
+             'DOLLAR_VOLUME_TOO_LOW'],
             default='ELIGIBLE')
         joined['reason'] = np.where(joined['eligible'], 'ELIGIBLE', joined['reason'])
         joined['universe_date'] = session

@@ -92,10 +92,21 @@ class ExperimentManifestTests(unittest.TestCase):
                     run_id='RUN-1',master_version='MV1',
                     price_versions={'raw':'RAW1','asof_adjusted':'ADJ1'},
                     acceptance={'primary':'expectancy_usd',
-                                'decision':['retain','reject','inconclusive']})
+                                'decision':['retain','reject','inconclusive']},
+                    sample_selection_date='2026-09-12',survivor_scope=True)
                 self.assertEqual(validate_manifest(complete,root),[])
                 self.assertEqual(complete['run_id'],'RUN-1')
                 self.assertEqual(complete['price_versions']['raw'],'RAW1')
+                self.assertEqual(complete['sample_selection_date'],'2026-09-12')
+                self.assertTrue(complete['survivor_scope'])
+                # 缺样本选择日/存续限定同样阻断
+                missing_scope=build_manifest('E1',cfg,uni,[data],periods,[quality],root=root,formal=True,
+                    run_id='RUN-1',master_version='MV1',
+                    price_versions={'raw':'RAW1','asof_adjusted':'ADJ1'},
+                    acceptance={'primary':'x'})
+                flags=' '.join(validate_manifest(missing_scope,root))
+                self.assertIn('sample_selection_date',flags)
+                self.assertIn('survivor_scope',flags)
                 # 非正式实验不强制来源字段（向后兼容）
                 plain=build_manifest('E1',cfg,uni,[data],periods,[quality],root=root)
                 self.assertFalse(any(e.startswith('PROVENANCE_INCOMPLETE')
