@@ -2,8 +2,8 @@
 
 一页看清：**已完成 / 待数据 / 待前向**。项目目录 `quant_us-main`；Git 仓库根在其父目录 `quant`。
 
-- 当前 HEAD：`65b0b15`
-- 全量测试：**540 passed**
+- 当前 HEAD：`dac99c7`
+- 全量测试：**541 passed**
 - 总体状态：**engineering_pass**（契约与质量门通过；不产出策略结论）
 - 数据源：**富途 OpenD**；范围 = **固定存续普通股样本，不纳入退市**（存在幸存者偏差）
 
@@ -21,6 +21,9 @@
 | 富途接入 | 富途当前目录 → v2 主数据；QFQ/不复权反推公司行动；能力探针 | `scripts/data/import_security_master_v2_from_futu.py`、`derive_corporate_actions.py`、`probe_futu_source.py` | 10 项 |
 | 桥接层 | symbol→security_id 映射（复用窗口歧义不静默任选）；`run_daily_pipeline` 已核验主数据模式（不覆盖真实上市日） | `scripts/data/id_bridge.py`、`bridge_to_security_id.py`、`run_daily_pipeline.py` | 4 项 |
 | 富途直取公司行动 | `get_corporate_actions_stock_splits`/`_dividends` 直接生成 `corporate_actions.csv`（含 `pub_date`；不伪造 `observed_at`），优于 QFQ 反推 | `scripts/data/import_corporate_actions_from_futu.py` | 3 项 |
+| security_id 贯穿 | `attach_security_id.py` 给 setups 补 `security_id`；v2 universe 补回当时 symbol 供 runner 使用。现 setups→signals→matrix→report 全程带 `security_id` | `scripts/data/attach_security_id.py`、`id_bridge.py` | 5 项 |
+
+**已跑的真实实验（本机 OpenD）**：`BUY-WD-ABC-SURVIVOR-001` / `-002`（17 只主题普通股，有效 16 只）。**两者结论一致**（B−A 正单元 4/44、C−B 8/44；两个门都像负增量），且 002 验证了 security_id 路径可复现。均为 `inconclusive`。
 
 > **沙箱连 OpenD**：本机（Mac）的 `127.0.0.1` 在沙箱里是 VM 自己的回环，连不上；沙箱出口主机 `172.16.10.254` 即本机，OpenD 在其 `11111`。跑富途脚本加 `--host 172.16.10.254`（实测可连）。
 
