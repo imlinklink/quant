@@ -23,7 +23,10 @@ def main():
     p.add_argument('--evidence', required=True, help='evidence.jsonl')
     p.add_argument('--source-version', default='')
     p.add_argument('--price-version', default='')
-    p.add_argument('--require-observed-at', action='store_true', default=True)
+    p.add_argument('--allow-unproven-observed-at', action='store_true',
+                   help='诊断层：允许缺 observed_at 的材料进入 packet（严格层禁止，默认关闭）')
+    p.add_argument('--diagnostic', action='store_true',
+                   help='诊断层：同时放宽 observed_at 与来源核验，仅用于覆盖率诊断，不得用于正式回放')
     p.add_argument('--output-dir', required=True)
     args = p.parse_args()
     setups = pd.read_csv(args.setups)
@@ -31,7 +34,8 @@ def main():
         if column not in setups.columns:
             raise SystemExit(f'setups 缺字段: {column}')
     records = pd.read_json(args.evidence, lines=True)
-    policy = {'require_observed_at': args.require_observed_at}
+    policy = {'require_observed_at': not (args.allow_unproven_observed_at or args.diagnostic),
+              'require_verified': not args.diagnostic}
 
     out = Path(args.output_dir)
     if out.exists() and any(out.iterdir()):
