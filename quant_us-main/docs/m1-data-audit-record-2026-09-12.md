@@ -36,11 +36,35 @@ US.JPM  US.KO    US.NBIS  US.NEE  US.PG    US.PLD  US.SHW  US.SPY  US.XOM
   - （先前看起来"不一致"的 BAC/CAT/AMZN 等，是**窗口外的历史拆股**，属正常，不计入。）
 - 产出：`data/survivor_sample_audit/price_action_checks.csv`、`price_action_mismatches.csv`、`quality_summary.json`。
 
+## 已完成：逐日 as-of 特征价（§4.2 硬前提）
+
+- 新增 `scripts/data/asof_features.py`：
+  - `asof_features(bars, actions, decision_day)` —— 只用 `ex_date <= decision_day` 的行动构造 as-of 序列，再算均线/ATR；
+  - `full_snapshot_features(...)` —— 对照用的**错法**（as_of=最新）；
+  - `feature_drift(...)` —— 量化两者的相对差异。
+- 4 项测试（含拆股 fixture）：**拆股前**的决策日，正确特征保持拆股前价格尺度（100），错法被未来拆股缩到 50（差 100%）；拆股后两者收敛。
+
+### 前视影响量化（本样本）
+
+窗口内有拆股的 8 只，`setup` 落在拆股日之前者共 **1526 / 11290（13.5%）**：
+
+| 标的 | 首次拆股 | 拆股前 setup |
+|---|---|---:|
+| US.HON | 2025-10-30 | 357 |
+| US.AVGO | 2024-07-15 | 270 |
+| US.GOOGL | 2022-07-18 | 204 |
+| US.NEE | 2020-10-27 | 192 |
+| US.AMZN | 2022-06-06 | 181 |
+| US.NVDA | 2021-07-20 | 170 |
+| US.AAPL | 2020-08-31 | 152 |
+| US.NFLX | 2015-07-15 | 0 |
+
+**判断**：这些 setup 的**特征尺度**被未来拆股改变，但本策略的信号多为**尺度不变**（周线门用比值、止损/高开门用 close±k·ATR），且样本内拆股前价格均远高于 $5 门槛，故**方向性影响预计很小**。但按方案要求，**M2 必须**用**不复权执行价 + 逐决策日 as-of 特征**重建，不能用 QFQ 快照充当执行价或历史均线。
+
 ## 尚未完成（M1 剩余项）
 
-1. **逐日 as-of 特征价**：`build_price_views.py` 现要求 `--as-of`，多年回放须**按每个决策时点重建** as-of 视图（不得用 2026 年一张快照算所有历史均线）。
-2. **ticker 映射失败清单** `ticker_mapping_failures.csv`。
-3. **`source_manifest.json`**（原始响应与哈希、下载时间、请求参数）。
+1. **ticker 映射失败清单** `ticker_mapping_failures.csv`。
+2. **`source_manifest.json`**（原始响应与哈希、下载时间、请求参数）。
 
 ## 放行判定（§4.3）
 
