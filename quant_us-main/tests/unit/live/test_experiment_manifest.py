@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 import shutil
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
@@ -8,6 +9,19 @@ from scripts.experiment_manifest import build_manifest, validate_manifest, write
 
 
 class ExperimentManifestTests(unittest.TestCase):
+    def test_git_dirty_is_scoped_to_project_root(self):
+        from scripts.experiment_manifest import git_is_dirty
+        with tempfile.TemporaryDirectory() as tmp:
+            repo=Path(tmp);subprocess.run(['git','init','-q'],cwd=repo,check=True)
+            (repo/'a').mkdir();(repo/'b').mkdir();(repo/'a'/'tracked').write_text('a')
+            subprocess.run(['git','add','.'],cwd=repo,check=True)
+            subprocess.run(['git','-c','user.email=test@example.com','-c','user.name=test',
+                            'commit','-qm','base'],cwd=repo,check=True)
+            (repo/'b'/'other').write_text('dirty')
+            self.assertFalse(git_is_dirty(repo/'a'))
+            (repo/'a'/'tracked').write_text('dirty')
+            self.assertTrue(git_is_dirty(repo/'a'))
+
     def test_hash_validation_and_no_overwrite(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);cfg=root/'config.yaml';uni=root/'universe.csv';data=root/'bars.csv';quality=root/'quality.csv'

@@ -82,7 +82,8 @@ def git_commit(root='.') -> str:
 
 
 def git_is_dirty(root='.') -> bool:
-    result = subprocess.run(['git', 'status', '--porcelain'], cwd=root, check=True,
+    # 仓库可包含多个相邻项目；只冻结调用者指定的项目目录。
+    result = subprocess.run(['git', 'status', '--porcelain', '--', '.'], cwd=root, check=True,
                             capture_output=True, text=True)
     return bool(result.stdout.strip())
 
