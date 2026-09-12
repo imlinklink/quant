@@ -91,6 +91,27 @@ python3 scripts/data/audit_security_master_v2.py \
 
 **阶段 1–5 的工程代码至此可全部用 fixture 验证；真实数据接入前不能产出历史样本或策略结论。**
 
+## 真实数据首跑（2026-09-12，本机 OpenD）
+
+沙箱连 OpenD 的地址：本机（Mac）`127.0.0.1` 在沙箱里是 VM 回环，连不上；**出口主机 `172.16.10.254:11111` 即本机**，加 `--host 172.16.10.254` 可连（实测 `get_global_state` ret=0）。
+
+跑出的真实产物（`data/` 已 gitignore，留本地作证据）：
+
+| 产物 | 结果 |
+|---|---|
+| `data/security_master_runs/futu-2026-09-12/security_master_v2.csv` | 13 只；`validate_master` 无错误 |
+| `…/symbol_history.csv` | 13 条，symbol 自 2015-01-01 有效 |
+| `data/corporate_actions_runs/futu-2026-09-12/corporate_actions.csv` | 21 条（20 分红 + 1 拆股），来自富途公司行动接口 |
+| `data/price_bridge/SURVIVOR-QFQ-20260912/*` | daily/liquidity 100% 映射，13 只，0 未映射/歧义 |
+| `data/market_history/runs/SURVIVOR-QFQ-20260912/universe_v2/universe.csv.gz` | 28,673 行；`eligible` 23,716；**主样本（stock & eligible）7,288** |
+
+**两个硬发现（影响正式实验）**
+
+1. **富途不提供可信的 US 上市日**：13 只里 **8 只是 `1970-01-01` 占位**（仅 LITE/MU/MULL/RAM/YINN 有真实值）。因此手册要求的"已核验上市日"模式对这批标的**不可用**；本跑退回到「首根日线推断 / 下载起点」并把 `quality_status` 标为 `unverified`，**不得**当作核验上市日。
+2. **样本只有 13 只（普通股仅 5 只）**，远低于手册 §2.6 的「20–50 只普通股」工程扩池门槛。扩池需要**预先登记的选样规则**（不能按历史收益挑）。
+
+**尚未完成的衔接**：实验层（`buy_strategy_experiment_runner` / `exit_matrix` / `buy_strategy_report`）仍以 **symbol** 为主键，而 universe v2 以 **security_id** 为主键。要在 v2 universe 上跑 ABC，需二者对齐（给 universe 补回当时有效 symbol，或把 runner 迁到 security_id）。
+
 ## 阶段 5：experiment_manifest 元数据扩展（提交随本记录）
 
 依据 §4.1。`scripts/experiment_manifest.py` 新增：
