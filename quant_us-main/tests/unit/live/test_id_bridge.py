@@ -85,5 +85,24 @@ class VerifiedMasterModeTests(unittest.TestCase):
                             '已核验模式下不得用首根 K 线覆盖真实上市日')
 
 
+class AttachSecurityIdCliTests(unittest.TestCase):
+    def test_attach_cli_adds_security_id(self):
+        import subprocess, sys, json
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            symbols_path = tmp / 'symbols.csv'; SYMBOLS.to_csv(symbols_path, index=False)
+            frame = bars([('US.X', '2020-02-03'), ('US.Y', '2020-03-01')])
+            frame_path = tmp / 'setups.csv'; frame.to_csv(frame_path, index=False)
+            out = tmp / 'out.csv'
+            result = subprocess.run(
+                [sys.executable, 'scripts/data/attach_security_id.py', '--frame', str(frame_path),
+                 '--symbols', str(symbols_path), '--symbol-col', 'stock', '--date-col', 'date',
+                 '--output', str(out)], cwd=ROOT, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            written = pd.read_csv(out)
+            self.assertIn('security_id', written.columns)
+            self.assertEqual(set(written['security_id']), {'SEC-A', 'SEC-C'})
+
+
 if __name__ == '__main__':
     unittest.main()
