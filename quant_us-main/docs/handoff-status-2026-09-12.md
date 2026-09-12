@@ -2,8 +2,8 @@
 
 一页看清：**已完成 / 待数据 / 待前向**。项目目录 `quant_us-main`；Git 仓库根在其父目录 `quant`。
 
-- 当前 HEAD：`e7c26a9`
-- 全量测试：**533 passed**
+- 当前 HEAD：`0641de7`
+- 全量测试：**537 passed**
 - 总体状态：**engineering_pass**（契约与质量门通过；不产出策略结论）
 - 数据源：**富途 OpenD**；范围 = **固定存续普通股样本，不纳入退市**（存在幸存者偏差）
 
@@ -19,15 +19,36 @@
 | 4 | 历史时点 universe v2（security_id 贯穿、T−1 流动性门、拒绝原因） | `scripts/historical_universe.py`（v2 函数）、`scripts/data/build_historical_universe_v2.py` | 8 项 |
 | 5 | 正式实验 manifest 元数据（主数据/价格版本、样本选择日、存续限定、验收标准） | `scripts/experiment_manifest.py` | 5 项 |
 | 富途接入 | 富途当前目录 → v2 主数据；QFQ/不复权反推公司行动；能力探针 | `scripts/data/import_security_master_v2_from_futu.py`、`derive_corporate_actions.py`、`probe_futu_source.py` | 10 项 |
+| 桥接层 | symbol→security_id 映射（复用窗口歧义不静默任选）；`run_daily_pipeline` 已核验主数据模式（不覆盖真实上市日） | `scripts/data/id_bridge.py`、`bridge_to_security_id.py`、`run_daily_pipeline.py` | 4 项 |
 
 **富途命令链（需本机 OpenD）**
 
 ```bash
-python3 scripts/data/import_security_master_v2_from_futu.py --output-dir data/security_master_runs/<ver>
-python3 scripts/data/build_price_views.py --bars <不复权日线> --actions <反推行动> --as-of <日期> --output-dir <双视图>
-python3 scripts/data/build_historical_universe_v2.py --master ... --symbols ... --liquidity ... --calendar ...
-python3 scripts/experiment_manifest.py ... --formal --run-id ... --master-version ... \
-  --raw-price-version ... --asof-price-version ... --sample-selection-date ... --survivor-scope
+# 1) v2 主数据与 ticker 历史（当前存续证券）
+python3 scripts/data/import_security_master_v2_from_futu.py \
+  --output-dir data/security_master_runs/<ver> --run-id <run>
+
+# 2) 下载日线/流动性（现有管道，symbol 键；--verified-master 不用首根 K 线覆盖真实上市日）
+python3 scripts/data/run_daily_pipeline.py --master <v1 master> --verified-master \
+  --start ... --end ... --universe-start ... --universe-end ... --run-id <run>
+
+# 3) 桥接为 security_id 键
+python3 scripts/data/bridge_to_security_id.py --run-dir data/market_history/runs/<run> \
+  --symbols data/security_master_runs/<ver>/symbol_history.csv --output-dir <bridge>
+
+# 4) 由 QFQ 与不复权价差反推公司行动（标 unverified，需人工复核）
+python3 scripts/data/derive_corporate_actions.py --raw <不复权> --adjusted <QFQ> \
+  --security-id <SEC-...> --output <actions.csv>
+
+# 5) 双价格视图 -> 历史时点 universe v2
+python3 scripts/data/build_price_views.py --bars <bridge>/daily_v2.csv.gz --actions <actions> \
+  --as-of <日期> --output-dir <双视图>
+python3 scripts/data/build_historical_universe_v2.py --master ... --symbols ... \
+  --liquidity <bridge>/daily_liquidity_v2.csv.gz --calendar ... --output-dir <universe>
+
+# 6) 冻结正式实验（--formal 强制 run-id/主数据版本/双价格版本/样本选择日/存续限定/验收标准）
+python3 scripts/experiment_manifest.py ... --formal --run-id <run> --master-version <ver> \
+  --raw-price-version <v> --asof-price-version <v> --sample-selection-date <YYYY-MM-DD> --survivor-scope
 python3 scripts/buy_strategy_experiment_runner.py --manifest ... --setups ... --universe ... --output-dir .../entries
 python3 scripts/exit_matrix.py --manifest ... --entries .../signals.csv --daily ... --groups ABC --output .../exit_matrix.csv
 python3 scripts/buy_strategy_report.py --matrix .../exit_matrix.csv --manifest ... --groups ABC --output-dir .../report
