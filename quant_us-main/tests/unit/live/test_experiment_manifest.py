@@ -75,4 +75,31 @@ class ExperimentManifestTests(unittest.TestCase):
                               validate_manifest(bad3,root))
 
 
+    def test_formal_manifest_requires_provenance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);cfg=root/'config.yaml';uni=root/'universe.csv';data=root/'bars.csv';quality=root/'quality.csv'
+            cfg.write_text('x: 1');uni.write_text('code\nUS.X\n');data.write_text('date\n2026-01-01\n');quality.write_text('quality\ngood\n')
+            periods={'development_end':'2020-12-31','validation_start':'2021-01-01',
+                     'validation_end':'2023-12-31','test_start':'2024-01-01'}
+            with patch('scripts.experiment_manifest.git_commit',return_value='abc'), \
+                 patch('scripts.experiment_manifest.git_is_dirty',return_value=False):
+                # 正式实验但缺来源/预登记 → 阻断
+                incomplete=build_manifest('E1',cfg,uni,[data],periods,[quality],root=root,formal=True)
+                self.assertTrue(any(e.startswith('PROVENANCE_INCOMPLETE')
+                                    for e in validate_manifest(incomplete,root)))
+                # 齐全 → 通过
+                complete=build_manifest('E1',cfg,uni,[data],periods,[quality],root=root,formal=True,
+                    run_id='RUN-1',master_version='MV1',
+                    price_versions={'raw':'RAW1','asof_adjusted':'ADJ1'},
+                    acceptance={'primary':'expectancy_usd',
+                                'decision':['retain','reject','inconclusive']})
+                self.assertEqual(validate_manifest(complete,root),[])
+                self.assertEqual(complete['run_id'],'RUN-1')
+                self.assertEqual(complete['price_versions']['raw'],'RAW1')
+                # 非正式实验不强制来源字段（向后兼容）
+                plain=build_manifest('E1',cfg,uni,[data],periods,[quality],root=root)
+                self.assertFalse(any(e.startswith('PROVENANCE_INCOMPLETE')
+                                     for e in validate_manifest(plain,root)))
+
+
 if __name__=='__main__':unittest.main()

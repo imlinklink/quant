@@ -90,3 +90,22 @@ python3 scripts/data/audit_security_master_v2.py \
 全量测试：509 passed。状态 **engineering_pass**。未做：20–50 只真实普通股扩池所需的真实数据源（阶段 1 待用户决策）、experiment_manifest 元数据扩展与正式 ABC 冻结（阶段 5）、证据快照（阶段 6–7）。
 
 **阶段 1–5 的工程代码至此可全部用 fixture 验证；真实数据接入前不能产出历史样本或策略结论。**
+
+## 阶段 5：experiment_manifest 元数据扩展（提交随本记录）
+
+依据 §4.1。`scripts/experiment_manifest.py` 新增：
+
+- manifest 字段：`schema_version`、`formal`、`run_id`、`master_version`、`price_versions{raw,asof_adjusted}`、`evidence_version`、`acceptance`（预登记验收标准）。
+- 新增 `provenance_completeness(manifest)` 与校验：当 `formal=true` 时，`run_id / master_version / 两个价格版本 / acceptance` 必须齐全，否则 `PROVENANCE_INCOMPLETE`；非正式实验不强制（向后兼容）。
+- CLI 新增 `--run-id`、`--master-version`、`--raw-price-version`、`--asof-price-version`、`--evidence-version`、`--acceptance <json>`、`--formal`。
+
+用途：正式 ABC 冻结时一次性登记"数据从哪来、什么版本、验收标准是什么"，避免事后补记。
+
+## 任务 1 文档骨架（本次一并交付）
+
+| 文件 | 作用 |
+|---|---|
+| `docs/sample-frame-registration-2026-09-12.md` | §2.1 样本框架登记模板（三层样本、必列字段、区间预登记）——**须在下载行情前填写冻结** |
+| `docs/source-assessment-template-2026-09-12.md` | §2.3 数据源能力与许可评估模板（退市/ticker/行动/日线/下载与保存权/研究许可） |
+
+两份均为**待用户决策**项：仓库内无覆盖退市/ticker 变更/公司行动的来源，阶段 1 未决前真实数据管道不能推进。

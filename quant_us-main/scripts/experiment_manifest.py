@@ -108,16 +108,40 @@ def resolve_record_path(record, root='.'):
     return resolved
 
 
+# 正式实验（formal）必须显式冻结的来源与预登记信息（技术设计 §4.1）。
+FORMAL_FIELDS = ('run_id', 'master_version', 'price_versions', 'acceptance')
+SCHEMA_VERSION = '2'
+
+
+def provenance_completeness(manifest: dict) -> list:
+    """返回正式实验缺失的来源/预登记字段名。"""
+    missing = []
+    if str(manifest.get('run_id') or '').strip() in ('', 'UNSET'):
+        missing.append('run_id')
+    if not str(manifest.get('master_version') or '').strip():
+        missing.append('master_version')
+    prices = manifest.get('price_versions') or {}
+    for basis in ('raw', 'asof_adjusted'):
+        if not str(prices.get(basis) or '').strip():
+            missing.append(f'price_versions.{basis}')
+    if not isinstance(manifest.get('acceptance'), dict) or not manifest.get('acceptance'):
+        missing.append('acceptance')
+    return missing
+
+
 def build_manifest(experiment_id: str, config_path, universe_path,
                    data_paths: Iterable, periods: dict, quality_paths=(),
                    costs=(.001, .002, .005, .01),
                    random_seed=20260910, root='.',
-                   experiment_groups=GROUP_ORDER, llm_evaluation=None) -> dict:
+                   experiment_groups=GROUP_ORDER, llm_evaluation=None,
+                   run_id='UNSET', master_version='', price_versions=None,
+                   evidence_version=None, acceptance=None, formal=False) -> dict:
     groups = parse_groups(experiment_groups)
     if llm_evaluation is None:
         llm_evaluation = default_llm_evaluation(groups)
     return {
         'experiment_id': experiment_id,
+        'schema_version': SCHEMA_VERSION,
         'document_version': 'weekly-daily-strategy-test-handoff-manual-2026-09-11',
         'git_commit': git_commit(root), 'git_dirty': git_is_dirty(root),
         'random_seed': int(random_seed),
@@ -127,6 +151,12 @@ def build_manifest(experiment_id: str, config_path, universe_path,
         'quality_files': [file_record(p,root) for p in sorted(map(str, quality_paths))],
         'periods': periods, 'costs': list(map(float, costs)),
         'experiment_groups': list(groups), 'llm_evaluation': llm_evaluation,
+        'formal': bool(formal),
+        'run_id': str(run_id),
+        'master_version': str(master_version),
+        'price_versions': dict(price_versions or {'raw': '', 'asof_adjusted': ''}),
+        'evidence_version': evidence_version,
+        'acceptance': dict(acceptance or {}),
     }
 
 
@@ -176,6 +206,8 @@ def validate_manifest(manifest: dict, root='.', require_git=True) -> list:
                     errors.append('LLM_EVALUATION_MISSING')
                 elif llm.get('status') != 'inconclusive':
                     errors.append('LLM_EVALUATION_MUST_BE_INCONCLUSIVE_WITHOUT_D')
+    if manifest.get('formal') and provenance_completeness(manifest):
+        errors.append('PROVENANCE_INCOMPLETE:' + ','.join(provenance_completeness(manifest)))
     if require_git:
         try:
             if git_commit(root) != manifest.get('git_commit'):
@@ -199,7 +231,9 @@ def write_new_manifest(output_dir, manifest: dict) -> Path:
 
 def create_frozen_experiment(output_dir, experiment_id, config_path, universe_path,
                              data_paths, periods, root='.', quality_paths=(),
-                             experiment_groups=GROUP_ORDER, llm_evaluation=None) -> Path:
+                             experiment_groups=GROUP_ORDER, llm_evaluation=None,
+                             run_id='UNSET', master_version='', price_versions=None,
+                             evidence_version=None, acceptance=None, formal=False) -> Path:
     """复制小型冻结输入到实验目录，再基于最终路径生成 manifest。"""
     out=Path(output_dir)
     if out.exists() and any(out.iterdir()):
@@ -211,7 +245,9 @@ def create_frozen_experiment(output_dir, experiment_id, config_path, universe_pa
     shutil.copy2(config_path,frozen_config);shutil.copy2(universe_path,frozen_universe)
     manifest=build_manifest(experiment_id,frozen_config,frozen_universe,data_paths,periods,
                             quality_paths=quality_paths,root=root,
-                            experiment_groups=experiment_groups,llm_evaluation=llm_evaluation)
+                            experiment_groups=experiment_groups,llm_evaluation=llm_evaluation,
+                            run_id=run_id,master_version=master_version,price_versions=price_versions,
+                            evidence_version=evidence_version,acceptance=acceptance,formal=formal)
     path=out/'manifest.json'
     path.write_text(json.dumps(manifest,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
     return path
@@ -225,6 +261,14 @@ def main():
     p.add_argument('--quality', nargs='+')
     p.add_argument('--groups', default='ABCD',
                    help='实验分组，A/B/C/D 的有序子集，默认 ABCD（例如 ABC）')
+    p.add_argument('--run-id', default='UNSET', help='数据 run-id（正式实验必填）')
+    p.add_argument('--master-version', default='', help='证券主数据版本（正式实验必填）')
+    p.add_argument('--raw-price-version', default='', help='原始可交易价版本')
+    p.add_argument('--asof-price-version', default='', help='as-of 特征价版本')
+    p.add_argument('--evidence-version', default=None, help='历史证据快照版本（D 组用）')
+    p.add_argument('--acceptance', help='预登记验收标准 JSON 文件路径（正式实验必填）')
+    p.add_argument('--formal', action='store_true',
+                   help='正式实验：强制校验 run-id/主数据版本/价格版本/验收标准齐全')
     p.add_argument('--output-dir'); p.add_argument('--root', default='.')
     args = p.parse_args()
     if args.validate:
@@ -238,13 +282,21 @@ def main():
         groups = parse_groups(args.groups)
     except ValueError as exc:
         p.error(str(exc))
+    acceptance = None
+    if args.acceptance:
+        acceptance = json.loads(Path(args.acceptance).read_text(encoding='utf-8'))
     periods = {'development_start': '2016-01-01', 'development_end': '2020-12-31',
                'validation_start': '2021-01-01', 'validation_end': '2023-12-31',
                'test_start': '2024-01-01', 'test_end': '2026-08-31'}
     try:
         path=create_frozen_experiment(args.output_dir,args.experiment_id,args.config,
                                       args.universe,args.data or [],periods,args.root,args.quality,
-                                      experiment_groups=groups)
+                                      experiment_groups=groups, run_id=args.run_id,
+                                      master_version=args.master_version,
+                                      price_versions={'raw': args.raw_price_version,
+                                                      'asof_adjusted': args.asof_price_version},
+                                      evidence_version=args.evidence_version,
+                                      acceptance=acceptance, formal=args.formal)
     except RuntimeError as exc:
         raise SystemExit(str(exc))
     print(path)
