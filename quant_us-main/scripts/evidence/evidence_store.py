@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -69,6 +70,14 @@ def content_hash(payload) -> str:
     return _hash_text(payload)
 
 
+def _normalize_digest(value) -> str:
+    """保留来源已计算的 SHA-256；fixture/适配器给原文时只计算一次。"""
+    if value is None or pd.isna(value) or str(value).strip() == '':
+        return ''
+    raw = str(value).strip()
+    return raw.lower() if re.fullmatch(r'[0-9a-fA-F]{64}', raw) else content_hash(raw)
+
+
 def evidence_id_for(record: dict) -> str:
     """稳定证据 ID。"""
     blob = json.dumps({k: record.get(k) for k in
@@ -89,10 +98,9 @@ def normalize_evidence(frame: pd.DataFrame, *, ingested_at=None) -> pd.DataFrame
     d['ingested_at'] = d['ingested_at'].map(_to_utc) if 'ingested_at' in d and \
         d['ingested_at'].notna().any() else (_to_utc(ingested_at) or datetime.now(UTC).isoformat())
     d['supersedes_id'] = d['supersedes_id'].where(d['supersedes_id'].notna(), None)
-    d['content_hash'] = [content_hash(str(v)) if str(v) and str(v) != 'nan' else ''
-                         for v in d.get('content_hash', pd.Series([], dtype=object))]
-    if 'summary_hash' not in d or d['summary_hash'].isna().all():
-        d['summary_hash'] = d['content_hash']
+    d['content_hash'] = d['content_hash'].map(_normalize_digest)
+    d['summary_hash'] = d['summary_hash'].map(_normalize_digest)
+    d.loc[d['summary_hash'].eq(''), 'summary_hash'] = d['content_hash']
     d['evidence_id'] = [evidence_id_for(r) for r in d.to_dict('records')]
     return d[list(REQUIRED_COLUMNS)]
 
@@ -110,7 +118,8 @@ def validate_evidence(frame: pd.DataFrame) -> list:
         errors.append('OBSERVED_BEFORE_PUBLISHED')     # 首次可见不能早于公开
     if frame['ingested_at'].map(lambda v: v is None or str(v).strip() == '').any():
         errors.append('INGESTED_AT_MISSING')
-    if not frame['availability_proof'].map(lambda v: str(v).strip() != '').any():
+    if frame['availability_proof'].map(
+            lambda v: pd.isna(v) or str(v).strip().lower() in ('', 'nan', 'none')).any():
         errors.append('AVAILABILITY_PROOF_MISSING')
     return sorted(set(errors))
 
@@ -119,16 +128,19 @@ def validate_evidence(frame: pd.DataFrame) -> list:
 
 def _resolve(record, security_id, resolver):
     """判断证据是否属于该 security_id；返回 (matched, ambiguous)。"""
-    if str(record.get('security_id')) == str(security_id):
-        return True, False
     symbol = record.get('symbol_as_published')
     if resolver is not None and symbol:
         outcome = resolver(str(symbol), record.get('published_at'))
         if outcome.get('status') == 'ambiguous':
             return False, True
-        if outcome.get('status') == 'resolved' and str(outcome['security_id']) == str(security_id):
-            return True, False
-    return False, False
+        if outcome.get('status') == 'resolved':
+            resolved = str(outcome['security_id'])
+            recorded = str(record.get('security_id') or '')
+            if recorded and recorded != resolved:
+                return False, True
+            return resolved == str(security_id), False
+        return False, False
+    return str(record.get('security_id')) == str(security_id), False
 
 
 def select_visible(records: pd.DataFrame, security_id, decision_cutoff, *, policy=None,
@@ -233,6 +245,8 @@ def build_packet(records: pd.DataFrame, security_id, decision_cutoff, *,
         'event_clusters': len({str(r.get('source_record_id') or r.get('content_hash')) for r in kept}),
         'events': events,
         'price_context': price_context or {},
+        'evidence_mode': 'strict' if (policy or {}).get('require_observed_at', True)
+                         and (policy or {}).get('require_verified', True) else 'diagnostic',
         'exclusions': sorted(exclusions, key=lambda e: (str(e['reason']), str(e['evidence_id']))),
     }
     packet['packet_hash'] = packet_hash(packet)
@@ -261,12 +275,16 @@ def validate_labels(labels: list, packets: dict) -> list:
         seen.add(setup_id)
         if str(label.get('packet_hash')) != str(packet.get('packet_hash')):
             errors.append(f'PACKET_HASH_MISMATCH:{setup_id}')
+        if packet_hash(packet) != packet.get('packet_hash'):
+            errors.append(f'PACKET_TAMPERED:{setup_id}')
         allowed = {e['evidence_id'] for e in packet.get('events', [])}
         for cited in label.get('cited_evidence_ids') or []:
             if cited not in allowed:
                 errors.append(f'CITATION_OUTSIDE_PACKET:{setup_id}:{cited}')
         if str(label.get('llm_decision')) == 'missing':
             errors.append(f'MISSING_TREATED_AS_DECISION:{setup_id}')
+    for setup_id in sorted(set(packets) - seen):
+        errors.append(f'LABEL_MISSING:{setup_id}')
     return errors
 
 

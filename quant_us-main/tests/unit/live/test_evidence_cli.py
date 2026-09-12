@@ -24,6 +24,18 @@ def run(args):
 
 
 class EvidenceCliTests(unittest.TestCase):
+    def test_diagnostic_packets_cannot_be_replayed_as_strict(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            (tmp / 'packets' / 'packets').mkdir(parents=True)
+            (tmp / 'packets' / 'packets' / 's1.json').write_text(json.dumps({
+                'packet_hash': 'pkt_x', 'decision_cutoff': '2022-03-10T21:00:00Z',
+                'evidence_mode': 'diagnostic', 'events': []}))
+            result = run(['scripts/evidence/replay_historical_selection.py',
+                          '--packets', str(tmp / 'packets'), '--output-dir', str(tmp / 'job')])
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('STRICT_REPLAY_REQUIRES_STRICT_PACKETS', result.stderr)
+
     def test_import_audit_packet_replay(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)

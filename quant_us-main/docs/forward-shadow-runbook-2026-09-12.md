@@ -12,14 +12,14 @@
 
 - 本机 Futu OpenD 已启动并登录（`127.0.0.1:11111`，仅需行情权限）。
 - `config.yaml`：`buy_strategy_v2.mode: shadow`（必须）；`shadow_only: true`。
-- 样本已冻结（2026-09-12，39 只普通股）：`data/security_master_39.csv` 与 `docs/sample-frame-registration-2026-09-12.md`。
-- 若要让 shadow 覆盖这批样本，把 39 只写入 `buy_strategy_v2.watch_list`（沙箱内生成的模板见 `data/shadow/config_shadow.yaml`，注意其 `futu.host` 为沙箱地址 `172.16.10.254`，本机应改回 `127.0.0.1`）。
+- 样本候选名单已冻结（2026-09-12，39 只待资产类型核验的存续证券）：`data/security_master_39.csv` 与 `docs/sample-frame-registration-2026-09-12.md`。
+- 若要让 shadow 覆盖这批样本，先核对并登记实际观察列表：选股使用 `dip_buy.watch_list ∪ trend_breakout.watch_list`，setup 优先使用 `buy_strategy_v2.watch_list`。只改后一项不会扩大 LLM 选股池。沙箱内生成的模板见 `data/shadow/config_shadow.yaml`；其中 `futu.host` 是当时联调地址，本机请按实际 OpenD 地址配置。
 
 ## 2. 每个美股交易日收盘后运行
 
 ```bash
 # 1) LLM 研究批次：只读，不产生 proposal/approval/order，保存版本化研究批次
-python3 scripts/live_trading/run_daily_selection.py --json
+python3 scripts/live_trading/run_daily_selection.py
 
 # 2) 中期买入 setup shadow：不创建 proposal、不调用 LLM、不下单
 python3 scripts/live_trading/run_daily_setups.py --json

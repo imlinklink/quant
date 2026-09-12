@@ -91,11 +91,13 @@ def build_price_view(bars: pd.DataFrame, actions: pd.DataFrame, *, price_basis: 
         view['action_version'] = action_version(pd.DataFrame())
         return view
 
-    as_of = pd.Timestamp(as_of).normalize() if as_of is not None else None
+    if as_of is None:
+        raise ValueError('AS_OF_REQUIRED_FOR_ADJUSTED_VIEW')
+    as_of = pd.Timestamp(as_of).normalize()
+    d = d[d['session'] <= as_of].copy().reset_index(drop=True)
     applied = actions[actions['action_type'].astype(str).str.lower()
                       .isin(ADJUSTABLE_ACTIONS)].copy()
-    if as_of is not None:
-        applied = applied[pd.to_datetime(applied['ex_date']) <= as_of]
+    applied = applied[pd.to_datetime(applied['ex_date']) <= as_of]
     version = action_version(applied)
 
     factors = pd.Series(1.0, index=d.index)

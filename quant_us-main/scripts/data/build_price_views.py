@@ -22,7 +22,8 @@ def main():
     p.add_argument('--bars', required=True, help='原始日线（需含 security_id 或经 --id-column 指定）')
     p.add_argument('--actions', help='公司行动表 corporate_actions.csv')
     p.add_argument('--master', help='证券主数据（用于终局结算检查）')
-    p.add_argument('--as-of', help='特征价 as-of 日期（YYYY-MM-DD）；缺省则用全部已登记行动')
+    p.add_argument('--as-of', required=True,
+                   help='特征价快照的决策日期（YYYY-MM-DD）；历史逐日回放须分别构造快照')
     p.add_argument('--id-column', default='security_id', help='把该列重命名为 security_id')
     p.add_argument('--output-dir', required=True)
     p.add_argument('--dry-run', action='store_true')

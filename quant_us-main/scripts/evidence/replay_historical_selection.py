@@ -38,6 +38,8 @@ def main():
     packets = _load_packets(Path(args.packets) / 'packets')
     if not packets:
         raise SystemExit('未找到冻结 packet')
+    if args.mode == 'strict' and any(pkt.get('evidence_mode') != 'strict' for pkt in packets.values()):
+        raise SystemExit('STRICT_REPLAY_REQUIRES_STRICT_PACKETS')
     out = Path(args.output_dir)
     if out.exists() and any(out.iterdir()):
         raise SystemExit(f'输出目录非空，禁止覆盖: {out}')

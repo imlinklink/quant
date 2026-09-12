@@ -6,7 +6,7 @@ import pandas as pd
 
 from scripts.evidence.evidence_store import (build_packet, content_hash, market_close,
                                              market_time, normalize_evidence, packet_hash,
-                                             validate_labels)
+                                             validate_evidence, validate_labels)
 
 D = '2022-03-10'          # 周四
 CUTOFF = market_close(D).isoformat()
@@ -30,6 +30,16 @@ def records(*rows):
 
 
 class EvidenceStoreTests(unittest.TestCase):
+    def test_each_evidence_row_requires_availability_proof(self):
+        data = records(rec(), rec(source_record_id='r2', availability_proof=''))
+        self.assertIn('AVAILABILITY_PROOF_MISSING', validate_evidence(data))
+
+    def test_existing_content_digest_is_not_hashed_twice(self):
+        digest = content_hash('archived body')
+        data = records(rec(content_hash=digest, summary_hash=digest))
+        self.assertEqual(data.loc[0, 'content_hash'], digest)
+        self.assertEqual(data.loc[0, 'summary_hash'], digest)
+
     def test_announcement_after_close_waits_for_next_cutoff(self):
         announced = market_time(D, 16, 5)                       # 收盘后 16:05 ET 发布
         data = records(rec(event_at=market_time(D, 14).isoformat(),
@@ -80,8 +90,19 @@ class EvidenceStoreTests(unittest.TestCase):
                        rec(source_record_id='r2', security_id='SEC-OTHER',
                            symbol_as_published='US.AMB'))
         packet, exclusions = build_packet(data, 'SEC-A', CUTOFF, resolver=resolver)
-        self.assertEqual(len(packet['events']), 1)              # US.A 正确归属
+        self.assertEqual(len(packet['events']), 0)              # 记录 ID 与 ticker 映射冲突，拒绝
         self.assertTrue(any(e['reason'] == 'SYMBOL_AMBIGUOUS' for e in exclusions))
+        consistent = records(rec(security_id='SEC-A', symbol_as_published='US.A'))
+        packet, _ = build_packet(consistent, 'SEC-A', CUTOFF, resolver=resolver)
+        self.assertEqual(len(packet['events']), 1)
+
+    def test_missing_label_and_tampered_packet_rejected(self):
+        packet, _ = build_packet(records(rec()), 'SEC-A', CUTOFF)
+        self.assertIn('LABEL_MISSING:s1', validate_labels([], {'s1': packet}))
+        tampered = dict(packet, events=[])
+        errors = validate_labels([{'setup_id': 's1', 'packet_hash': packet['packet_hash'],
+                                   'llm_decision': 'candidate'}], {'s1': tampered})
+        self.assertIn('PACKET_TAMPERED:s1', errors)
 
     def test_reprints_count_as_one_cluster(self):
         same = rec(source_record_id='r1', content_hash='same')

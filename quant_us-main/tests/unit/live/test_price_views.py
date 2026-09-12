@@ -37,7 +37,7 @@ class PriceViewTests(unittest.TestCase):
     def _raw(self, frame=split_bars(), actions=ACTIONS):
         return build_price_view(frame, actions, price_basis='raw').set_index('session')
 
-    def _adj(self, frame=split_bars(), actions=ACTIONS, as_of=None):
+    def _adj(self, frame=split_bars(), actions=ACTIONS, as_of='2020-01-31'):
         return build_price_view(frame, actions, price_basis='asof_adjusted',
                                 as_of=as_of).set_index('session')
 
@@ -73,7 +73,7 @@ class PriceViewTests(unittest.TestCase):
         # 缺少除息前收盘时不得静默处理
         with self.assertRaises(ValueError):
             build_price_view(bars(closes).iloc[5:].reset_index(drop=True), actions,
-                             price_basis='asof_adjusted')
+                             price_basis='asof_adjusted', as_of='2020-01-31')
 
     def test_spinoff_factor(self):
         closes = [100.0] * len(SESSION)
@@ -88,8 +88,11 @@ class PriceViewTests(unittest.TestCase):
         adj = build_price_view(frame, ACTIONS, price_basis='asof_adjusted',
                                as_of='2020-01-02').set_index('session')
         raw = build_price_view(frame, ACTIONS, price_basis='raw').set_index('session')
-        self.assertTrue((adj['close'] == raw['close']).all())
+        self.assertEqual(list(adj.index), [pd.Timestamp('2020-01-01'), pd.Timestamp('2020-01-02')])
+        self.assertTrue((adj['close'] == raw.loc[adj.index, 'close']).all())
         self.assertEqual(adj['adjustment_as_of'].iloc[0], '2020-01-02')
+        with self.assertRaisesRegex(ValueError, 'AS_OF_REQUIRED'):
+            build_price_view(frame, ACTIONS, price_basis='asof_adjusted')
 
     def test_action_version_stable_and_sensitive(self):
         self.assertEqual(action_version(ACTIONS), action_version(ACTIONS.copy()))
