@@ -1,0 +1,79 @@
+schema_version: "1"
+protocol: medium_term_historical
+run_id: US-MT-MOM-BASELINE-001
+project_scope: US_EQUITIES_ONLY
+status: draft_requires_data_freeze
+
+periods:
+  warmup_sessions: 300
+  development: {start: "2016-01-01", end: "2020-12-31"}
+  validation: {start: "2021-01-01", end: "2023-12-31"}
+  test: {start: "2024-01-01", end: "2026-09-11"}
+  max_holding_sessions: 120
+  minimum_observation_sessions: 20
+
+strategies: [B1, B2, B3]
+etf_universe:
+  risk_assets: [SPY, QQQ, IWM, XLK, SMH, SOXX, IGV]
+  defensive_asset: SHY
+stock_universe:
+  asset_type: COMMON_STOCK
+  max_positions: 5
+  target_weight: 0.20
+  include_delisted: false
+
+momentum:
+  rebalance: calendar_month_end
+  lookback_6m_sessions: 126
+  lookback_12m_sessions: 252
+  skip_recent_sessions: 21
+  weights: {mom_6m: 0.50, mom_12_1: 0.50}
+  market_gate: QQQ_CLOSE_ABOVE_MA200
+
+entry:
+  B1: NEXT_SESSION_OPEN
+  B2: NEXT_SESSION_OPEN
+  B3: WEEKLY_GATE_THEN_DAILY_BREAKOUT_OR_PULLBACK
+  B3_candidate_expiry_sessions: 20
+
+exits:
+  ids: [M1, M2, M3, M4, M5]
+  M1: {fixed_holding_sessions: 60}
+  M2: {fixed_holding_sessions: 90}
+  M3: {fixed_holding_sessions: 120}
+  M4: {max_holding_sessions: 120, activate_after_sessions: 20, weekly_ma: 20}
+  M5: {max_holding_sessions: 120, activate_after_sessions: 20, atr_multiple: 3.5, weekly_ma: 20}
+  initial_stop:
+    distance: MAX_OF_PERCENT_AND_ATR
+    minimum_distance_pct: 0.08
+    atr_multiple: 2.5
+
+portfolio:
+  initial_cash_usd: 100000
+  risk_fraction_per_trade: 0.01
+  max_weight_per_position: 0.20
+  leverage: false
+  fractional_shares: false
+cost_scenarios_total_round_trip: [0.001, 0.002, 0.005, 0.01]
+primary_metric: test_excess_CAGR_vs_QQQ
+secondary_metrics:
+  - max_drawdown
+  - Calmar
+  - position_utilization
+  - turnover
+  - rolling_12m_win_rate_vs_QQQ
+
+data:
+  price_basis_execution: raw
+  price_basis_features: point_in_time_asof
+  futu_corporate_action_import: disabled
+  qfq_raw_action_candidates: diagnostics_only
+  formal_performance_requires_verified_actions: true
+  universe_etf_sha256: DRAFT_REQUIRES_FREEZE
+  universe_tech_sha256: DRAFT_REQUIRES_FREEZE
+  raw_prices_sha256: DRAFT_REQUIRES_FREEZE
+  corporate_actions_sha256: DRAFT_REQUIRES_FREEZE
+  quality_summary_sha256: DRAFT_REQUIRES_FREEZE
+
+llm_enabled: false
+real_order_side_effects_allowed: false
