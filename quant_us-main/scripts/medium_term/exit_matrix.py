@@ -7,16 +7,18 @@ import pandas as pd
 
 EXIT_IDS = ('M1', 'M2', 'M3', 'M4', 'M5')
 FIXED_HOLDS = {'M1': 60, 'M2': 90, 'M3': 120}
+P1_HORIZONS = (20, 40, 60, 90, 120)
 MAX_HOLD = 120
 MIN_OBSERVATION = 20
 ATR_MULTIPLE = 3.5
 
 
-def _normalise_bars(bars: pd.DataFrame, exit_id: str) -> pd.DataFrame:
+def _normalise_bars(bars: pd.DataFrame, *, require_weekly: bool = False,
+                    require_atr: bool = False) -> pd.DataFrame:
     required = {'session', 'raw_open', 'raw_high', 'raw_low', 'raw_close'}
-    if exit_id in ('M4', 'M5'):
+    if require_weekly:
         required |= {'week_complete', 'weekly_ma20'}
-    if exit_id == 'M5':
+    if require_atr:
         required.add('asof_atr')
     if missing := required - set(bars.columns):
         raise ValueError(f'MEDIUM_EXIT_COLUMNS_MISSING:{",".join(sorted(missing))}')
@@ -64,13 +66,116 @@ def _exit_result(exit_id, session, price, reason, phase, shares, cash,
 
 def simulate_exit(entry: dict, bars: pd.DataFrame, exit_id: str, *,
                   actions: pd.DataFrame | None = None) -> dict:
-    """模拟单笔中期退出；bars 首行必须是入场日，成交价必须等于首日开盘。"""
+    """模拟单笔 M1–M5 中期退出；bars 首行必须是入场日，成交价必须等于首日开盘。"""
     if exit_id not in EXIT_IDS:
         raise ValueError(f'UNKNOWN_MEDIUM_EXIT:{exit_id}')
+    return _simulate_exit(entry, bars, exit_id=exit_id,
+                          horizon=FIXED_HOLDS.get(exit_id, MAX_HOLD),
+                          use_weekly=exit_id in ('M4', 'M5'), use_atr=exit_id == 'M5',
+                          actions=actions)
+
+
+def simulate_fixed_horizon_exits(entry: dict, bars: pd.DataFrame, horizons, *,
+                                 actions: pd.DataFrame | None = None) -> dict:
+    """P1：一次遍历同一 entry/bars，为多个固定持有期生成退出。
+
+    不启用周线趋势破坏或 ATR 移动保护，所以止损路径与持有期无关；各期限共用
+    同一初始硬止损（入场日生效，跳空按开盘、盘中触线按保护线）、成本与公司行动会计。
+    """
+    horizons = tuple(int(h) for h in horizons)
+    if not horizons or any(h not in P1_HORIZONS for h in horizons):
+        raise ValueError('UNKNOWN_FIXED_HORIZON')
     security_id = str(entry.get('security_id') or '')
     if not security_id:
         raise ValueError('MEDIUM_EXIT_SECURITY_ID_REQUIRED')
-    d = _normalise_bars(bars, exit_id)
+    entry_price = float(entry['entry_price'])
+    initial_stop = float(entry['initial_stop'])
+    if not 0 < initial_stop < entry_price:
+        raise ValueError('INVALID_INITIAL_STOP')
+    d = _normalise_bars(bars)
+    if d.empty:
+        return {h: _exit_result(f'H{h}', None, None, 'DATA_MISSING', None, 1., 0.,
+                                entry_price, 0., 0., np.nan, 0, 'missing_future_bars')
+                for h in horizons}
+    entry_session = pd.Timestamp(entry['entry_session']).normalize()
+    d = d[d.session >= entry_session].head(MAX_HOLD).reset_index(drop=True)
+    if d.empty or d.session.iloc[0] != entry_session:
+        raise ValueError('ENTRY_SESSION_PRICE_MISSING')
+    if not np.isclose(entry_price, float(d.raw_open.iloc[0]), rtol=1e-6):
+        raise ValueError('MEDIUM_ENTRY_OPEN_MISMATCH')
+    events = _events(actions, security_id)
+
+    stop = initial_stop
+    shares, cash = 1., 0.
+    mfe = mae = 0.
+    results: dict = {}
+    for i, bar in enumerate(d.itertuples(index=False)):
+        holding = i + 1
+        if i > 0:  # 入场日行动已反映在开盘价，不能重复应用。
+            for event in events.get(bar.session, ()):
+                kind = str(event['action_type']).lower()
+                if kind in ('split', 'reverse_split'):
+                    ratio = float(event.get('ratio') or 0)
+                    if not np.isfinite(ratio) or ratio <= 0:
+                        raise ValueError(f'ACTION_RATIO_INVALID:{security_id}:{bar.session.date()}')
+                    shares *= ratio
+                    stop /= ratio
+                elif kind == 'cash_dividend':
+                    amount = float(event.get('cash_amount') or 0)
+                    if not np.isfinite(amount) or amount < 0:
+                        raise ValueError(f'ACTION_CASH_INVALID:{security_id}:{bar.session.date()}')
+                    cash += shares * amount
+                    stop = max(0., stop - amount)
+                else:
+                    raise ValueError(f'ACTION_TYPE_UNSUPPORTED:{security_id}:{kind}')
+
+        op, bh, bl, close = map(float, (bar.raw_open, bar.raw_high, bar.raw_low, bar.raw_close))
+        mfe = max(mfe, (shares * bh + cash) / entry_price - 1)
+        mae = min(mae, (shares * bl + cash) / entry_price - 1)
+
+        if i > 0 and op <= stop:
+            reason, price, phase = 'GAP_STOP', op, 'OPEN'
+        elif bl <= stop:
+            reason, price, phase = 'STOP', stop, 'INTRADAY'
+        else:
+            reason, price, phase = None, None, None
+
+        for h in horizons:
+            if h in results:
+                continue
+            if reason is not None and h >= holding:
+                results[h] = _exit_result(f'H{h}', bar.session, price, reason, phase, shares,
+                                          cash, entry_price, mfe, mae, stop, holding)
+            elif reason is None and h == holding:
+                results[h] = _exit_result(f'H{h}', bar.session, close, 'TIME_EXIT', 'CLOSE',
+                                          shares, cash, entry_price, mfe, mae, stop, holding)
+        if len(results) == len(horizons):
+            break
+
+    for h in horizons:  # 数据不足才右删失；P1 预筛保证 120 根，正常不触发。
+        if h not in results:
+            last = d.iloc[-1]
+            res = _exit_result(f'H{h}', last.session, None, 'DATA_END', None, shares, cash,
+                               entry_price, mfe, mae, stop, len(d), 'right_censored')
+            res['mark_price'] = float(last.raw_close)
+            res['unrealized_pnl_pct'] = (shares * float(last.raw_close) + cash) / entry_price - 1
+            results[h] = res
+    return results
+
+
+def simulate_fixed_horizon_exit(entry: dict, bars: pd.DataFrame, horizon: int, *,
+                                actions: pd.DataFrame | None = None) -> dict:
+    """单个固定持有期的便捷入口；语义与 `simulate_fixed_horizon_exits` 一致。"""
+    return simulate_fixed_horizon_exits(entry, bars, (horizon,), actions=actions)[int(horizon)]
+
+
+def _simulate_exit(entry: dict, bars: pd.DataFrame, *, exit_id: str, horizon: int,
+                   use_weekly: bool, use_atr: bool,
+                   actions: pd.DataFrame | None = None) -> dict:
+    security_id = str(entry.get('security_id') or '')
+    if not security_id:
+        raise ValueError('MEDIUM_EXIT_SECURITY_ID_REQUIRED')
+    d = _normalise_bars(bars, require_weekly=use_weekly, require_atr=use_atr)
     if d.empty:
         return _exit_result(exit_id, None, None, 'DATA_MISSING', None, 1., 0.,
                             float(entry['entry_price']), 0., 0., np.nan, 0,
@@ -93,7 +198,7 @@ def simulate_exit(entry: dict, bars: pd.DataFrame, exit_id: str, *,
     pending_trend_exit = False
     events = _events(actions, security_id)
 
-    for i, bar in d.iterrows():
+    for i, bar in enumerate(d.itertuples(index=False)):
         holding = i + 1
         if i > 0:  # 入场日行动已反映在开盘价，不能重复应用。
             for event in events.get(bar.session, ()):
@@ -133,19 +238,18 @@ def simulate_exit(entry: dict, bars: pd.DataFrame, exit_id: str, *,
             return _exit_result(exit_id, bar.session, stop, 'STOP', 'INTRADAY', shares,
                                 cash, entry_price, mfe, mae, stop, holding)
 
-        horizon = FIXED_HOLDS.get(exit_id, MAX_HOLD)
         if holding >= horizon:
             return _exit_result(exit_id, bar.session, close, 'TIME_EXIT', 'CLOSE', shares,
                                 cash, entry_price, mfe, mae, stop, holding)
 
         high = max(high, bh)
-        if exit_id == 'M5' and holding >= MIN_OBSERVATION:
+        if use_atr and holding >= MIN_OBSERVATION:
             atr = float(bar.asof_atr)
             if not np.isfinite(atr) or atr <= 0:
                 raise ValueError(f'ATR_INVALID:{security_id}:{bar.session.date()}')
             stop = max(stop, high - ATR_MULTIPLE * atr)
 
-        if exit_id in ('M4', 'M5') and holding >= MIN_OBSERVATION and bool(bar.week_complete):
+        if use_weekly and holding >= MIN_OBSERVATION and bool(bar.week_complete):
             weekly_ma = float(bar.weekly_ma20)
             if not np.isfinite(weekly_ma) or weekly_ma <= 0:
                 raise ValueError(f'WEEKLY_MA_INVALID:{security_id}:{bar.session.date()}')

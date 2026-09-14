@@ -171,7 +171,8 @@ def simulate_multi_asset_portfolio(prices: pd.DataFrame, matrix: pd.DataFrame, *
                                    initial_cash=100_000., risk_fraction=.01,
                                    max_weight=.20, round_trip_cost=None,
                                    actions: pd.DataFrame | None = None,
-                                   allow_fractional=False, max_positions=5) -> MultiAssetResult:
+                                   allow_fractional=False, max_positions=5,
+                                   evaluation_start=None) -> MultiAssetResult:
     """按已接受的一个 B2/B3 × Exit × Cost 单元构造逐日五仓净值。"""
     required = {'security_id', 'entry_session', 'entry_price', 'initial_stop',
                 'exit_session', 'exit_price', 'exit_phase', 'portfolio_accepted'}
@@ -202,9 +203,19 @@ def simulate_multi_asset_portfolio(prices: pd.DataFrame, matrix: pd.DataFrame, *
     selected['trade_id'] = range(len(selected))
 
     market = _prices(prices)
-    lookup = market.set_index(['session', 'security_id'])
+    # 用 (session, security_id) 字典替代 MultiIndex.loc，逐仓逐日查找从 ~10µs 降到 ~0.2µs。
+    lookups = {
+        'raw_open': dict(zip(zip(market.session, market.security_id),
+                             market.raw_open.astype(float))),
+        'raw_close': dict(zip(zip(market.session, market.security_id),
+                              market.raw_close.astype(float))),
+    }
     sessions = pd.DatetimeIndex(market.session.unique()).sort_values()
-    sessions = sessions[sessions >= selected.entry_session.min()]
+    start = (selected.entry_session.min() if evaluation_start is None
+             else pd.Timestamp(evaluation_start).normalize())
+    if start > selected.entry_session.min():
+        raise ValueError('EVALUATION_START_AFTER_ENTRY')
+    sessions = sessions[sessions >= start]
     entries = {day: group for day, group in selected.groupby('entry_session')}
     action_map = _action_map(actions)
     fee_rate = round_trip_cost / 2
@@ -213,10 +224,10 @@ def simulate_multi_asset_portfolio(prices: pd.DataFrame, matrix: pd.DataFrame, *
     cumulative_turnover = 0.
 
     def price(day, security_id, column):
-        try:
-            return float(lookup.loc[(day, security_id), column])
-        except KeyError as exc:
-            raise ValueError(f'HELD_PRICE_MISSING:{security_id}:{day.date()}:{column}') from exc
+        value = lookups[column].get((day, security_id))
+        if value is None:
+            raise ValueError(f'HELD_PRICE_MISSING:{security_id}:{day.date()}:{column}')
+        return float(value)
 
     def sell(position, day, exit_price, reason, phase):
         nonlocal cash, cumulative_turnover
@@ -228,7 +239,8 @@ def simulate_multi_asset_portfolio(prices: pd.DataFrame, matrix: pd.DataFrame, *
                            'side': 'SELL', 'shares': position['shares'],
                            'price': float(exit_price), 'gross_notional': gross,
                            'fee': fee, 'trade_id': position['trade_id'],
-                           'reason': reason, 'phase': phase})
+                           'reason': reason, 'phase': phase,
+                           'entry_id': getattr(position['row'], 'entry_id', position['trade_id'])})
         del positions[position['trade_id']]
 
     for session in sessions:
@@ -263,11 +275,13 @@ def simulate_multi_asset_portfolio(prices: pd.DataFrame, matrix: pd.DataFrame, *
             security_id = str(row.security_id)
             if any(p['security_id'] == security_id for p in positions.values()):
                 rejected.append({'session': session, 'security_id': security_id,
-                                 'reason': 'DUPLICATE_ACTIVE_SECURITY'})
+                                 'reason': 'DUPLICATE_ACTIVE_SECURITY',
+                                 'entry_id': getattr(row, 'entry_id', row.trade_id)})
                 continue
             if len(positions) >= max_positions:
                 rejected.append({'session': session, 'security_id': security_id,
-                                 'reason': 'MAX_POSITIONS'})
+                                 'reason': 'MAX_POSITIONS',
+                                 'entry_id': getattr(row, 'entry_id', row.trade_id)})
                 continue
             actual_open = price(session, security_id, 'raw_open')
             if not np.isclose(actual_open, float(row.entry_price), rtol=1e-6):
@@ -277,7 +291,8 @@ def simulate_multi_asset_portfolio(prices: pd.DataFrame, matrix: pd.DataFrame, *
                                        fee_rate=fee_rate, allow_fractional=allow_fractional)
             if shares <= 0:
                 rejected.append({'session': session, 'security_id': security_id,
-                                 'reason': 'POSITION_SIZE_ZERO'})
+                                 'reason': 'POSITION_SIZE_ZERO',
+                                 'entry_id': getattr(row, 'entry_id', row.trade_id)})
                 continue
             gross = shares * actual_open
             fee = gross * fee_rate
@@ -289,7 +304,8 @@ def simulate_multi_asset_portfolio(prices: pd.DataFrame, matrix: pd.DataFrame, *
             trade_rows.append({'session': session, 'security_id': security_id,
                                'side': 'BUY', 'shares': shares, 'price': actual_open,
                                'gross_notional': gross, 'fee': fee,
-                               'trade_id': row.trade_id, 'reason': 'ENTRY', 'phase': 'OPEN'})
+                               'trade_id': row.trade_id, 'reason': 'ENTRY', 'phase': 'OPEN',
+                               'entry_id': getattr(row, 'entry_id', row.trade_id)})
 
         # 盘中止损发生在开盘买入之后；收盘退出随后执行。
         for phase in ('INTRADAY', 'CLOSE'):

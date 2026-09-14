@@ -1,5 +1,9 @@
 # 中期持有先出答案：执行记录（2026-09-13）
 
+> 后续代码复核与P1新批次已推进，当前状态见
+> [P1复核交接](medium-term-p1-review-handoff-2026-09-13.md)。下文保留P0完成时的历史记录；
+> “账户尚未计算”不再是最新工程状态。P2仍待同口径基准核验放行。
+
 依据 [实施手册](medium-term-answer-first-runbook-2026-09-13.md)，本轮只运行 P0 固定期限配对检验。结果见 `backtests/medium_term/QUICK-HORIZON-20260913-001/`，输入哈希和排除漏斗见其 `manifest.json`，未改写已有短期回测。
 
 ## P0 结论

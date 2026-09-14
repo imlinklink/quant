@@ -147,6 +147,19 @@ class MultiAssetPortfolioTests(unittest.TestCase):
 
 
 class PerformanceTests(unittest.TestCase):
+    def test_initial_loss_counts_toward_drawdown(self):
+        equity = pd.DataFrame({'session': pd.bdate_range('2025-01-02', periods=3),
+                               'equity': [90., 95., 80.], 'initial_equity': 100.})
+        metrics = performance_metrics(equity)
+        self.assertAlmostEqual(metrics['max_drawdown'], -.2)
+        self.assertIsNone(metrics['CAGR'])
+
+    def test_missing_benchmark_session_is_not_silently_dropped(self):
+        equity = pd.DataFrame({'session': pd.bdate_range('2025-01-02', periods=3),
+                               'equity': [100., 101., 102.]})
+        with self.assertRaisesRegex(ValueError, 'BENCHMARK_SESSIONS_MISMATCH'):
+            performance_metrics(equity, equity.iloc[[0, 2]])
+
     def test_metrics_use_initial_capital_and_daily_high_water_mark(self):
         sessions = pd.bdate_range('2024-01-02', periods=253)
         values = [100, 120, 90] + [90 + i * (30 / 249) for i in range(250)]

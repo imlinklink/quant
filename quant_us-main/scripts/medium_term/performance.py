@@ -32,14 +32,19 @@ def performance_metrics(equity: pd.DataFrame, benchmark: pd.DataFrame | None = N
     elapsed_years = (d.session.iloc[-1] - d.session.iloc[0]).days / 365.2425
     total_return = final / initial - 1
     cagr = ((final / initial) ** (1 / elapsed_years) - 1
-            if elapsed_years > 0 else None)
-    returns = d[equity_col].pct_change(fill_method=None).dropna()
+            if elapsed_years >= 1 else None)
+    returns = d[equity_col].pct_change(fill_method=None)
+    if 'initial_equity' in equity:
+        returns.iloc[0] = float(d[equity_col].iloc[0]) / initial - 1
+    returns = returns.dropna()
     volatility = float(returns.std(ddof=1) * math.sqrt(252)) if len(returns) > 1 else None
     sharpe = (float(returns.mean() / returns.std(ddof=1) * math.sqrt(252))
               if len(returns) > 1 and returns.std(ddof=1) > 0 else None)
-    drawdown = d[equity_col] / d[equity_col].cummax() - 1
+    drawdown = d[equity_col] / d[equity_col].cummax().clip(lower=initial) - 1
     trough = int(drawdown.idxmin())
     peak = int(d.loc[:trough, equity_col].idxmax())
+    if float(d.loc[:trough, equity_col].max()) < initial:
+        peak = 0  # 初始资金高水位在首日开盘前。
     max_drawdown = float(drawdown.iloc[trough])
     calmar = (float(cagr / abs(max_drawdown))
               if cagr is not None and max_drawdown < 0 else None)
@@ -63,12 +68,14 @@ def performance_metrics(equity: pd.DataFrame, benchmark: pd.DataFrame | None = N
     if benchmark is not None:
         b = _curve(benchmark, benchmark_col).rename(columns={benchmark_col: 'benchmark'})
         joined = d.merge(b, on='session', how='inner')
+        if len(joined) != len(d) or len(joined) != len(b):
+            raise ValueError('BENCHMARK_SESSIONS_MISMATCH')
         if len(joined) < 2:
             raise ValueError('BENCHMARK_OVERLAP_INSUFFICIENT')
         bench_initial, bench_final = float(joined.benchmark.iloc[0]), float(joined.benchmark.iloc[-1])
         bench_years = (joined.session.iloc[-1] - joined.session.iloc[0]).days / 365.2425
         bench_cagr = ((bench_final / bench_initial) ** (1 / bench_years) - 1
-                      if bench_years > 0 else None)
+                      if bench_years >= 1 else None)
         result['benchmark_CAGR'] = bench_cagr
         result['excess_CAGR'] = cagr - bench_cagr if cagr is not None and bench_cagr is not None else None
         strategy_252 = joined[equity_col] / joined[equity_col].shift(252) - 1
@@ -78,4 +85,3 @@ def performance_metrics(equity: pd.DataFrame, benchmark: pd.DataFrame | None = N
         result['rolling_12m_win_rate_vs_benchmark'] = (
             float((strategy_252[valid] > benchmark_252[valid]).mean()) if valid.any() else None)
     return result
-
