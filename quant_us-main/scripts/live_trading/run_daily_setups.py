@@ -21,9 +21,20 @@ def run(config, fetcher, as_of=None):
     proxies = config.get('pullback', {}).get('sector_proxies', {})
     sector_map = {code: proxies.get(group_map.get(code), 'US.SPY') for code in codes}
     all_codes = list(dict.fromkeys(codes + list(sector_map.values()) + ['US.SPY']))
-    end = str(as_of)[:10]
-    start = (datetime.fromisoformat(str(as_of).replace('Z', '+00:00')) -
-             timedelta(days=500)).strftime('%Y-%m-%d')
+    from scripts.data.trading_calendar import sessions
+    import pandas as pd
+    from zoneinfo import ZoneInfo
+    instant = datetime.fromisoformat(str(as_of).replace('Z', '+00:00'))
+    if instant.tzinfo is None:
+        raise ValueError('AS_OF_TIMEZONE_REQUIRED')
+    local = instant.astimezone(ZoneInfo('America/New_York'))
+    dates = sessions(local.date() - timedelta(days=14), local.date()).session_date
+    completed = [d for d in dates if d.tz_localize('America/New_York') + pd.Timedelta(hours=16) <= local]
+    if not completed:
+        raise ValueError('NO_COMPLETED_SESSION')
+    anchor = completed[-1]
+    end = str(anchor.date())
+    start = (anchor - pd.Timedelta(days=500)).strftime('%Y-%m-%d')
     bars = fetcher.fetch_multiple_stocks(all_codes, start, end)
     from scripts.live_trading.decision_runtime import engine_v2_config
     registry = PositionRegistry(namespace=engine_v2_config(config).get('account_scope', 'DRY-RUN'))
@@ -33,8 +44,11 @@ def run(config, fetcher, as_of=None):
         selection_id = (load_latest_research_batch() or {}).get('decision_id', '')
     except Exception:
         pass
-    scanner = SetupScanner(registry, config)
-    return scanner.scan({c: bars.get(c) for c in codes if bars.get(c) is not None},
+    # 回看锚点改变属于输入协议新版本；不能覆盖旧浮动窗口快照。
+    scan_config = dict(config, buy_strategy_v2=dict(cfg,
+                       input_window_version='completed-session-500d-v1'))
+    scanner = SetupScanner(registry, scan_config)
+    return scanner.scan({c: bars.get(c) for c in codes},
                         {c: bars.get(c) for c in set(sector_map.values()) if bars.get(c) is not None},
                         bars.get('US.SPY'), as_of, sector_map, selection_id)
 
@@ -63,7 +77,7 @@ def main(argv=None):
     finally:
         fetcher.disconnect()
     print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
-    return 0 if all(r.get('quality', {}).get('status') == 'pass' for r in result) else 1
+    return 0 if result and all(r.get('quality', {}).get('status') == 'pass' for r in result) else 1
 
 
 if __name__ == '__main__':

@@ -17,6 +17,8 @@ class SetupScanner:
                   selection_decision_id='') -> dict:
         snapshot = compute_setup_features(stock_bars, sector_bars, market_bars,
                                           as_of, self.strategy_cfg)
+        if self.strategy_cfg.get('input_window_version'):
+            snapshot['feature_version'] += ':' + self.strategy_cfg['input_window_version']
         previous = self.store.latest_state(code, before_session=snapshot.get('session', ''))
         previous_state = (previous or {}).get('state', 'FALLING')
         state, reasons = transition(previous_state, snapshot, self.strategy_cfg)
@@ -33,6 +35,16 @@ class SetupScanner:
              as_of, sector_map: Optional[dict] = None,
              selection_decision_id='') -> list:
         sector_map = sector_map or {}
-        return [self.scan_code(code, bars, sectors.get(sector_map.get(code)), market_bars,
-                               as_of, selection_decision_id)
-                for code, bars in sorted(stocks.items())]
+        results = []
+        for code, bars in sorted(stocks.items()):
+            try:
+                results.append(self.scan_code(code, bars, sectors.get(sector_map.get(code)),
+                                              market_bars, as_of, selection_decision_id))
+            except ValueError as exc:
+                if str(exc) != '不可覆盖历史快照':
+                    raise
+                results.append({'code': code, 'candidate': None,
+                                'quality': {'status': 'fail',
+                                            'reason': 'IMMUTABLE_SNAPSHOT_CONFLICT'},
+                                'reason_codes': ['IMMUTABLE_SNAPSHOT_CONFLICT']})
+        return results

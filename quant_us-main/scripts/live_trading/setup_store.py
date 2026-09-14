@@ -15,6 +15,12 @@ class SetupStore:
                         snapshot.get('feature_version'))
         body = dict(snapshot, code=code, previous_state=previous_state, state=state,
                     reason_codes=list(reason_codes), snapshot_id=key)
+        old = self.events.get_snapshot('setup_state', key)
+        if old is not None:
+            # 重扫时间不同不是新特征；保留首次观察时间及不可变原文。
+            comparable = lambda value: {k: v for k, v in value.items() if k != 'as_of'}
+            if comparable(old) == comparable(body):
+                return key
         with self.events.transaction() as con:
             self.events.snapshot(con, 'setup_state', key, 1, body)
         self.events.record('setup_state_observed', key, body, setup_state_id=key)

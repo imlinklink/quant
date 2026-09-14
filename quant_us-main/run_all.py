@@ -64,6 +64,8 @@ class UnifiedSystem:
         config_path = os.path.join(BASE_DIR, "config.yaml")
         with open(config_path, encoding="utf-8") as f:
             self.config = yaml.safe_load(f)
+        if self.config.get('shadow_integration', {}).get('enabled') and not self.dry_run:
+            raise ValueError('shadow_integration 仅允许 --dry-run；不能启动券商执行模式')
 
     def start_flask(self):
         """后台线程启动 Flask"""
