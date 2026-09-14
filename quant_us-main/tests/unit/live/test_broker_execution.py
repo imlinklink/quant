@@ -74,6 +74,20 @@ class BrokerTests(unittest.TestCase):
         self.assertEqual(newstore.get(p['id'])['status'],'submitted')
         self.assertFalse(newstore.approve(p['id']))
 
+    def test_restart_restores_completed_order_display(self):
+        # 旧式提案（无 plan_id）不落 event store，确认台 _restore 拉不到完成记录；
+        # 完成记录只能由订单账本驱动的 reconcile -> recover_order 恢复（展示层缺口，单独记录）。
+        p=self.proposal();self.service.submit(p,100)
+        self.broker.rows[0].update(order_status='FILLED_ALL',dealt_qty=49,dealt_avg_price=99.9)
+        self.service.reconcile()
+        self.assertEqual(self.store.get(p['id'])['status'],'executed')
+        newstore=ProposalStore(log_dir=self.tmp.name)
+        newservice=ExecutionService(self.broker,self.service.config,newstore,registry=self.registry)
+        self.assertFalse(any(i['id']==p['id'] for i in newstore.get_all()))
+        newservice.reconcile()
+        self.assertEqual(newstore.get(p['id'])['status'],'executed')
+        self.assertEqual(self.registry.get('US.A')['qty'],49)
+
     def test_rejected_order_keeps_no_position(self):
         p=self.proposal();self.service.submit(p,100)
         self.broker.rows[0].update(order_status='FAILED')

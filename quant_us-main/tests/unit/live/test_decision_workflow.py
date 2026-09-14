@@ -71,6 +71,16 @@ class DecisionContracts(unittest.TestCase):
         self.assertEqual(report['candidates'], 1)
         self.assertEqual(report['stages']['with_llm_result'], 1)
 
+    def test_completed_plan_versioned_proposal_survives_restart(self):
+        # 带计划版本提案落 event store，重启后确认台 _restore 直接恢复完成记录（无需 reconcile）。
+        item = self.approve(self.review(self.proposal()))
+        service = ExecutionService(None, self.config, self.store, True, self.registry)
+        service.submit(item, 100)
+        self.assertEqual(self.store.get(item['id'])['status'], 'executed')
+        store = ProposalStore(log_dir=self.path, registry=PositionRegistry(self.registry.path, 'DRY-RUN'))
+        self.assertEqual(store.get(item['id'])['status'], 'executed')
+        self.assertEqual(self.registry.get('US.A')['qty'], 20)
+
     def test_failed_llm_and_unhandled_candidates_retained(self):
         p = self.proposal()
         req = self.store.begin_review(p['id'])
