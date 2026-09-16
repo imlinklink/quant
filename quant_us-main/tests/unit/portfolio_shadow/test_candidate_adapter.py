@@ -1,7 +1,9 @@
 """candidate_adapter：排程 → READY Opportunity 的确定性测试。"""
 import unittest
 
-from scripts.portfolio_shadow.candidate_adapter import adapt_schedule, intents_for_session
+from scripts.portfolio_shadow.candidate_adapter import (adapt_schedule,
+                                                        build_real_schedule,
+                                                        intents_for_session)
 
 
 class AdapterTests(unittest.TestCase):
