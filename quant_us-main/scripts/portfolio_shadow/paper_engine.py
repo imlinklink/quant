@@ -114,6 +114,8 @@ def step(state: AccountState, *, session: str, bars: dict, corporate_actions: li
             total = pos.shares * per_share
             pay_date = act.get('pay_date')
             s.dividend_receivable[pay_date] = s.dividend_receivable.get(pay_date, 0) + total
+            # 除息日止损随分红下调（镜像历史引擎 simulate_fixed_horizon_exits 的 stop -= cash_amount）
+            s.positions[sid] = replace(pos, stop_micro=max(0, pos.stop_micro - per_share))
             events.append({'type': 'dividend_record', 'session': session, 'security_id': sid,
                            'per_share_micro': per_share, 'total_micro': total,
                            'pay_date': pay_date})
@@ -159,7 +161,8 @@ def step(state: AccountState, *, session: str, bars: dict, corporate_actions: li
                            'opportunity_id': intent.opportunity_id(), 'reason': 'MAX_POSITIONS'})
             continue
         open_micro = bars[sid]['open']
-        stop = initial_stop_micro(open_micro, int(intent.stop_reference['atr14_micro']))
+        stop = int(intent.stop_reference.get('initial_stop_micro') or
+                   initial_stop_micro(open_micro, int(intent.stop_reference['atr14_micro'])))
         if stop <= 0:
             events.append({'type': 'missed', 'session': session, 'security_id': sid,
                            'opportunity_id': intent.opportunity_id(),

@@ -111,3 +111,70 @@ def _hist_actions(corporate_actions):
                      'cash_amount': (a.get('cash_amount_micro') or 0) / 1e6,
                      'pay_date': a.get('pay_date')})
     return pd.DataFrame(rows)
+
+
+def _shadow_actions(actions):
+    """历史 actions DataFrame（cash_amount 美元、无 pay_date）→ 影子 actions list。"""
+    out = []
+    for r in actions.itertuples():
+        d = {'security_id': str(r.security_id),
+             'ex_date': str(pd.Timestamp(r.ex_date).date()),
+             'action_type': str(r.action_type).lower()}
+        if getattr(r, 'ratio', None) is not None:
+            d['ratio'] = r.ratio
+        if getattr(r, 'cash_amount', None) is not None:
+            d['cash_amount_micro'] = to_micro(r.cash_amount)
+        out.append(d)
+    return out
+
+
+def verify_matrix_parity(matrix, prices, actions, *, horizon, risk_bp,
+                         initial_cash=100_000.0, tol=0.02, scope='SHADOW:parity:R') -> dict:
+    """真实矩阵奇偶校验：同一 matrix（entry/exit）+ prices + actions 喂两引擎，逐日 diff。"""
+    matrix = matrix[matrix.portfolio_accepted.astype(bool)].copy()
+    matrix['entry_session'] = pd.to_datetime(matrix.entry_session).dt.normalize()
+    prices = prices.copy()
+    prices['session'] = pd.to_datetime(prices.session).dt.normalize()
+    prices['security_id'] = prices.security_id.astype(str)
+
+    # 1. 历史引擎（影子会计）
+    hist = simulate_multi_asset_portfolio(
+        prices, matrix, initial_cash=initial_cash, risk_fraction=risk_bp / 10000,
+        max_weight=.20, round_trip_cost=.002, actions=actions,
+        allow_fractional=False, max_positions=5,
+        t1_settlement=True, dividend_receivable=True)
+    hist_navs = {str(r.session.date()): r.equity for r in hist.equity.itertuples()}
+
+    # 2. 影子引擎（增量，回撤阶梯关闭）
+    manifest = _shadow_manifest(risk_bp, horizon)
+    state = new_account_state(scope, manifest.initial_cash)
+    shadow_actions = _shadow_actions(actions)
+    sessions = sorted(prices.session.unique())
+    shadow_navs = {}
+    for session in sessions:
+        sess_str = str(pd.Timestamp(session).date())
+        bars = {sid: {'open': to_micro(r.raw_open), 'high': to_micro(r.raw_high),
+                      'low': to_micro(r.raw_low), 'close': to_micro(r.raw_close)}
+                for sid, r in prices[prices.session.eq(session)].set_index('security_id').iterrows()}
+        intents = [Opportunity(
+            experiment_id='parity', security_id=str(r.security_id),
+            source_candidate_id=str(getattr(r, 'entry_id', '')), parent_version='1',
+            signal_session=sess_str, observed_at=f'{sess_str}T00:00:00+00:00',
+            planned_execution_session=sess_str, rank=int(getattr(r, 'rank', 0)),
+            entry_rule='b3', stop_reference={'initial_stop_micro': to_micro(r.initial_stop)},
+            exit_policy_id='H60', input_hash='h', terminal='READY')
+            for r in matrix[matrix.entry_session.eq(session)].itertuples()]
+        acts = [a for a in shadow_actions if a.get('ex_date') == sess_str]
+        res = step(state, session=sess_str, bars=bars, corporate_actions=acts,
+                   intents=intents, manifest=manifest)
+        state = res.state
+        shadow_navs[sess_str] = res.nav['equity'] / 1e6 if res.nav else None
+
+    # 3. diff
+    diffs = []
+    for sess_str, h in hist_navs.items():
+        s = shadow_navs.get(sess_str)
+        if s is not None and abs(h - s) > tol:
+            diffs.append({'session': sess_str, 'hist_equity': h, 'shadow_equity': s,
+                          'diff': h - s})
+    return {'diffs': diffs, 'n_sessions': len(hist_navs), 'n_diffs': len(diffs)}

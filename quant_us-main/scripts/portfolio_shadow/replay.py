@@ -28,6 +28,11 @@ def apply_event(state: AccountState, event: dict) -> AccountState:
     elif t == 'dividend_record':
         pay_date = event['pay_date']
         s.dividend_receivable[pay_date] = s.dividend_receivable.get(pay_date, 0) + event['total_micro']
+        # 除息日止损随分红下调（与 paper_engine.step 一致）
+        sid = event['security_id']
+        s.positions[sid] = replace(s.positions[sid],
+                                   stop_micro=max(0, s.positions[sid].stop_micro
+                                                  - event['per_share_micro']))
     elif t == 'split':
         sid = event['security_id']
         pos = s.positions[sid]

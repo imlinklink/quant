@@ -161,6 +161,39 @@ class CorporateActionTests(unittest.TestCase):
         self.assertEqual(r3.state.dividend_receivable, {})
         self.assertEqual(r3.state.cash_available, cash_before + 125 * to_micro(1.0))
 
+    def test_dividend_reduces_stop(self):
+        # 除息日止损随分红下调（镜像历史引擎 stop -= cash_amount）
+        m = make_manifest(horizon=60)
+        s = new_account_state('SHADOW:x:R', to_micro(100000))
+        r1 = step(s, session='2026-01-05', bars=bars1(100, 100.5),
+                  corporate_actions=[], intents=[opp('SEC-A', '2026-01-05')], manifest=m)
+        stop_before = r1.state.positions['SEC-A'].stop_micro
+        r2 = step(r1.state, session='2026-01-06', bars=bars1(100, 100.5),
+                  corporate_actions=[{'security_id': 'SEC-A', 'action_type': 'cash_dividend',
+                                      'ex_date': '2026-01-06', 'pay_date': '2026-01-08',
+                                      'cash_amount_micro': to_micro(1.0)}],
+                  intents=[], manifest=m)
+        self.assertEqual(r2.state.positions['SEC-A'].stop_micro, stop_before - to_micro(1.0))
+
+    def test_dividend_stop_reduction_replays(self):
+        m = make_manifest(horizon=60)
+        state = new_account_state('SHADOW:x:R', to_micro(100000))
+        events = []
+        res = step(state, session='2026-01-05', bars=bars1(100, 100.5),
+                   corporate_actions=[], intents=[opp('SEC-A', '2026-01-05')], manifest=m)
+        state = res.state
+        events.extend(res.events)
+        res = step(state, session='2026-01-06', bars=bars1(100, 100.5),
+                   corporate_actions=[{'security_id': 'SEC-A', 'action_type': 'cash_dividend',
+                                       'ex_date': '2026-01-06', 'pay_date': '2026-01-08',
+                                       'cash_amount_micro': to_micro(1.0)}],
+                   intents=[], manifest=m)
+        state = res.state
+        events.extend(res.events)
+        replayed = replay('SHADOW:x:R', to_micro(100000), events)
+        self.assertEqual(replayed.positions['SEC-A'].stop_micro, state.positions['SEC-A'].stop_micro)
+        self.assertEqual(replayed.state_hash(), state.state_hash())
+
 
 class SettlementTests(unittest.TestCase):
     def test_sell_proceeds_not_available_same_day(self):

@@ -340,7 +340,9 @@ def simulate_multi_asset_portfolio(prices: pd.DataFrame, matrix: pd.DataFrame, *
         market_value = sum(position['shares'] * price(session, position['security_id'], 'raw_close')
                            for position in positions.values())
         equity = cash + unsettled_cash + sum(dividend_receivable_map.values()) + market_value
-        equity_rows.append({'session': session, 'cash': cash, 'market_value': market_value,
+        equity_rows.append({'session': session, 'cash': cash, 'unsettled_cash': unsettled_cash,
+                            'dividend_receivable': sum(dividend_receivable_map.values()),
+                            'market_value': market_value,
                             'equity': equity, 'position_count': len(positions),
                             'gross_exposure': market_value / equity,
                             'cumulative_turnover': cumulative_turnover,
