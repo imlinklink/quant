@@ -172,8 +172,15 @@ def simulate_multi_asset_portfolio(prices: pd.DataFrame, matrix: pd.DataFrame, *
                                    max_weight=.20, round_trip_cost=None,
                                    actions: pd.DataFrame | None = None,
                                    allow_fractional=False, max_positions=5,
-                                   evaluation_start=None) -> MultiAssetResult:
-    """按已接受的一个 B2/B3 × Exit × Cost 单元构造逐日五仓净值。"""
+                                   evaluation_start=None,
+                                   t1_settlement: bool = False,
+                                   dividend_receivable: bool = False) -> MultiAssetResult:
+    """按已接受的一个 B2/B3 × Exit × Cost 单元构造逐日五仓净值。
+
+    `t1_settlement=True` / `dividend_receivable=True` 时切换到影子引擎同口径会计：
+    卖出款 T+1 结算（进 unsettled_cash，下一会话可用）、除息记应收（按 pay_date）→ 支付日转现金。
+    默认关闭，保持历史（即时结算）语义不变。
+    """
     required = {'security_id', 'entry_session', 'entry_price', 'initial_stop',
                 'exit_session', 'exit_price', 'exit_phase', 'portfolio_accepted'}
     if missing := required - set(matrix.columns):
@@ -220,6 +227,8 @@ def simulate_multi_asset_portfolio(prices: pd.DataFrame, matrix: pd.DataFrame, *
     action_map = _action_map(actions)
     fee_rate = round_trip_cost / 2
     cash = float(initial_cash)
+    unsettled_cash = 0.
+    dividend_receivable_map: dict = {}
     positions, trade_rows, rejected, equity_rows = {}, [], [], []
     cumulative_turnover = 0.
 
@@ -230,10 +239,13 @@ def simulate_multi_asset_portfolio(prices: pd.DataFrame, matrix: pd.DataFrame, *
         return float(value)
 
     def sell(position, day, exit_price, reason, phase):
-        nonlocal cash, cumulative_turnover
+        nonlocal cash, cumulative_turnover, unsettled_cash
         gross = position['shares'] * float(exit_price)
         fee = gross * fee_rate
-        cash += gross - fee
+        if t1_settlement:
+            unsettled_cash += gross - fee
+        else:
+            cash += gross - fee
         cumulative_turnover += gross
         trade_rows.append({'session': day, 'security_id': position['security_id'],
                            'side': 'SELL', 'shares': position['shares'],
@@ -244,6 +256,12 @@ def simulate_multi_asset_portfolio(prices: pd.DataFrame, matrix: pd.DataFrame, *
         del positions[position['trade_id']]
 
     for session in sessions:
+        # 结算：T+1 卖出款 + 支付日分红 → 可用现金（影子会计）
+        if t1_settlement:
+            cash += unsettled_cash
+            unsettled_cash = 0.
+        if dividend_receivable:
+            cash += dividend_receivable_map.pop(str(session.date()), 0.0)
         # 已持仓的公司行动在开盘前生效；当天新开仓不会重复获取权益。
         for position in list(positions.values()):
             for event in action_map.get((position['security_id'], session), ()):
@@ -257,7 +275,12 @@ def simulate_multi_asset_portfolio(prices: pd.DataFrame, matrix: pd.DataFrame, *
                     amount = float(event.get('cash_amount') or 0)
                     if not np.isfinite(amount) or amount < 0:
                         raise ValueError(f'ACTION_CASH_INVALID:{position["security_id"]}:{session.date()}')
-                    cash += position['shares'] * amount
+                    if dividend_receivable:
+                        pay_date = str(event.get('pay_date') or '')
+                        key = pay_date if pay_date else '__unsettled__'
+                        dividend_receivable_map[key] = dividend_receivable_map.get(key, 0.0) + position['shares'] * amount
+                    else:
+                        cash += position['shares'] * amount
                 else:
                     raise ValueError(f'ACTION_TYPE_UNSUPPORTED:{kind}')
 
@@ -270,7 +293,7 @@ def simulate_multi_asset_portfolio(prices: pd.DataFrame, matrix: pd.DataFrame, *
         # 用当日开盘净值计算1%风险和20%市值上限。
         open_value = sum(position['shares'] * price(session, position['security_id'], 'raw_open')
                          for position in positions.values())
-        open_equity = cash + open_value
+        open_equity = cash + open_value + sum(dividend_receivable_map.values())
         for row in entries.get(session, pd.DataFrame()).itertuples(index=False):
             security_id = str(row.security_id)
             if any(p['security_id'] == security_id for p in positions.values()):
@@ -316,7 +339,7 @@ def simulate_multi_asset_portfolio(prices: pd.DataFrame, matrix: pd.DataFrame, *
 
         market_value = sum(position['shares'] * price(session, position['security_id'], 'raw_close')
                            for position in positions.values())
-        equity = cash + market_value
+        equity = cash + unsettled_cash + sum(dividend_receivable_map.values()) + market_value
         equity_rows.append({'session': session, 'cash': cash, 'market_value': market_value,
                             'equity': equity, 'position_count': len(positions),
                             'gross_exposure': market_value / equity,
