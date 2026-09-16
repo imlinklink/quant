@@ -1,0 +1,219 @@
+"""R/L 双影子账户 schema：金额（微美元整数）、manifest、opportunity、账户状态、动作。
+
+金额统一用 **int 微美元**（1 USD = 1_000_000），价格用 **int 微美元/股**，全部整数运算、
+JSON 不输出 NaN。`hash_*` 复用 event_store 的 canonical/digest/stable_id 保证确定性。
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field, replace
+from decimal import Decimal, ROUND_HALF_UP
+
+from scripts.live_trading.decision_ledger.event_store import digest, stable_id
+
+MICRO = 1_000_000  # 1 USD = 1e6 微美元
+
+# 状态枚举
+MANIFEST_STATUSES = ('DRAFT', 'FROZEN', 'RUNNING', 'PAUSED', 'CLOSED')
+# 候选总账终态（账户资格检查之前）
+CANDIDATE_TERMINAL = ('RULE_REJECTED', 'DATA_BLOCKED', 'WAITING', 'EXPIRED', 'READY')
+# READY 之后的账户级动作
+ACCOUNT_ACTIONS = ('RISK_REJECTED', 'VETOED', 'INTENT_CREATED', 'MISSED_EXECUTION')
+
+
+def to_micro(value) -> int:
+    """把美元金额/价格转成 int 微美元（四舍五入到 1e-6）。"""
+    d = Decimal(str(value))
+    return int((d * MICRO).to_integral_value(rounding=ROUND_HALF_UP))
+
+
+def micro_to_decimal(value: int) -> Decimal:
+    return Decimal(value) / MICRO
+
+
+def fee_micro(notional_micro: int, rate) -> int:
+    """notional × rate，四舍五入到微美元；rate 为每腿费率（如 0.001）。"""
+    return int((Decimal(notional_micro) * Decimal(str(rate))).to_integral_value(rounding=ROUND_HALF_UP))
+
+
+@dataclass(frozen=True)
+class Manifest:
+    """实验 manifest（设计 §3）。freeze 前必须完整，缺关键字段拒绝。"""
+    experiment_id: str
+    status: str
+    parent_strategy_id: str
+    parent_version: str
+    parent_code_hash: str
+    universe_id: str
+    universe_hash: str
+    account_scopes: tuple  # (SHADOW:<id>:R, SHADOW:<id>:L)
+    initial_cash: int  # 微美元
+    currency: str = 'USD'
+    risk_policy: dict = field(default_factory=dict)
+    execution_policy: dict = field(default_factory=dict)
+    llm_policy: dict = field(default_factory=dict)
+    calendar_version: str = ''
+    data_hashes: dict = field(default_factory=dict)
+    evaluation_protocol: dict = field(default_factory=dict)
+    start_session: str | None = None
+
+    def validate(self) -> list[str]:
+        """返回缺失/非法字段清单；空表示可 freeze。"""
+        errors = []
+        if self.status not in MANIFEST_STATUSES:
+            errors.append(f'status 非法: {self.status}')
+        if not self.experiment_id:
+            errors.append('experiment_id 缺失')
+        if not self.parent_strategy_id or not self.parent_version or not self.parent_code_hash:
+            errors.append('parent_strategy 缺失（id/version/code_hash）')
+        if not self.universe_id or not self.universe_hash:
+            errors.append('universe 缺失（id/hash）')
+        if not self.account_scopes or len(set(self.account_scopes)) != len(self.account_scopes):
+            errors.append('account_scopes 缺失或重复')
+        if not isinstance(self.initial_cash, int) or self.initial_cash <= 0:
+            errors.append('initial_cash 非法')
+        if not self.risk_policy.get('single_position_risk_bp'):
+            errors.append('risk_policy.single_position_risk_bp 缺失')
+        if not self.risk_policy.get('max_weight_bp') or not self.risk_policy.get('max_positions'):
+            errors.append('risk_policy.max_weight_bp/max_positions 缺失')
+        if not self.execution_policy.get('entry_rule') or not self.execution_policy.get('exit_policy_id'):
+            errors.append('execution_policy.entry_rule/exit_policy_id 缺失')
+        if not self.execution_policy.get('horizon'):
+            errors.append('execution_policy.horizon 缺失')
+        if not self.llm_policy.get('overlay'):
+            errors.append('llm_policy.overlay 缺失（本轮须为 fixed_pass/entry_veto）')
+        if not self.calendar_version:
+            errors.append('calendar_version 缺失')
+        # 前瞻协议（设计 §3：缺完整研究协议拒绝冻结）
+        for key in ('main_metric', 'enrollment_window', 'review_date', 'cost_allocation'):
+            if not self.evaluation_protocol.get(key):
+                errors.append(f'evaluation_protocol.{key} 缺失')
+        return errors
+
+    def freeze(self, start_session: str) -> 'Manifest':
+        errors = self.validate()
+        if errors:
+            raise ValueError('MANIFEST_FREEZE_FAILED:' + ';'.join(errors))
+        if self.status not in ('DRAFT', 'FROZEN'):
+            raise ValueError(f'只能从 DRAFT/FROZEN 冻结，当前 {self.status}')
+        return replace(self, status='FROZEN', start_session=start_session)
+
+    def manifest_hash(self) -> str:
+        return digest({
+            'experiment_id': self.experiment_id, 'parent_strategy_id': self.parent_strategy_id,
+            'parent_version': self.parent_version, 'parent_code_hash': self.parent_code_hash,
+            'universe_id': self.universe_id, 'universe_hash': self.universe_hash,
+            'account_scopes': list(self.account_scopes), 'initial_cash': self.initial_cash,
+            'currency': self.currency, 'risk_policy': self.risk_policy,
+            'execution_policy': self.execution_policy, 'llm_policy': self.llm_policy,
+            'calendar_version': self.calendar_version, 'data_hashes': self.data_hashes,
+            'evaluation_protocol': self.evaluation_protocol,
+        })
+
+
+@dataclass(frozen=True)
+class Opportunity:
+    """共同机会流（设计 §4.2），账户资格检查之前。"""
+    experiment_id: str
+    security_id: str
+    source_candidate_id: str
+    parent_version: str
+    signal_session: str
+    observed_at: str
+    planned_execution_session: str
+    rank: int
+    entry_rule: str
+    stop_reference: dict  # 用于入场的止损基准（原始 ATR/距离），非预成交
+    exit_policy_id: str
+    input_hash: str
+    terminal: str = 'WAITING'  # CANDIDATE_TERMINAL 之一
+
+    def opportunity_id(self) -> str:
+        return stable_id('opportunity', self.experiment_id, self.security_id,
+                         self.source_candidate_id, self.parent_version,
+                         self.signal_session, self.planned_execution_session,
+                         self.entry_rule, self.input_hash)
+
+
+@dataclass
+class Position:
+    security_id: str
+    shares: int
+    entry_price_micro: int
+    entry_session: str
+    initial_stop_micro: int
+    stop_micro: int  # 当前有效保护线（含移动保护）
+    exit_policy_id: str
+    opportunity_id: str
+    holding_sessions: int = 0
+
+
+@dataclass
+class AccountState:
+    """账户状态（设计 §6.3）。金额单位：微美元；dividend_receivable 按 pay_date 记录。"""
+    scope: str
+    sequence: int = 0
+    cash_available: int = 0
+    cash_reserved: int = 0
+    unsettled_cash: int = 0  # T+1 未结算卖出款
+    dividend_receivable: dict = field(default_factory=dict)  # pay_date -> 微美元
+    positions: dict = field(default_factory=dict)  # security_id -> Position
+    fees: int = 0
+    model_cost: int = 0
+    initial_equity: int = 0
+    high_water: int = 0
+    last_session: str | None = None
+    valuation_status: str = 'OK'  # OK / PROVISIONAL
+    risk_state: str = 'NORMAL'  # 回撤阶梯状态
+    recovery_streak: int = 0
+
+    def equity(self, mark_prices: dict[str, int]) -> int:
+        mv = sum(p.shares * mark_prices[p.security_id] for p in self.positions.values())
+        return self.cash_available + self.cash_reserved + self.unsettled_cash + \
+            sum(self.dividend_receivable.values()) + mv
+
+    def invariants(self) -> list[str]:
+        errs = []
+        if self.cash_available < 0 or self.cash_reserved < 0 or self.unsettled_cash < 0:
+            errs.append('现金/保留/未结算不能为负')
+        for k, v in self.dividend_receivable.items():
+            if v < 0:
+                errs.append(f'应收分红 {k} 不能为负')
+        for sid, p in self.positions.items():
+            if p.shares <= 0:
+                errs.append(f'{sid} 持仓数量非正')
+            if p.entry_price_micro <= 0 or p.stop_micro <= 0:
+                errs.append(f'{sid} 价格/止损非法')
+        return errs
+
+    def state_hash(self) -> str:
+        return digest({
+            'scope': self.scope, 'sequence': self.sequence,
+            'cash_available': self.cash_available, 'cash_reserved': self.cash_reserved,
+            'unsettled_cash': self.unsettled_cash,
+            'dividend_receivable': {k: v for k, v in sorted(self.dividend_receivable.items())},
+            'fees': self.fees, 'model_cost': self.model_cost,
+            'initial_equity': self.initial_equity, 'high_water': self.high_water,
+            'last_session': self.last_session, 'valuation_status': self.valuation_status,
+            'risk_state': self.risk_state, 'recovery_streak': self.recovery_streak,
+            'positions': {sid: {'shares': p.shares, 'entry_price_micro': p.entry_price_micro,
+                                'entry_session': p.entry_session,
+                                'initial_stop_micro': p.initial_stop_micro,
+                                'stop_micro': p.stop_micro, 'exit_policy_id': p.exit_policy_id,
+                                'opportunity_id': p.opportunity_id}
+                          for sid, p in sorted(self.positions.items())},
+        })
+
+
+@dataclass(frozen=True)
+class Application:
+    """每账户对某 opportunity 的最终动作（LLM 动作 PASS/VETO/ABSTAIN 或账户级动作）。"""
+    scope: str
+    opportunity_id: str
+    action: str  # PASS/VETO/ABSTAIN 或 ACCOUNT_ACTIONS 之一
+    reason_code: str
+    decision_id: str
+    as_of: str
+    applied: bool = False
+    model_cost: int = 0
+    raw_action: str = ''
+    late_response_observed: bool = False

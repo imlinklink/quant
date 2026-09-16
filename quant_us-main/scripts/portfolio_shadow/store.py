@@ -1,0 +1,239 @@
+"""R/L 双影子账户存储：独立 SQLite + 复用 event_store 事件协议 + shadow 投影表。
+
+R/L 共享同一 ledger 文件但 scope 隔离。金额/价格在 payload 中一律 int 微美元。
+投影表全部可由事件重建；提交 BEGIN IMMEDIATE + expected_sequence，同 event_id 同 payload
+幂等，同 id 异 payload 冲突。
+"""
+from __future__ import annotations
+
+import json
+import sqlite3
+from contextlib import contextmanager
+from pathlib import Path
+
+from scripts.live_trading.decision_ledger.event_store import (
+    canonical, digest, insert_event, make_event, migrate)
+
+SHADOW_SCHEMA_VERSION = 1
+
+_SHADOW_DDL = '''
+CREATE TABLE IF NOT EXISTS shadow_schema(version INTEGER PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS shadow_experiments (
+    experiment_id TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    manifest_hash TEXT NOT NULL,
+    body TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS shadow_opportunities (
+    experiment_id TEXT NOT NULL,
+    opportunity_id TEXT NOT NULL,
+    security_id TEXT NOT NULL,
+    session TEXT NOT NULL,
+    rank INTEGER NOT NULL,
+    terminal TEXT NOT NULL,
+    body TEXT NOT NULL,
+    PRIMARY KEY (experiment_id, opportunity_id));
+CREATE TABLE IF NOT EXISTS shadow_applications (
+    experiment_id TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    opportunity_id TEXT NOT NULL,
+    action TEXT NOT NULL,
+    decision_id TEXT NOT NULL,
+    applied INTEGER NOT NULL,
+    body TEXT NOT NULL,
+    PRIMARY KEY (experiment_id, scope, opportunity_id));
+CREATE TABLE IF NOT EXISTS shadow_account_state (
+    experiment_id TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    sequence INTEGER NOT NULL,
+    state_hash TEXT NOT NULL,
+    body TEXT NOT NULL,
+    PRIMARY KEY (experiment_id, scope, sequence));
+CREATE TABLE IF NOT EXISTS shadow_daily_nav (
+    experiment_id TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    session TEXT NOT NULL,
+    revision INTEGER NOT NULL DEFAULT 1,
+    equity INTEGER NOT NULL,
+    cash_available INTEGER NOT NULL,
+    gross_exposure INTEGER NOT NULL,
+    fees INTEGER NOT NULL,
+    valuation_status TEXT NOT NULL,
+    sequence INTEGER NOT NULL,
+    body TEXT NOT NULL,
+    PRIMARY KEY (experiment_id, scope, session, revision));
+CREATE TABLE IF NOT EXISTS shadow_job_runs (
+    experiment_id TEXT NOT NULL,
+    job_key TEXT NOT NULL,
+    attempt INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    fencing_token TEXT,
+    body TEXT NOT NULL,
+    PRIMARY KEY (experiment_id, job_key, attempt));
+'''
+
+
+class ShadowStore:
+    def __init__(self, path: Path, experiment_id: str):
+        self.path = Path(path)
+        self.experiment_id = experiment_id
+        # 实验级事件 scope（机会流）；账户级为 SHADOW:<id>:R / SHADOW:<id>:L
+        self.experiment_scope = f'SHADOW:{experiment_id}'
+
+    @contextmanager
+    def transaction(self, immediate: bool = True):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        con = sqlite3.connect(str(self.path), timeout=15)
+        try:
+            migrate(con, self.path)
+            con.executescript(_SHADOW_DDL)
+            if immediate:
+                con.execute('BEGIN IMMEDIATE')
+            con.execute('INSERT OR IGNORE INTO shadow_schema(version) VALUES (?)',
+                        (SHADOW_SCHEMA_VERSION,))
+            yield con
+            con.commit()
+        except BaseException:
+            con.rollback()
+            raise
+        finally:
+            con.close()
+
+    # ---- experiments ----
+    def save_experiment(self, manifest) -> None:
+        body = json.dumps(manifest.__dict__ if hasattr(manifest, '__dict__') else manifest,
+                          ensure_ascii=False, sort_keys=True)
+        with self.transaction() as con:
+            con.execute('INSERT OR REPLACE INTO shadow_experiments VALUES (?,?,?,?)',
+                        (self.experiment_id, manifest.status, manifest.manifest_hash(), body))
+
+    def get_experiment(self) -> dict | None:
+        with self.transaction(immediate=False) as con:
+            row = con.execute('SELECT body FROM shadow_experiments WHERE experiment_id=?',
+                              (self.experiment_id,)).fetchone()
+            return json.loads(row[0]) if row else None
+
+    # ---- opportunities ----
+    def put_opportunity(self, opp) -> None:
+        oid = opp.opportunity_id()
+        body = json.dumps(_asdict(opp), ensure_ascii=False, sort_keys=True)
+        with self.transaction() as con:
+            con.execute('INSERT OR REPLACE INTO shadow_opportunities VALUES (?,?,?,?,?,?,?)',
+                        (self.experiment_id, oid, opp.security_id, opp.signal_session,
+                         opp.rank, opp.terminal, body))
+            _insert_event(con, self.experiment_scope, 'shadow:opportunity', oid, _asdict(opp))
+
+    def opportunities(self) -> list[dict]:
+        with self.transaction(immediate=False) as con:
+            return [json.loads(r[0]) for r in con.execute(
+                'SELECT body FROM shadow_opportunities WHERE experiment_id=? '
+                'ORDER BY session, rank, opportunity_id', (self.experiment_id,))]
+
+    # ---- applications ----
+    def put_application(self, app) -> None:
+        body = json.dumps(_asdict(app), ensure_ascii=False, sort_keys=True)
+        with self.transaction() as con:
+            con.execute('INSERT OR REPLACE INTO shadow_applications VALUES (?,?,?,?,?,?,?)',
+                        (self.experiment_id, app.scope, app.opportunity_id, app.action,
+                         app.decision_id, 1 if app.applied else 0, body))
+            _insert_event(con, app.scope, 'shadow:application', app.opportunity_id, _asdict(app),
+                          decision_id=app.decision_id)
+
+    def application(self, scope: str, opportunity_id: str) -> dict | None:
+        with self.transaction(immediate=False) as con:
+            row = con.execute('SELECT body FROM shadow_applications WHERE experiment_id=? '
+                              'AND scope=? AND opportunity_id=?',
+                              (self.experiment_id, scope, opportunity_id)).fetchone()
+            return json.loads(row[0]) if row else None
+
+    # ---- account state / nav ----
+    def save_state(self, scope: str, state, nav: dict, events: list | None = None) -> None:
+        body = json.dumps(_asdict(state), ensure_ascii=False, sort_keys=True)
+        with self.transaction() as con:
+            for i, e in enumerate(events or []):
+                if e['type'] in ('fill', 'split', 'dividend_record', 'dividend_pay', 'settle',
+                                 'nav', 'model_cost'):
+                    payload = {**e, '_sequence': state.sequence, '_index': i}
+                    _insert_event(con, scope, 'shadow:step', (state.sequence, i), payload)
+            con.execute('INSERT OR REPLACE INTO shadow_account_state VALUES (?,?,?,?,?)',
+                        (self.experiment_id, scope, state.sequence, state.state_hash(), body))
+            con.execute('INSERT OR REPLACE INTO shadow_daily_nav VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+                        (self.experiment_id, scope, nav['session'], nav.get('revision', 1),
+                         nav['equity'], nav['cash_available'], nav['gross_exposure'],
+                         nav['fees'], nav['valuation_status'], state.sequence,
+                         json.dumps(nav, ensure_ascii=False, sort_keys=True)))
+
+    def latest_state(self, scope: str) -> tuple[int, dict] | None:
+        with self.transaction(immediate=False) as con:
+            row = con.execute('SELECT sequence, body FROM shadow_account_state '
+                              'WHERE experiment_id=? AND scope=? ORDER BY sequence DESC LIMIT 1',
+                              (self.experiment_id, scope)).fetchone()
+            return (row[0], json.loads(row[1])) if row else None
+
+    def daily_nav(self, scope: str) -> list[dict]:
+        with self.transaction(immediate=False) as con:
+            rows = con.execute('SELECT body FROM shadow_daily_nav '
+                               'WHERE experiment_id=? AND scope=? ORDER BY session, revision',
+                               (self.experiment_id, scope)).fetchall()
+            return [json.loads(r[0]) for r in rows]
+
+    def applications(self, scope: str | None = None) -> list[dict]:
+        with self.transaction(immediate=False) as con:
+            if scope is None:
+                rows = con.execute('SELECT body FROM shadow_applications WHERE experiment_id=?',
+                                   (self.experiment_id,)).fetchall()
+            else:
+                rows = con.execute('SELECT body FROM shadow_applications '
+                                   'WHERE experiment_id=? AND scope=?',
+                                   (self.experiment_id, scope)).fetchall()
+            return [json.loads(r[0]) for r in rows]
+
+    # ---- events (for replay) ----
+    def events(self, scope: str | None = None) -> list[dict]:
+        """返回 step 事件 payload（fill/split/dividend/settle），按 (sequence, index) 排序。"""
+        with self.transaction(immediate=False) as con:
+            if scope is None:
+                rows = con.execute(
+                    'SELECT body FROM decision_events WHERE account_scope LIKE ?',
+                    (f'SHADOW:{self.experiment_id}%',)).fetchall()
+            else:
+                rows = con.execute(
+                    'SELECT body FROM decision_events WHERE account_scope=?',
+                    (scope,)).fetchall()
+            payloads = []
+            for (body,) in rows:
+                ev = json.loads(body)
+                if ev.get('event_type') == 'shadow:step':
+                    p = ev['payload']
+                    payloads.append(p)
+            return sorted(payloads, key=lambda p: (p.get('_sequence', 0), p.get('_index', 0)))
+
+
+def _asdict(obj) -> dict:
+    """dataclass -> dict（深拷贝 positions 等可变字段）。"""
+    if hasattr(obj, '__dataclass_fields__'):
+        return {k: _asdict(v) for k, v in obj.__dict__.items()}
+    if isinstance(obj, dict):
+        return {k: _asdict(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_asdict(v) for v in obj]
+    return obj
+
+
+def _insert_event(con, scope: str, event_type: str, key, payload, **links) -> None:
+    event = make_event(scope, event_type, key, payload, **links)
+    if not insert_event(con, event):
+        raise ValueError(f'事件冲突:{event["event_id"]}')
+
+
+def state_from_dict(d: dict):
+    from .schema import AccountState, Position
+    positions = {sid: Position(**p) for sid, p in d['positions'].items()}
+    return AccountState(scope=d['scope'], sequence=d['sequence'],
+                        cash_available=d['cash_available'], cash_reserved=d['cash_reserved'],
+                        unsettled_cash=d['unsettled_cash'],
+                        dividend_receivable=d['dividend_receivable'], positions=positions,
+                        fees=d['fees'], model_cost=d['model_cost'],
+                        initial_equity=d['initial_equity'], high_water=d['high_water'],
+                        last_session=d['last_session'], valuation_status=d['valuation_status'],
+                        risk_state=d.get('risk_state', 'NORMAL'),
+                        recovery_streak=d.get('recovery_streak', 0))
