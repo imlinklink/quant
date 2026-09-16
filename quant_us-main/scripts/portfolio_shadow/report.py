@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+import pandas as pd
+
 from .store import ShadowStore, state_from_dict
 
 
@@ -69,12 +71,23 @@ def daily_report(store: ShadowStore, manifest) -> dict:
     return report
 
 
-def paired_performance(store: ShadowStore, manifest) -> dict:
+def _norm_session(s) -> str:
+    if isinstance(s, str):
+        return s
+    return str(pd.Timestamp(s).date())
+
+
+def paired_performance(store: ShadowStore, manifest, calendar=None) -> dict:
     r_scope, l_scope = manifest.account_scopes[0], manifest.account_scopes[1]
     r_navs = {n['session']: n for n in store.daily_nav(r_scope)}
     l_navs = {n['session']: n for n in store.daily_nav(l_scope)}
     all_sessions = sorted(set(r_navs) | set(l_navs))
     # 连续完整前缀：从首个 session 起双方都是 OK；遇缺口/暂定即停，不跨过缺口继续
+    if calendar is not None:
+        # 提供交易日历时，按日历识别「双方同时漏掉的交易日」；缺即停
+        cal = sorted(_norm_session(s) for s in calendar)
+        if all_sessions:
+            all_sessions = [s for s in cal if all_sessions[0] <= s <= all_sessions[-1]]
     common = []
     for s in all_sessions:
         r, l = r_navs.get(s), l_navs.get(s)

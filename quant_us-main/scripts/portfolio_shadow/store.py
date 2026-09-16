@@ -240,10 +240,11 @@ def _asdict(obj) -> dict:
     return obj
 
 
-def _insert_event(con, scope: str, event_type: str, key, payload, **links) -> None:
+def _insert_event(con, scope: str, event_type: str, key, payload, **links) -> bool:
+    """写入事件。幂等：同 payload 已存在时 insert_event 返回 False（不报错）；
+    同 event_id 异 payload 时 insert_event 内部 raise。返回是否新插入。"""
     event = make_event(scope, event_type, key, payload, **links)
-    if not insert_event(con, event):
-        raise ValueError(f'事件冲突:{event["event_id"]}')
+    return insert_event(con, event)
 
 
 def state_from_dict(d: dict):

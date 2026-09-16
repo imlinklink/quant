@@ -124,6 +124,83 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(p['total_sessions'], 2)
         self.assertEqual(p['excluded_after_gap'], 1)
 
+    def test_opportunity_rewrite_is_idempotent(self):
+        o = opp('SEC-A', '2026-01-05')
+        self.store.put_opportunity(o)
+        self.store.put_opportunity(o)  # 重复写入不应报「事件冲突」
+        self.assertEqual(len(self.store.opportunities()), 1)
+
+    def test_cli_style_crash_recovery_rewrites_opportunity(self):
+        # 模拟 run-session 顺序：先写机会 → 再检查账户；R 已提交 L 未提交时重启
+        m = self.m
+        o = opp('SEC-A', '2026-01-05')
+        # 第一次：写机会 + R 提交，L 崩溃
+        self.store.put_opportunity(o)
+        r = self._step(new_account_state('SHADOW:exp1:R', m.initial_cash), '2026-01-05',
+                       bars_a(100.5), intents=[o])
+        self.store.save_state('SHADOW:exp1:R', r.state, r.nav, r.events)
+        # 重启：再次写同一机会（幂等，不崩），R no-op，L 补齐
+        self.store.put_opportunity(o)
+        _, r_saved = self.store.latest_state('SHADOW:exp1:R')
+        r_rerun = self._step(state_from_dict(r_saved), '2026-01-05', bars_a(100.5), intents=[o])
+        self.assertIsNone(r_rerun.nav)  # R 不重复推进
+        l = self._step(new_account_state('SHADOW:exp1:L', m.initial_cash), '2026-01-05',
+                       bars_a(100.5), intents=[o], model_cost=100)
+        self.store.save_state('SHADOW:exp1:L', l.state, l.nav, l.events)
+        self.assertEqual(self.store.latest_state('SHADOW:exp1:R')[0], 1)
+        self.assertEqual(self.store.latest_state('SHADOW:exp1:L')[0], 1)
+
+    def test_replay_then_continue_until_time_exit(self):
+        # 事件重放重建状态后，继续步进直到时间退出
+        from scripts.portfolio_shadow.replay import replay
+        m = make_manifest_horizon3()
+        state = new_account_state('SHADOW:exp1:R', m.initial_cash)
+        events = []
+        for sess in ['2026-01-05', '2026-01-06']:
+            res = step(state, session=sess, bars=bars_a(100.5), corporate_actions=[],
+                       intents=[opp('SEC-A', sess)] if sess == '2026-01-05' else [], manifest=m)
+            state = res.state
+            events.extend(res.events)
+        replayed = replay('SHADOW:exp1:R', m.initial_cash, events)
+        self.assertEqual(replayed.positions['SEC-A'].holding_sessions, 2)
+        # 从重放状态继续：第 3 天应时间退出（horizon=3）
+        res = step(replayed, session='2026-01-07', bars=bars_a(100.5), corporate_actions=[],
+                   intents=[], manifest=m)
+        self.assertEqual(len(res.state.positions), 0)
+        sells = [e for e in res.events if e['type'] == 'fill' and e['side'] == 'SELL']
+        self.assertEqual(sells[0]['reason'], 'TIME_EXIT')
+
+    def test_paired_performance_detects_both_missing_with_calendar(self):
+        m = self.m
+        # day1 完整、day2 双方都漏、day3 完整
+        for scope in ('SHADOW:exp1:R', 'SHADOW:exp1:L'):
+            res = self._step(new_account_state(scope, m.initial_cash), '2026-01-05',
+                             bars_a(100.5), intents=[])
+            self.store.save_state(scope, res.state, res.nav, res.events)
+        for scope in ('SHADOW:exp1:R', 'SHADOW:exp1:L'):
+            _, saved = self.store.latest_state(scope)
+            res = self._step(state_from_dict(saved), '2026-01-07', bars_a(100.5), intents=[])
+            self.store.save_state(scope, res.state, res.nav, res.events)
+        # 无日历：union 视为连续（漏掉的 01-06 无法识别）
+        self.assertEqual(paired_performance(self.store, m)['common_sessions'], 2)
+        # 有日历：识别 01-06 双方漏掉 → 停在 01-05
+        p = paired_performance(self.store, m,
+                               calendar=['2026-01-05', '2026-01-06', '2026-01-07'])
+        self.assertEqual(p['common_sessions'], 1)
+
+
+def make_manifest_horizon3():
+    return Manifest(
+        experiment_id='exp1', status='DRAFT', parent_strategy_id='B3', parent_version='1',
+        parent_code_hash='abc', universe_id='u', universe_hash='uh',
+        account_scopes=('SHADOW:exp1:R', 'SHADOW:exp1:L'), initial_cash=to_micro(100000),
+        risk_policy={'single_position_risk_bp': 100, 'max_weight_bp': 2000, 'max_positions': 5},
+        execution_policy={'entry_rule': 'b3', 'exit_policy_id': 'H60', 'horizon': 3},
+        llm_policy={'overlay': 'fixed_pass'}, calendar_version='v1',
+        evaluation_protocol={'main_metric': 'L_minus_R_return', 'enrollment_window': '3-6 months',
+                             'review_date': '2026-12-31', 'cost_allocation': 'L_pays_model_cost'}
+    ).freeze('2026-01-02')
+
 
 if __name__ == '__main__':
     unittest.main()
