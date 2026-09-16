@@ -161,12 +161,88 @@ def cmd_report(args):
     return 0
 
 
+def cmd_run_forward(args):
+    """逐日增量信号生成 + 前向运行 R/L 账户（真实候选 + 可选真实 LLM）。"""
+    import pandas as pd
+    m = manifest_from_dict(json.loads(Path(args.manifest).read_text()))
+    store = ShadowStore(Path(args.output) / m.experiment_id / 'ledger.sqlite3', m.experiment_id)
+    from scripts.medium_term.p2_selection_check import (ACTIONS, ETF_RAW, QUALITY, load_panels,
+                                                        market_frame, trading_calendar)
+    from scripts.medium_term.risk_rule_experiment import _build_shared_audits
+    from .candidate_adapter import IncrementalCandidateGenerator
+    from .verify_parity import _shadow_actions
+    prices, _ = load_panels()
+    prices['session'] = pd.to_datetime(prices.session).dt.normalize()
+    prices['security_id'] = prices.security_id.astype(str)
+    quality = pd.read_csv(QUALITY)
+    actions = pd.read_csv(ACTIONS)
+    actions['security_id'] = actions.security_id.astype(str)
+    audits, blocked = _build_shared_audits(prices, actions)
+    cal = trading_calendar(ETF_RAW)
+    gen = IncrementalCandidateGenerator(
+        prices, market_frame(ETF_RAW), quality, actions, blocked, cal,
+        experiment_id=m.experiment_id, parent_version=m.parent_version,
+        exit_policy_id=m.execution_policy['exit_policy_id'],
+        top_n=m.risk_policy.get('top_n', 5),
+        max_wait_sessions=m.execution_policy.get('max_wait_sessions', 20))
+    real_model = None
+    if m.llm_policy.get('overlay') == 'entry_veto' and m.llm_policy.get('use_real_model'):
+        import yaml
+        from mutifactor.llm import LLMAdvisor
+        cfg_path = Path(__file__).resolve().parents[2] / 'config.yaml'
+        real_model = RealModel(LLMAdvisor((yaml.safe_load(cfg_path.read_text()) or {}).get('llm', {})))
+
+    start = m.start_session or str(pd.Timestamp(cal[0]).date())
+    end = args.to_session
+    sessions = [s for s in cal if start <= str(pd.Timestamp(s).date()) <= end]
+    for session in sessions:
+        sess_str = str(pd.Timestamp(session).date())
+        intents = gen.opportunities_for(session)
+        for o in intents:
+            store.put_opportunity(o)
+        bars = {sid: {'open': to_micro(r.raw_open), 'high': to_micro(r.raw_high),
+                      'low': to_micro(r.raw_low), 'close': to_micro(r.raw_close)}
+                for sid, r in prices[prices.session.eq(session)].set_index('security_id').iterrows()}
+        acts = [a for a in _shadow_actions(actions) if a.get('ex_date') == sess_str]
+        for scope in m.account_scopes:
+            row = store.latest_state(scope)
+            saved = row[1] if row else None
+            state = state_from_dict(saved) if saved else new_account_state(scope, m.initial_cash)
+            scope_intents = list(intents)
+            cost = 0
+            if m.llm_policy.get('overlay') == 'entry_veto' and scope.endswith(':L'):
+                kept = []
+                for opp in intents:
+                    quote = {'price': bars[opp.security_id]['open'],
+                             'observed_at': f'{sess_str}T00:00:00+00:00'}
+                    packet = build_entry_packet(opp, quote, [], {}, f'{sess_str}T13:20:00+00:00')
+                    model = real_model or FakeModel(action='PASS')
+                    d = resolve_overlay(packet, model.call(packet, f'{sess_str}T13:20:00+00:00'),
+                                        f'{sess_str}T13:20:00+00:00')
+                    cost += d.model_cost
+                    store.put_application(Application(
+                        scope=scope, opportunity_id=opp.opportunity_id(), action=d.action,
+                        reason_code=d.reason_code, decision_id='', as_of=f'{sess_str}T13:20:00+00:00',
+                        applied=True, model_cost=d.model_cost, raw_action=d.raw_action,
+                        late_response_observed=d.late_response_observed))
+                    if d.action != 'VETO':
+                        kept.append(opp)
+                scope_intents = kept
+            res = step(state, session=sess_str, bars=bars, corporate_actions=acts,
+                       intents=scope_intents, manifest=m, model_cost=cost)
+            if res.nav is not None:
+                store.save_state(scope, res.state, res.nav, res.events)
+    print(json.dumps({'experiment': m.experiment_id, 'sessions': len(sessions),
+                      'to_session': end}, ensure_ascii=False))
+    return 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog='portfolio_shadow')
     sub = parser.add_subparsers(dest='cmd', required=True)
     for name, fn in (('validate', cmd_validate), ('freeze', cmd_freeze),
-                     ('run-session', cmd_run_session), ('replay', cmd_replay),
-                     ('report', cmd_report)):
+                     ('run-session', cmd_run_session), ('run-forward', cmd_run_forward),
+                     ('replay', cmd_replay), ('report', cmd_report)):
         p = sub.add_parser(name)
         p.add_argument('--manifest', required=True)
         if name == 'freeze':
@@ -174,6 +250,8 @@ def main(argv=None):
         if name == 'run-session':
             p.add_argument('--session', required=True)
             p.add_argument('--schedule', required=True)
+        if name == 'run-forward':
+            p.add_argument('--to-session', required=True)
         p.add_argument('--output', required=True)
         p.set_defaults(fn=fn)
     args = parser.parse_args(argv)
