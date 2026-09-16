@@ -224,5 +224,47 @@ def micro_to_dollars(x):
     return Decimal(x) / 1_000_000
 
 
+class ReviewFixTests(unittest.TestCase):
+    """针对 review 发现的验收阻塞项：幂等 / holding_sessions 恢复 / 缺行情阻止开仓。"""
+
+    def test_step_is_idempotent_per_session(self):
+        m = make_manifest(horizon=60)
+        state = new_account_state('SHADOW:x:R', m.initial_cash)
+        r1 = step(state, session='2026-01-05', bars=bars1(100, 100.5), corporate_actions=[],
+                  intents=[opp('SEC-A', '2026-01-05')], manifest=m)
+        r2 = step(r1.state, session='2026-01-05', bars=bars1(100, 100.5), corporate_actions=[],
+                  intents=[opp('SEC-A', '2026-01-05')], manifest=m)
+        self.assertIsNone(r2.nav)
+        self.assertEqual(r2.state.sequence, r1.state.sequence)
+        self.assertEqual(r2.state.state_hash(), r1.state.state_hash())
+
+    def test_replay_restores_holding_sessions(self):
+        m = make_manifest(horizon=60)
+        state = new_account_state('SHADOW:x:R', m.initial_cash)
+        events = []
+        res = step(state, session='2026-01-05', bars=bars1(100, 100.5), corporate_actions=[],
+                   intents=[opp('SEC-A', '2026-01-05')], manifest=m)
+        state = res.state
+        events.extend(res.events)
+        self.assertEqual(state.positions['SEC-A'].holding_sessions, 1)
+        replayed = replay('SHADOW:x:R', m.initial_cash, events)
+        self.assertEqual(replayed.positions['SEC-A'].holding_sessions, 1)
+        self.assertEqual(replayed.state_hash(), state.state_hash())
+
+    def test_missing_held_bars_blocks_new_entries(self):
+        m = make_manifest(horizon=60)
+        state = new_account_state('SHADOW:x:R', m.initial_cash)
+        r1 = step(state, session='2026-01-05', bars={'SEC-A': bar(100, 100.5, 99, 101)},
+                  corporate_actions=[], intents=[opp('SEC-A', '2026-01-05')], manifest=m)
+        self.assertEqual(len(r1.state.positions), 1)
+        # day2：SEC-A 缺行情，但 SEC-B 有行情 → 估值不完整应阻止新开仓
+        r2 = step(r1.state, session='2026-01-06', bars={'SEC-B': bar(50, 50.5, 49, 51)},
+                  corporate_actions=[], intents=[opp('SEC-B', '2026-01-06')], manifest=m)
+        missed = [e for e in r2.events if e['type'] == 'missed']
+        self.assertEqual(missed[0]['reason'], 'VALUATION_INCOMPLETE')
+        self.assertEqual(len(r2.state.positions), 1)  # SEC-A 仍在
+        self.assertEqual(r2.state.valuation_status, 'PROVISIONAL')
+
+
 if __name__ == '__main__':
     unittest.main()

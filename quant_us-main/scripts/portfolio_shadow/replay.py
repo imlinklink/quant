@@ -16,6 +16,9 @@ def apply_event(state: AccountState, event: dict) -> AccountState:
         s.unsettled_cash -= event['amount_micro']
     elif t == 'model_cost':
         s.model_cost += event['amount_micro']
+    elif t == 'hold':
+        sid = event['security_id']
+        s.positions[sid] = replace(s.positions[sid], holding_sessions=event['holding_sessions'])
     elif t == 'dividend_pay':
         s.cash_available += event['total_micro']
         pay_date = event['pay_date']
@@ -65,7 +68,7 @@ def replay(scope: str, initial_cash: int, events: list[dict]) -> AccountState:
     state = new_account_state(scope, initial_cash)
     for event in events:
         if event.get('type') in ('settle', 'dividend_pay', 'dividend_record', 'split', 'fill',
-                                 'model_cost'):
+                                 'model_cost', 'hold'):
             state = apply_event(state, event)
         elif event.get('type') == 'nav':
             kwargs = {'sequence': state.sequence + 1, 'last_session': event['session'],

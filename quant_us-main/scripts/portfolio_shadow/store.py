@@ -151,7 +151,7 @@ class ShadowStore:
         with self.transaction() as con:
             for i, e in enumerate(events or []):
                 if e['type'] in ('fill', 'split', 'dividend_record', 'dividend_pay', 'settle',
-                                 'nav', 'model_cost'):
+                                 'nav', 'model_cost', 'hold'):
                     payload = {**e, '_sequence': state.sequence, '_index': i}
                     _insert_event(con, scope, 'shadow:step', (state.sequence, i), payload)
             con.execute('INSERT OR REPLACE INTO shadow_account_state VALUES (?,?,?,?,?)',

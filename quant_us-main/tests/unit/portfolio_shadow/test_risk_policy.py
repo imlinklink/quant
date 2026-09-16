@@ -61,6 +61,16 @@ class LadderTests(unittest.TestCase):
         self.assertEqual(evaluate_ladder(0.02, 'REVIEW_REQUIRED', 0, None), ('REVIEW_REQUIRED', 0))
         self.assertEqual(evaluate_ladder(0.02, 'LIMIT_BREACH', 0, None), ('LIMIT_BREACH', 0))
 
+    def test_paused_does_not_auto_downgrade_to_reduced_at_11pct(self):
+        # 回撤回到 11%（低于 15% 但高于 10%）：PAUSED_ENTRY 不得立即降 REDUCED
+        self.assertEqual(evaluate_ladder(0.11, 'PAUSED_ENTRY', 0, None)[0], 'PAUSED_ENTRY')
+
+    def test_review_does_not_auto_downgrade_at_11pct(self):
+        self.assertEqual(evaluate_ladder(0.11, 'REVIEW_REQUIRED', 0, None)[0], 'REVIEW_REQUIRED')
+
+    def test_limit_does_not_auto_downgrade_at_11pct(self):
+        self.assertEqual(evaluate_ladder(0.11, 'LIMIT_BREACH', 0, None)[0], 'LIMIT_BREACH')
+
     def test_entry_allowed_and_budget(self):
         self.assertTrue(entry_allowed('NORMAL'))
         self.assertTrue(entry_allowed('REDUCED'))

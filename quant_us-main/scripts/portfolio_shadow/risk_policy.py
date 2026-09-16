@@ -19,38 +19,41 @@ _DEFAULTS = {
 }
 
 
+_RANK = {'NORMAL': 0, 'REDUCED': 1, 'PAUSED_ENTRY': 2, 'REVIEW_REQUIRED': 3, 'LIMIT_BREACH': 4}
+
+
 def evaluate_ladder(drawdown: float, current: str, streak: int, policy: dict | None) -> tuple[str, int]:
-    """按回撤阶梯转移，返回 (新状态, 连续恢复会话数)。"""
+    """按回撤阶梯转移，返回 (新状态, 连续恢复会话数)。
+
+    只允许向更严重状态**升级**；向更轻状态**降级**必须走迟滞（连续 N 会话低于恢复阈值），
+    且 REVIEW_REQUIRED / LIMIT_BREACH 不自动降级（仅显式审查事件解除）。
+    """
     t = dict(_DEFAULTS)
     if policy:
         t.update(policy.get('drawdown_ladder', {}) or {})
-    # 上升：从最高阈值往下命中
+    # 升级目标：只看回撤阈值，不区分当前状态
     if drawdown >= t['limit_breach']:
-        return 'LIMIT_BREACH', 0
-    if drawdown >= t['review_required']:
-        return 'REVIEW_REQUIRED', 0
-    if drawdown >= t['paused_entry']:
-        return 'PAUSED_ENTRY', 0
-    if drawdown >= t['reduced']:
-        return 'REDUCED', 0
-    # 恢复区（drawdown < reduced 阈值）
-    if current == 'REDUCED':
-        if drawdown < t['normal_recover']:
+        target = 'LIMIT_BREACH'
+    elif drawdown >= t['review_required']:
+        target = 'REVIEW_REQUIRED'
+    elif drawdown >= t['paused_entry']:
+        target = 'PAUSED_ENTRY'
+    elif drawdown >= t['reduced']:
+        target = 'REDUCED'
+    else:
+        target = 'NORMAL'
+    if _RANK[target] > _RANK[current]:
+        return target, 0  # 升级
+    if _RANK[target] < _RANK[current]:
+        # 降级：迟滞；REVIEW_REQUIRED / LIMIT_BREACH 不自动降级
+        if current == 'REDUCED' and drawdown < t['normal_recover']:
             streak += 1
-            if streak >= t['recover_sessions']:
-                return 'NORMAL', 0
-            return 'REDUCED', streak
-        return 'REDUCED', 0
-    if current == 'PAUSED_ENTRY':
-        # 回撤 <12% 连续 N 会话 → 降至 REDUCED；仍需人工风险审查（外部事件，此处只降级）
-        if drawdown < t['reduced_recover']:
+            return ('NORMAL', 0) if streak >= t['recover_sessions'] else ('REDUCED', streak)
+        if current == 'PAUSED_ENTRY' and drawdown < t['reduced_recover']:
             streak += 1
-            if streak >= t['recover_sessions']:
-                return 'REDUCED', 0
-            return 'PAUSED_ENTRY', streak
-        return 'PAUSED_ENTRY', 0
-    # REVIEW_REQUIRED / LIMIT_BREACH 不自动解除；NORMAL 保持
-    return current, 0
+            return ('REDUCED', 0) if streak >= t['recover_sessions'] else ('PAUSED_ENTRY', streak)
+        return current, 0
+    return current, 0  # 同级保持，重置 streak
 
 
 def entry_allowed(state: str) -> bool:

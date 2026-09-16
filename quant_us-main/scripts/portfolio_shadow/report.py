@@ -12,10 +12,11 @@ def _to_dollars(micro) -> float | None:
     return None if micro is None else micro / 1_000_000
 
 
-def _max_drawdown(navs: list[dict], key: str = 'equity') -> float | None:
+def _max_drawdown(navs: list[dict], key: str = 'equity', initial: int | None = None) -> float | None:
     if not navs:
         return None
-    peak = navs[0][key]
+    # 高点包含初始资金（设计 §2：DD = 1 − NAV / 历史高点，高点含初始资金）
+    peak = initial if initial is not None else navs[0][key]
     mdd = 0.0
     for n in navs:
         peak = max(peak, n[key])
@@ -72,11 +73,16 @@ def paired_performance(store: ShadowStore, manifest) -> dict:
     r_scope, l_scope = manifest.account_scopes[0], manifest.account_scopes[1]
     r_navs = {n['session']: n for n in store.daily_nav(r_scope)}
     l_navs = {n['session']: n for n in store.daily_nav(l_scope)}
-    common = sorted(set(r_navs) & set(l_navs))
+    # 排除暂定估值（缺行情），只对完整估值的共同 session 配对
+    def _complete(navs):
+        return {s: n for s, n in navs.items() if n.get('valuation_status') != 'PROVISIONAL'}
+    r_ok, l_ok = _complete(r_navs), _complete(l_navs)
+    common = sorted(set(r_ok) & set(l_ok))
+    provisional = sorted(set(r_navs) & set(l_navs) - set(common))
     if not common:
-        return {'common_sessions': 0}
-    r_series = [r_navs[s] for s in common]
-    l_series = [l_navs[s] for s in common]
+        return {'common_sessions': 0, 'provisional_sessions': len(provisional)}
+    r_series = [r_ok[s] for s in common]
+    l_series = [l_ok[s] for s in common]
     initial = manifest.initial_cash
     r_final = r_series[-1].get('full_cost_equity', r_series[-1].get('equity', initial))
     l_final = l_series[-1].get('full_cost_equity', l_series[-1].get('equity', initial))
@@ -90,11 +96,12 @@ def paired_performance(store: ShadowStore, manifest) -> dict:
 
     return {
         'common_sessions': len(common),
+        'provisional_sessions': len(provisional),
         'R_full_cost_return': r_ret,
         'L_full_cost_return': l_ret,
         'L_minus_R_return': l_ret - r_ret,
-        'R_max_drawdown': _max_drawdown(r_series, 'full_cost_equity'),
-        'L_max_drawdown': _max_drawdown(l_series, 'full_cost_equity'),
+        'R_max_drawdown': _max_drawdown(r_series, 'full_cost_equity', initial=initial),
+        'L_max_drawdown': _max_drawdown(l_series, 'full_cost_equity', initial=initial),
         'R_avg_exposure': r_exp / initial,
         'L_avg_exposure': l_exp / initial,
         'exposure_diff': (l_exp - r_exp) / initial,

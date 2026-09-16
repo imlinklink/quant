@@ -91,5 +91,14 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(len(self.store.applications('SHADOW:exp1:L')), 1)
 
 
+class DrawdownTests(unittest.TestCase):
+    def test_max_drawdown_includes_initial_capital(self):
+        from scripts.portfolio_shadow.report import _max_drawdown
+        # 初始 10 万，首日净值 9 万 → MDD 应为 -10%（不是 0）
+        self.assertAlmostEqual(_max_drawdown([{'equity': 90000}], 'equity', initial=100000), -0.10)
+        # 净值回到 11 万 → 无回撤
+        self.assertAlmostEqual(_max_drawdown([{'equity': 110000}], 'equity', initial=100000), 0.0)
+
+
 if __name__ == '__main__':
     unittest.main()

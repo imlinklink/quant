@@ -39,7 +39,7 @@ def risk_sized_shares_micro(entry_price_micro: int, stop_micro: int, nav_micro: 
 class StepResult:
     state: AccountState
     events: list = field(default_factory=list)  # 已落账事件（fill/split/dividend/nav）
-    nav: dict = field(default_factory=dict)
+    nav: dict | None = None  # None 表示该 session 已处理（幂等 no-op）
 
 
 def _fill(session, side, security_id, shares, price_micro, fee, reason, opportunity_id=''):
@@ -55,6 +55,9 @@ def _fee(gross_micro: int, fee_bp: int) -> int:
 def step(state: AccountState, *, session: str, bars: dict, corporate_actions: list,
          intents: list, manifest, fee_bp: int = 10, model_cost: int = 0) -> StepResult:
     """执行一个交易日。bars={sid:{open,high,low,close}}（微美元/股）；公司行动用微美元。"""
+    if state.last_session == session:
+        # 幂等：该 session 已处理，不推进 sequence/持有天数/结算
+        return StepResult(state=state, events=[], nav=None)
     s = replace(state)
     s.sequence = state.sequence + 1
     s.last_session = session
@@ -127,11 +130,17 @@ def step(state: AccountState, *, session: str, bars: dict, corporate_actions: li
                                 pos.opportunity_id))
 
     # 3. 开盘入场（风险定仓 + 五仓 + 去重）
+    missing_held = [sid for sid in s.positions if sid not in bars]
+    valuation_ok = not missing_held
     for intent in sorted(intents, key=lambda o: (o.rank, o.security_id)):
         sid = intent.security_id
         if not allowed:
             events.append({'type': 'missed', 'session': session, 'security_id': sid,
                            'opportunity_id': intent.opportunity_id(), 'reason': 'RISK_PAUSED'})
+            continue
+        if not valuation_ok:
+            events.append({'type': 'missed', 'session': session, 'security_id': sid,
+                           'opportunity_id': intent.opportunity_id(), 'reason': 'VALUATION_INCOMPLETE'})
             continue
         if sid not in bars:
             events.append({'type': 'missed', 'session': session, 'security_id': sid,
@@ -194,6 +203,8 @@ def step(state: AccountState, *, session: str, bars: dict, corporate_actions: li
     for sid, pos in list(s.positions.items()):
         pos = replace(pos, holding_sessions=pos.holding_sessions + 1)
         s.positions[sid] = pos
+        events.append({'type': 'hold', 'session': session, 'security_id': sid,
+                       'holding_sessions': pos.holding_sessions})
         if pos.holding_sessions >= horizon and sid in bars:
             px = bars[sid]['close']
             gross = pos.shares * px

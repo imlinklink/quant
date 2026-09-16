@@ -106,6 +106,12 @@ def cmd_run_session(args):
         res = step(state, session=args.session, bars=bars,
                    corporate_actions=sess.get('corporate_actions', []),
                    intents=scope_intents, manifest=m, model_cost=cost)
+        if res.nav is None:
+            # 幂等：该 session 已处理
+            results[scope] = {'status': 'already_processed', 'session': args.session,
+                              'model_cost': res.state.model_cost,
+                              'positions': list(res.state.positions)}
+            continue
         store.save_state(scope, res.state, res.nav, res.events)
         results[scope] = {'equity': res.nav['equity'], 'full_cost_equity': res.nav['full_cost_equity'],
                           'model_cost': res.state.model_cost, 'positions': list(res.state.positions)}

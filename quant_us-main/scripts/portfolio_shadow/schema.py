@@ -199,7 +199,8 @@ class AccountState:
                                 'entry_session': p.entry_session,
                                 'initial_stop_micro': p.initial_stop_micro,
                                 'stop_micro': p.stop_micro, 'exit_policy_id': p.exit_policy_id,
-                                'opportunity_id': p.opportunity_id}
+                                'opportunity_id': p.opportunity_id,
+                                'holding_sessions': p.holding_sessions}
                           for sid, p in sorted(self.positions.items())},
         })
 
