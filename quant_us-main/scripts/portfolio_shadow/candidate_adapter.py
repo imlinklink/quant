@@ -113,6 +113,7 @@ class IncrementalCandidateGenerator:
         self._month_ends = set(month_end_sessions(self.calendar))
         self._bars_raw = {str(sid): g for sid, g in prices.groupby('security_id')}
         self._atr_key = prices.set_index(['security_id', 'session'])
+        self._signals = None  # 惰性缓存：{sid: (weekly_uptrend Series, entry_signal Series)}
         self._intervals = {}
         if not quality.empty and 'quality_status' in quality.columns:
             self._intervals = {
@@ -146,7 +147,27 @@ class IncrementalCandidateGenerator:
             self.pending[f'{sid}-{session.date()}'] = {
                 'security_id': sid, 'decision_session': session, 'rank': int(r.rank)}
 
+    def precompute_signals(self) -> None:
+        """预计算每只证券的逐日信号（周线门 + 突破/回踩）并缓存。
+
+        as_of 用日历最后一天；P0-4 已证明入场信号是比较型、对 as_of 锚定不变，故与逐日等价。
+        全量回测/对拍用此步加速（O(证券) 而非 O(候选×session)）；真正的前向逐日运行可跳过。
+        """
+        from scripts.medium_term.timed_entries import _adjusted_bars, entry_signals, weekly_regime
+        self._signals = {}
+        last = self.calendar[-1]
+        for sid, group in self._bars_raw.items():
+            adj = _adjusted_bars(group, self.actions, last)
+            regime = weekly_regime(adj, self.calendar).set_index('session')['weekly_uptrend']
+            sig = entry_signals(adj).set_index('session')['entry_signal']
+            self._signals[sid] = (regime, sig)
+
     def _signal_for(self, sid: str, session) -> str | None:
+        if self._signals is not None:
+            regime, sig = self._signals[sid]
+            up = bool(regime.get(session, False))
+            kind = sig.get(session, '')
+            return kind if up and kind else None
         from scripts.medium_term.timed_entries import _adjusted_bars, entry_signals, weekly_regime
         group = self._bars_raw.get(sid)
         if group is None or group[group.session.eq(session)].empty:
@@ -191,6 +212,11 @@ class IncrementalCandidateGenerator:
             atr = self._atr_micro(cand['security_id'], session)
             if atr is None:
                 del self.pending[cid]  # 缺 ATR，无法定止损
+                continue
+            # 前向 bar 充足性（与 build_entries 的 INSUFFICIENT_FORWARD_BARS 一致；此处用策略 horizon）
+            group = self._bars_raw.get(cand['security_id'])
+            if group is None or len(group[group.session >= exec_sess]) < self.horizon:
+                del self.pending[cid]
                 continue
             # 行动覆盖门（与 build_entries 一致）：入场→退出窗落在 blocked 日期则丢弃
             exit_pos = int(self.calendar.searchsorted(exec_sess)) + self.horizon - 1

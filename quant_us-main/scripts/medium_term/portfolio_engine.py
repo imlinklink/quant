@@ -167,6 +167,38 @@ def simulate_single_asset_rotation(prices: pd.DataFrame, targets: pd.DataFrame, 
                           pd.DataFrame(rejected))
 
 
+def _shadow_risk_sized_shares(entry_price, initial_stop, equity, cash, *,
+                              risk_fraction, max_weight, fee_rate) -> float:
+    """整数微定仓（与影子引擎 `risk_sized_shares_micro` 对齐，消除 float 精度差）。"""
+    from decimal import Decimal, ROUND_HALF_UP
+    MICRO = 1_000_000
+
+    def _micro(x):
+        return int((Decimal(str(x)) * MICRO).to_integral_value(rounding=ROUND_HALF_UP))
+
+    price, stop = _micro(entry_price), _micro(initial_stop)
+    nav, available = _micro(equity), _micro(cash)
+    distance = price - stop
+    risk_bp = int((Decimal(str(risk_fraction)) * 10000).to_integral_value(rounding=ROUND_HALF_UP))
+    max_weight_bp = int((Decimal(str(max_weight)) * 10000).to_integral_value(rounding=ROUND_HALF_UP))
+    fee_bp = int((Decimal(str(fee_rate)) * 10000).to_integral_value(rounding=ROUND_HALF_UP))
+    if distance <= 0 or nav <= 0 or available < 0:
+        return 0.0
+    risk_shares = nav * risk_bp // 10000 // distance
+    weight_shares = nav * max_weight_bp // 10000 // price
+    cash_shares = available * 10000 // (price * (10000 + fee_bp))
+    return float(min(risk_shares, weight_shares, cash_shares))
+
+
+def _shadow_fee(gross, fee_rate) -> float:
+    """整数微费用（与影子引擎 _fee 对齐）。"""
+    from decimal import Decimal, ROUND_HALF_UP
+    MICRO = 1_000_000
+    fee_bp = int((Decimal(str(fee_rate)) * 10000).to_integral_value(rounding=ROUND_HALF_UP))
+    gross_micro = int((Decimal(str(gross)) * MICRO).to_integral_value(rounding=ROUND_HALF_UP))
+    return gross_micro * fee_bp // 10000 / MICRO
+
+
 def simulate_multi_asset_portfolio(prices: pd.DataFrame, matrix: pd.DataFrame, *,
                                    initial_cash=100_000., risk_fraction=.01,
                                    max_weight=.20, round_trip_cost=None,
@@ -174,12 +206,14 @@ def simulate_multi_asset_portfolio(prices: pd.DataFrame, matrix: pd.DataFrame, *
                                    allow_fractional=False, max_positions=5,
                                    evaluation_start=None,
                                    t1_settlement: bool = False,
-                                   dividend_receivable: bool = False) -> MultiAssetResult:
+                                   dividend_receivable: bool = False,
+                                   shadow_precision: bool = False) -> MultiAssetResult:
     """按已接受的一个 B2/B3 × Exit × Cost 单元构造逐日五仓净值。
 
     `t1_settlement=True` / `dividend_receivable=True` 时切换到影子引擎同口径会计：
     卖出款 T+1 结算（进 unsettled_cash，下一会话可用）、除息记应收（按 pay_date）→ 支付日转现金。
-    默认关闭，保持历史（即时结算）语义不变。
+    `shadow_precision=True` 时定仓与费用改用整数微美元运算（与影子引擎 `risk_sized_shares_micro`
+    对齐），消除 float 精度差。默认关闭，保持历史（即时结算/float）语义不变。
     """
     required = {'security_id', 'entry_session', 'entry_price', 'initial_stop',
                 'exit_session', 'exit_price', 'exit_phase', 'portfolio_accepted'}
@@ -241,7 +275,7 @@ def simulate_multi_asset_portfolio(prices: pd.DataFrame, matrix: pd.DataFrame, *
     def sell(position, day, exit_price, reason, phase):
         nonlocal cash, cumulative_turnover, unsettled_cash
         gross = position['shares'] * float(exit_price)
-        fee = gross * fee_rate
+        fee = _shadow_fee(gross, fee_rate) if shadow_precision else gross * fee_rate
         if t1_settlement:
             unsettled_cash += gross - fee
         else:
@@ -309,16 +343,20 @@ def simulate_multi_asset_portfolio(prices: pd.DataFrame, matrix: pd.DataFrame, *
             actual_open = price(session, security_id, 'raw_open')
             if not np.isclose(actual_open, float(row.entry_price), rtol=1e-6):
                 raise ValueError(f'MULTI_ASSET_ENTRY_OPEN_MISMATCH:{security_id}:{session.date()}')
-            shares = risk_sized_shares(actual_open, float(row.initial_stop), open_equity, cash,
-                                       risk_fraction=risk_fraction, max_weight=max_weight,
-                                       fee_rate=fee_rate, allow_fractional=allow_fractional)
+            shares = (_shadow_risk_sized_shares(actual_open, float(row.initial_stop), open_equity,
+                                               cash, risk_fraction=risk_fraction,
+                                               max_weight=max_weight, fee_rate=fee_rate)
+                      if shadow_precision else
+                      risk_sized_shares(actual_open, float(row.initial_stop), open_equity, cash,
+                                        risk_fraction=risk_fraction, max_weight=max_weight,
+                                        fee_rate=fee_rate, allow_fractional=allow_fractional))
             if shares <= 0:
                 rejected.append({'session': session, 'security_id': security_id,
                                  'reason': 'POSITION_SIZE_ZERO',
                                  'entry_id': getattr(row, 'entry_id', row.trade_id)})
                 continue
             gross = shares * actual_open
-            fee = gross * fee_rate
+            fee = _shadow_fee(gross, fee_rate) if shadow_precision else gross * fee_rate
             cash -= gross + fee
             cumulative_turnover += gross
             positions[row.trade_id] = {'trade_id': row.trade_id,

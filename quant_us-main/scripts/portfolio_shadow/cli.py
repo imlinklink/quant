@@ -185,6 +185,7 @@ def cmd_run_forward(args):
         exit_policy_id=m.execution_policy['exit_policy_id'],
         top_n=m.risk_policy.get('top_n', 5),
         max_wait_sessions=m.execution_policy.get('max_wait_sessions', 20))
+    gen.precompute_signals()
     real_model = None
     if m.llm_policy.get('overlay') == 'entry_veto' and m.llm_policy.get('use_real_model'):
         import yaml

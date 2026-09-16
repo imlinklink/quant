@@ -137,12 +137,12 @@ def verify_matrix_parity(matrix, prices, actions, *, horizon, risk_bp,
     prices['session'] = pd.to_datetime(prices.session).dt.normalize()
     prices['security_id'] = prices.security_id.astype(str)
 
-    # 1. 历史引擎（影子会计）
+    # 1. 历史引擎（影子会计 + 整数微定仓/费用）
     hist = simulate_multi_asset_portfolio(
         prices, matrix, initial_cash=initial_cash, risk_fraction=risk_bp / 10000,
         max_weight=.20, round_trip_cost=.002, actions=actions,
         allow_fractional=False, max_positions=5,
-        t1_settlement=True, dividend_receivable=True)
+        t1_settlement=True, dividend_receivable=True, shadow_precision=True)
     hist_navs = {str(r.session.date()): r.equity for r in hist.equity.itertuples()}
 
     # 2. 影子引擎（增量，回撤阶梯关闭）
