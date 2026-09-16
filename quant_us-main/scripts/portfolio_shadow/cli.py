@@ -11,7 +11,7 @@ from pathlib import Path
 
 from .candidate_adapter import adapt_schedule, intents_for_session
 from .evidence import build_entry_packet
-from .llm_overlay import FakeModel, resolve_overlay
+from .llm_overlay import FakeModel, RealModel, resolve_overlay
 from .paper_engine import new_account_state, step
 from .replay import replay
 from .schema import Application, Manifest, to_micro
@@ -80,20 +80,32 @@ def cmd_run_session(args):
         state = state_from_dict(saved) if saved else new_account_state(scope, m.initial_cash)
         scope_intents = list(intents)
         cost = 0
+        # 真实模型（DeepSeek）：llm_policy.use_real_model 时从 config.yaml 构造
+        real_model = None
+        if overlay == 'entry_veto' and m.llm_policy.get('use_real_model'):
+            import yaml
+            from mutifactor.llm import LLMAdvisor
+            cfg_path = Path(__file__).resolve().parents[2] / 'config.yaml'
+            llm_cfg = (yaml.safe_load(cfg_path.read_text()) or {}).get('llm', {})
+            real_model = RealModel(LLMAdvisor(llm_cfg))
         # L 侧 overlay：entry_veto 时构建 packet → resolve → VETO 剔除 + 计成本
         if overlay == 'entry_veto' and scope.endswith(':L'):
             kept = []
             for item, opp in zip(sess.get('opportunities', []), opportunities):
                 packet = build_entry_packet(opp, item.get('quote') or {}, item.get('events', []),
                                             item.get('fundamentals', {}), deadline)
-                cfg = item.get('model') or {}
-                fake = FakeModel(action=cfg.get('action', 'PASS'),
-                                 reason_code=cfg.get('reason_code', ''),
-                                 evidence_ids=cfg.get('evidence_ids', []),
-                                 status=cfg.get('status', 'OK'),
-                                 completed_at=cfg.get('completed_at', deadline),
-                                 cost_micro=cfg.get('cost_micro', 0))
-                d = resolve_overlay(packet, fake.call(packet, deadline), deadline)
+                if real_model is not None:
+                    mr = real_model.call(packet, deadline)
+                else:
+                    cfg = item.get('model') or {}
+                    fake = FakeModel(action=cfg.get('action', 'PASS'),
+                                     reason_code=cfg.get('reason_code', ''),
+                                     evidence_ids=cfg.get('evidence_ids', []),
+                                     status=cfg.get('status', 'OK'),
+                                     completed_at=cfg.get('completed_at', deadline),
+                                     cost_micro=cfg.get('cost_micro', 0))
+                    mr = fake.call(packet, deadline)
+                d = resolve_overlay(packet, mr, deadline)
                 cost += d.model_cost
                 store.put_application(Application(
                     scope=scope, opportunity_id=opp.opportunity_id(), action=d.action,
