@@ -55,6 +55,9 @@ def _fee(gross_micro: int, fee_bp: int) -> int:
 def step(state: AccountState, *, session: str, bars: dict, corporate_actions: list,
          intents: list, manifest, fee_bp: int = 10, model_cost: int = 0) -> StepResult:
     """执行一个交易日。bars={sid:{open,high,low,close}}（微美元/股）；公司行动用微美元。"""
+    if state.last_session is not None and session < state.last_session:
+        # 乱序：旧 session 必须拒绝，不得倒退推进账户
+        raise ValueError(f'OUT_OF_ORDER_SESSION:{session}<{state.last_session}')
     if state.last_session == session:
         # 幂等：该 session 已处理，不推进 sequence/持有天数/结算
         return StepResult(state=state, events=[], nav=None)

@@ -73,16 +73,21 @@ def paired_performance(store: ShadowStore, manifest) -> dict:
     r_scope, l_scope = manifest.account_scopes[0], manifest.account_scopes[1]
     r_navs = {n['session']: n for n in store.daily_nav(r_scope)}
     l_navs = {n['session']: n for n in store.daily_nav(l_scope)}
-    # 排除暂定估值（缺行情），只对完整估值的共同 session 配对
-    def _complete(navs):
-        return {s: n for s, n in navs.items() if n.get('valuation_status') != 'PROVISIONAL'}
-    r_ok, l_ok = _complete(r_navs), _complete(l_navs)
-    common = sorted(set(r_ok) & set(l_ok))
-    provisional = sorted(set(r_navs) & set(l_navs) - set(common))
+    all_sessions = sorted(set(r_navs) | set(l_navs))
+    # 连续完整前缀：从首个 session 起双方都是 OK；遇缺口/暂定即停，不跨过缺口继续
+    common = []
+    for s in all_sessions:
+        r, l = r_navs.get(s), l_navs.get(s)
+        if r is None or l is None or \
+                r.get('valuation_status') == 'PROVISIONAL' or \
+                l.get('valuation_status') == 'PROVISIONAL':
+            break
+        common.append(s)
     if not common:
-        return {'common_sessions': 0, 'provisional_sessions': len(provisional)}
-    r_series = [r_ok[s] for s in common]
-    l_series = [l_ok[s] for s in common]
+        return {'common_sessions': 0, 'total_sessions': len(all_sessions),
+                'excluded_after_gap': len(all_sessions)}
+    r_series = [r_navs[s] for s in common]
+    l_series = [l_navs[s] for s in common]
     initial = manifest.initial_cash
     r_final = r_series[-1].get('full_cost_equity', r_series[-1].get('equity', initial))
     l_final = l_series[-1].get('full_cost_equity', l_series[-1].get('equity', initial))
@@ -96,7 +101,8 @@ def paired_performance(store: ShadowStore, manifest) -> dict:
 
     return {
         'common_sessions': len(common),
-        'provisional_sessions': len(provisional),
+        'total_sessions': len(all_sessions),
+        'excluded_after_gap': len(all_sessions) - len(common),
         'R_full_cost_return': r_ret,
         'L_full_cost_return': l_ret,
         'L_minus_R_return': l_ret - r_ret,

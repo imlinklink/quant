@@ -147,19 +147,40 @@ class ShadowStore:
 
     # ---- account state / nav ----
     def save_state(self, scope: str, state, nav: dict, events: list | None = None) -> None:
+        """提交一步状态。事务内校验 sequence（设计 §8 expected_sequence）：
+        - seq == latest → 幂等重提交（同哈希返回，异哈希冲突）；
+        - seq == latest+1 → 正常提交；
+        - 否则（倒退 / 跳号）→ 拒绝。防止两进程同时推进同一 session 或乱序覆盖。
+        """
+        seq = state.sequence
         body = json.dumps(_asdict(state), ensure_ascii=False, sort_keys=True)
         with self.transaction() as con:
+            row = con.execute('SELECT MAX(sequence) FROM shadow_account_state '
+                              'WHERE experiment_id=? AND scope=?',
+                              (self.experiment_id, scope)).fetchone()
+            latest = row[0] or 0
+            if seq < latest:
+                raise ValueError(f'SEQUENCE_CONFLICT:{scope}:seq={seq}<latest={latest}')
+            if seq == latest:
+                existing = con.execute('SELECT state_hash FROM shadow_account_state '
+                                       'WHERE experiment_id=? AND scope=? AND sequence=?',
+                                       (self.experiment_id, scope, seq)).fetchone()
+                if existing and existing[0] != state.state_hash():
+                    raise ValueError(f'SAME_SEQUENCE_DIFFERENT_STATE:{scope}:seq={seq}')
+                return  # 幂等重提交，不重复落事件/净值
+            if seq != latest + 1:
+                raise ValueError(f'SEQUENCE_GAP:{scope}:seq={seq}!=latest+1={latest + 1}')
             for i, e in enumerate(events or []):
                 if e['type'] in ('fill', 'split', 'dividend_record', 'dividend_pay', 'settle',
                                  'nav', 'model_cost', 'hold'):
-                    payload = {**e, '_sequence': state.sequence, '_index': i}
-                    _insert_event(con, scope, 'shadow:step', (state.sequence, i), payload)
+                    payload = {**e, '_sequence': seq, '_index': i}
+                    _insert_event(con, scope, 'shadow:step', (seq, i), payload)
             con.execute('INSERT OR REPLACE INTO shadow_account_state VALUES (?,?,?,?,?)',
-                        (self.experiment_id, scope, state.sequence, state.state_hash(), body))
+                        (self.experiment_id, scope, seq, state.state_hash(), body))
             con.execute('INSERT OR REPLACE INTO shadow_daily_nav VALUES (?,?,?,?,?,?,?,?,?,?,?)',
                         (self.experiment_id, scope, nav['session'], nav.get('revision', 1),
                          nav['equity'], nav['cash_available'], nav['gross_exposure'],
-                         nav['fees'], nav['valuation_status'], state.sequence,
+                         nav['fees'], nav['valuation_status'], seq,
                          json.dumps(nav, ensure_ascii=False, sort_keys=True)))
 
     def latest_state(self, scope: str) -> tuple[int, dict] | None:
