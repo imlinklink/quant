@@ -91,7 +91,8 @@ class IncrementalCandidateGenerator:
     def __init__(self, prices: pd.DataFrame, market: pd.DataFrame, quality: pd.DataFrame,
                  actions: pd.DataFrame, blocked: dict, calendar, *,
                  experiment_id: str, parent_version: str, exit_policy_id: str = 'H60',
-                 top_n: int = 5, max_wait_sessions: int = 20, entry_rule: str = 'b3'):
+                 top_n: int = 5, max_wait_sessions: int = 20, entry_rule: str = 'b3',
+                 horizon: int = 60):
         self.prices = prices
         self.view_bars = prices[['security_id', 'session', 'raw_open', 'raw_high', 'raw_low',
                                  'raw_close', 'volume']].rename(columns={
@@ -100,6 +101,7 @@ class IncrementalCandidateGenerator:
         self.quality = quality
         self.actions = actions
         self.blocked = blocked
+        self.horizon = horizon
         self.calendar = pd.DatetimeIndex(pd.to_datetime(list(calendar))).normalize().sort_values().unique()
         self.experiment_id = experiment_id
         self.parent_version = parent_version
@@ -111,6 +113,12 @@ class IncrementalCandidateGenerator:
         self._month_ends = set(month_end_sessions(self.calendar))
         self._bars_raw = {str(sid): g for sid, g in prices.groupby('security_id')}
         self._atr_key = prices.set_index(['security_id', 'session'])
+        self._intervals = {}
+        if not quality.empty and 'quality_status' in quality.columns:
+            self._intervals = {
+                str(r.security_id): (pd.Timestamp(r.from_session).normalize(),
+                                     pd.Timestamp(r.to_session).normalize())
+                for r in quality.loc[quality.quality_status.eq('verified')].itertuples()}
 
     def _market_gate(self, session) -> bool:
         if session not in self.market.index:
@@ -130,6 +138,11 @@ class IncrementalCandidateGenerator:
             return
         for r in sel.itertuples(index=False):
             sid = str(r.security_id)
+            if sid not in self._intervals:
+                continue  # 未核实
+            start, end = self._intervals[sid]
+            if not (start <= session <= end):
+                continue  # 决策日超出质量区间
             self.pending[f'{sid}-{session.date()}'] = {
                 'security_id': sid, 'decision_session': session, 'rank': int(r.rank)}
 
@@ -178,6 +191,13 @@ class IncrementalCandidateGenerator:
             atr = self._atr_micro(cand['security_id'], session)
             if atr is None:
                 del self.pending[cid]  # 缺 ATR，无法定止损
+                continue
+            # 行动覆盖门（与 build_entries 一致）：入场→退出窗落在 blocked 日期则丢弃
+            exit_pos = int(self.calendar.searchsorted(exec_sess)) + self.horizon - 1
+            exit_sess = self.calendar[exit_pos] if exit_pos < len(self.calendar) else exec_sess
+            bdays = self.blocked.get(cand['security_id'], ())
+            if any(exec_sess <= pd.Timestamp(d).normalize() <= exit_sess for d in bdays):
+                del self.pending[cid]
                 continue
             ready.append(Opportunity(
                 experiment_id=self.experiment_id, security_id=cand['security_id'],
