@@ -45,19 +45,34 @@ class RunOutcomesTests(unittest.TestCase):
         settlement = OutcomeSettlement(self.registry)
         batch = {'universe': ['US.A', 'US.B'], 'as_of': self.as_of,
                  'research_batch_id': 'batch1'}
-        n = run(self.registry, [batch], self.bars)
-        self.assertEqual(n, 10)  # 2 codes × 5 horizons
+        result = run(self.registry, [batch], self.bars)
+        self.assertEqual(result, {'settled': 10, 'pending': 0})  # 2 codes × 5 horizons
         with settlement.events.transaction() as con:
             rows = con.execute(
                 'SELECT subject_key FROM decision_outcomes_v2 WHERE account_scope=? AND decision_id=? AND horizon=?',
                 (self.registry.namespace, 'batch1', '1d')).fetchall()
         self.assertEqual(sorted(r[0] for r in rows), ['US.A', 'US.B'])
 
+    def test_rerun_is_idempotent(self):
+        batch = {'universe': ['US.A', 'US.B'], 'as_of': self.as_of,
+                 'research_batch_id': 'batch1'}
+        first = run(self.registry, [batch], self.bars)
+        second = run(self.registry, [batch], self.bars)
+        self.assertEqual(first, second)
+        self.assertEqual(first, {'settled': 10, 'pending': 0})
+        settlement = OutcomeSettlement(self.registry)
+        with settlement.events.transaction() as con:
+            count = con.execute(
+                "SELECT COUNT(*) FROM decision_outcomes_v2 WHERE decision_id='batch1'"
+            ).fetchone()[0]
+        self.assertEqual(count, 10)  # 重复运行不重复记账
+
     def test_v2_decision_id_and_pending_horizons(self):
         short = self.bars[self.bars['date'] <= pd.Timestamp('2026-01-12', tz='UTC')]
         batch = {'universe': ['US.A'], 'as_of': self.as_of,
                  'research_batch_id': 'batch1', 'decision_id': 'decision1'}
-        self.assertEqual(run(self.registry, [batch], short), 5)
+        self.assertEqual(run(self.registry, [batch], short),
+                         {'settled': 2, 'pending': 3})
         settlement = OutcomeSettlement(self.registry)
         with settlement.events.transaction() as con:
             rows = con.execute(

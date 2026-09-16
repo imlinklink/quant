@@ -40,8 +40,9 @@ def run(config, fetcher, as_of=None):
     registry = PositionRegistry(namespace=engine_v2_config(config).get('account_scope', 'DRY-RUN'))
     selection_id = ''
     try:
-        from scripts.live_trading.llm_suggestions.store import load_latest_research_batch
-        selection_id = (load_latest_research_batch() or {}).get('decision_id', '')
+        from scripts.live_trading.llm_suggestions.store import load_research_batch_for_session
+        batch = load_research_batch_for_session(local.date().isoformat())
+        selection_id = (batch or {}).get('decision_id', '')
     except Exception:
         pass
     # 回看锚点改变属于输入协议新版本；不能覆盖旧浮动窗口快照。

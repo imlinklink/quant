@@ -58,31 +58,47 @@ def reconcile_selection(registry, batch: dict, decision_id: str = '') -> dict:
             side_effects.append(event_type)
     replay = ReplayEngine(registry=registry, store=store).validate(decision_id) if decision_id else {}
     completed = sum(1 for (status,) in attempts if status == 'completed')
-    checks = {
-        'batch_linked': bool(run and batch.get('decision_id') == decision_id and
-                             run.get('subject_id') == batch.get('research_batch_id')),
-        'role_validated': bool(run and run.get('role') == 'selection' and
-                               run.get('status') == 'validated'),
-        'universe_covered': bool(universe and len(ranked) == len(universe) and
-                                 set(ranked) == set(universe) and len(ranked) == len(set(ranked))),
-        'single_completed_attempt': len(attempts) == 1 and completed == 1,
-        'snapshots_complete': all(snapshot_counts[k] == 1 for k in REQUIRED_SNAPSHOTS),
-        'replay_valid': bool(replay.get('input_hash_match') and replay.get('validated') and
-                             replay.get('network_used') is False),
-        'shadow_effective_action': bool(
-            batch.get('permission_level') == 'shadow' and
-            batch.get('effective_action') == 'rule_ranking'),
-        'no_order_side_effects': not side_effects,
-    }
+    selection_status = run.get('status') if run else 'missing'
+    if selection_status not in ('validated', 'failed'):
+        selection_status = 'missing'
+    batch_linked = bool(run and batch.get('decision_id') == decision_id and
+                        run.get('subject_id') == batch.get('research_batch_id'))
+    no_side_effects = not side_effects
+    if selection_status == 'validated':
+        checks = {
+            'batch_linked': batch_linked,
+            'role_validated': bool(run and run.get('role') == 'selection'),
+            'universe_covered': bool(universe and len(ranked) == len(universe) and
+                                     set(ranked) == set(universe) and len(ranked) == len(set(ranked))),
+            'single_completed_attempt': len(attempts) == 1 and completed == 1,
+            'snapshots_complete': all(snapshot_counts[k] == 1 for k in REQUIRED_SNAPSHOTS),
+            'replay_valid': bool(replay.get('input_hash_match') and replay.get('validated') and
+                                 replay.get('network_used') is False),
+            'shadow_effective_action': bool(
+                batch.get('permission_level') == 'shadow' and
+                batch.get('effective_action') == 'rule_ranking'),
+            'no_order_side_effects': no_side_effects,
+        }
+    elif selection_status == 'failed':
+        checks = {
+            'batch_linked': batch_linked,
+            'failure_recorded': bool(batch.get('error')) and not batch.get('candidates'),
+            'no_order_side_effects': no_side_effects,
+        }
+    else:
+        checks = {'batch_linked': batch_linked}
+    audit_status = 'passed' if checks and all(checks.values()) else 'failed'
     return {
         'decision_id': decision_id,
         'research_batch_id': batch.get('research_batch_id'),
+        'selection_status': selection_status,
+        'audit_status': audit_status,
         'universe_count': len(universe), 'ranked_count': len(ranked),
         'attempt_count': len(attempts), 'completed_attempt_count': completed,
         'snapshots': snapshot_counts, 'replay': replay,
         'order_side_effects': len(side_effects),
         'order_side_effect_types': sorted(set(side_effects)),
-        'checks': checks, 'passed': all(checks.values()),
+        'checks': checks, 'passed': audit_status == 'passed',
     }
 
 
@@ -97,20 +113,26 @@ def _registry(config_path: str):
 def main(argv=None):
     parser = argparse.ArgumentParser(description='Selection shadow 决策自动对账')
     parser.add_argument('--decision-id')
+    parser.add_argument('--session', help='纽约交易日 YYYY-MM-DD；按 session 绑定 batch，不回退历史')
     parser.add_argument('--config', default=str(BASE_DIR / 'config.yaml'))
     parser.add_argument('--json', action='store_true')
     args = parser.parse_args(argv)
-    from scripts.live_trading.llm_suggestions.store import load_research_batches
-    batches = load_research_batches()
-    batch = next((b for b in reversed(batches)
-                  if not args.decision_id or b.get('decision_id') == args.decision_id), None)
+    from scripts.live_trading.llm_suggestions.store import (
+        load_research_batch_for_session, load_research_batches)
+    if args.session:
+        batch = load_research_batch_for_session(args.session)
+    elif args.decision_id:
+        batches = load_research_batches()
+        batch = next((b for b in reversed(batches) if b.get('decision_id') == args.decision_id), None)
+    else:
+        batch = None
     if batch is None:
-        result = {'decision_id': args.decision_id, 'error': 'research_batch_not_found',
-                  'passed': False}
+        result = {'selection_status': 'missing', 'audit_status': 'failed',
+                  'reason': 'CURRENT_BATCH_MISSING', 'passed': False}
     else:
         result = reconcile_selection(_registry(args.config), batch, args.decision_id or '')
     print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
-    return 0 if result.get('passed') else 1
+    return 0 if result.get('audit_status') == 'passed' else 1
 
 
 if __name__ == '__main__':

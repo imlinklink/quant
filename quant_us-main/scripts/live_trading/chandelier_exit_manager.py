@@ -1255,12 +1255,15 @@ class ChandelierExitManager:
                     router = HardExitRouter(registry=REGISTRY, config=self.config,
                                             execution=service_for(self))
                     qty = 0
+                    trade_id = ''
                     try:
                         qty, _ = self._position_qty_cost(code)
+                        rec = REGISTRY.get(code) if REGISTRY else None
+                        trade_id = (rec or {}).get('trade_id', '') or ''
                     except Exception:
                         pass
                     if qty > 0:
-                        res = router.submit(trade_id='', code=code, reason=reason,
+                        res = router.submit(trade_id=trade_id, code=code, reason=reason,
                                             market_price=price,
                                             dry_run=self.dry_run)
                         logger.warning(f"[HardExit] {code} {reason} -> {res}")

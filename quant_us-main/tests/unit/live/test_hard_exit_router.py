@@ -79,6 +79,89 @@ class HardExitRouterContracts(unittest.TestCase):
                                  market_price=80, dry_run=True)
         self.assertEqual(res['status'], 'no_position')
 
+    def test_empty_trade_id_is_risk_anomaly(self):
+        self.registry.open('US.A', 'dip_buy', 10, 100, trade_id='t1', initial_stop=95)
+        res = self.router.submit(trade_id='', code='US.A', reason='fixed_stop',
+                                 market_price=80, dry_run=True)
+        self.assertEqual(res['status'], 'risk_anomaly')
+        self.assertEqual(res['reason'], 'empty_trade_id')
+        self.assertIsNotNone(self.registry.get('US.A'))  # 未用空值冲正
+
+    def test_trade_id_mismatch_is_risk_anomaly(self):
+        self.registry.open('US.A', 'dip_buy', 10, 100, trade_id='t1', initial_stop=95)
+        res = self.router.submit(trade_id='t_wrong', code='US.A', reason='fixed_stop',
+                                 market_price=80, dry_run=True)
+        self.assertEqual(res['status'], 'risk_anomaly')
+        self.assertEqual(res['reason'], 'trade_id_mismatch')
+        self.assertIsNotNone(self.registry.get('US.A'))
+
+
+class ExecutionStateMachineTests(unittest.TestCase):
+    """硬退出「止损触发 → 成交/拒绝」状态机的确定性测试（DRY-RUN，无 LLM 依赖）。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        patch('scripts.live_trading.approval.proposal_store.ProposalStore._record_ledger').start()
+        self.addCleanup(patch.stopall)
+        self.registry = PositionRegistry(Path(self.tmp.name) / 'state.db', 'DRY-RUN')
+        self.execution = ExecutionService(None, CFG, None, True, self.registry)
+        self.router = HardExitRouter(registry=self.registry, execution=self.execution)
+
+    def _submit_without_fill(self, code='US.A'):
+        """提交硬退出但拦截自动全额成交，让订单停留在 submitting，便于逐报驱动状态机。"""
+        self.registry.open(code, 'dip_buy', 10, 100, trade_id='t1', initial_stop=95)
+        with patch.object(self.execution, 'apply_report'):
+            self.router.submit(trade_id='t1', code=code, reason='fixed_stop',
+                               market_price=80, dry_run=True)
+        with self.registry.transaction() as book:
+            orders = [o for o in book['orders'].values() if o.get('status') == 'submitting']
+        self.assertEqual(len(orders), 1)
+        return orders[0]
+
+    def test_stop_trigger_does_not_immediately_fill(self):
+        order = self._submit_without_fill()
+        self.assertEqual(order['status'], 'submitting')
+        self.assertEqual(order['filled_qty'], 0)
+        self.assertEqual(self.registry.get('US.A')['qty'], 10)  # 触发了止损 ≠ 已成交
+
+    def test_partial_fill_then_complete_reconciles_position(self):
+        order = self._submit_without_fill()
+        # 部分成交 5/10
+        self.execution.apply_report(order['id'], dict(
+            order_id='b1', order_status='PARTIALLY_FILLED',
+            dealt_qty=5, dealt_avg_price=80, cumulative_fee=0))
+        with self.registry.transaction() as book:
+            self.assertEqual(book['orders'][order['id']]['status'], 'partially_filled')
+            self.assertEqual(book['orders'][order['id']]['filled_qty'], 5)
+        self.assertEqual(self.registry.get('US.A')['qty'], 5)  # 持仓减到 5
+        # 补齐成交 10/10
+        self.execution.apply_report(order['id'], dict(
+            order_id='b1', order_status='FILLED_ALL',
+            dealt_qty=10, dealt_avg_price=80, cumulative_fee=0))
+        self.assertIsNone(self.registry.get('US.A'))  # 持仓归零
+
+    def test_rejected_preserves_position(self):
+        order = self._submit_without_fill()
+        self.execution.apply_report(order['id'], dict(
+            order_id='b1', order_status='FAILED',
+            dealt_qty=0, dealt_avg_price=0, cumulative_fee=0))
+        with self.registry.transaction() as book:
+            self.assertEqual(book['orders'][order['id']]['status'], 'rejected')
+        self.assertEqual(self.registry.get('US.A')['qty'], 10)  # 拒绝保留持仓
+
+    def test_rebind_trade_id_avoids_duplicate_on_rebuy(self):
+        # 同一 code 两次不同 trade：exit_id 应绑定 trade_id，第二次不误判 duplicate
+        self.registry.open('US.A', 'dip_buy', 10, 100, trade_id='t1', initial_stop=95)
+        r1 = self.router.submit(trade_id='t1', code='US.A', reason='fixed_stop',
+                                market_price=80, dry_run=True)
+        self.assertEqual(r1['status'], 'filled')
+        # 重新买入（新 trade_id）
+        self.registry.open('US.A', 'dip_buy', 10, 90, trade_id='t2', initial_stop=85)
+        r2 = self.router.submit(trade_id='t2', code='US.A', reason='fixed_stop',
+                                market_price=70, dry_run=True)
+        self.assertEqual(r2['status'], 'filled')  # 不被 t1 的旧订单误判 duplicate
+
 
 if __name__ == '__main__':
     unittest.main()

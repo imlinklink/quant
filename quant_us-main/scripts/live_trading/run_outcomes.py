@@ -9,6 +9,7 @@
     python -m scripts.live_trading.run_outcomes --latest   # 只回填最新一批
 """
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -51,15 +52,19 @@ def code_close_series(bars: pd.DataFrame, code: str, as_of, max_bars: int = 21,
 
 def settle_selection_batch(batch: dict, bars: pd.DataFrame, settlement: OutcomeSettlement,
                            benchmark_bars: pd.DataFrame = None,
-                           benchmark_code: str = 'US.SPY') -> int:
-    """结算一个研究批次：universe 每只股票写 1/3/5/10/20d outcome。返回写入条数。"""
+                           benchmark_code: str = 'US.SPY') -> dict:
+    """结算一个研究批次：universe 每只股票写 1/3/5/10/20d outcome。
+
+    返回 {'settled': 已完成, 'pending': 未成熟占位}，区分「已结算」与「数据未成熟待后续补」。
+    """
     universe = list(batch.get('universe') or [])
     as_of = batch.get('as_of')
     # v2 决策必须以 DecisionRun ID 为外键；旧批次才退回 research_batch_id。
     decision_id = batch.get('decision_id') or batch.get('research_batch_id')
     if not universe or not as_of or not decision_id:
-        return 0
-    n = 0
+        return {'settled': 0, 'pending': 0}
+    settled = 0
+    pending = 0
     for code in universe:
         closes = code_close_series(bars, code, as_of, require_future=False)
         if not closes:
@@ -70,7 +75,7 @@ def settle_selection_batch(batch: dict, bars: pd.DataFrame, settlement: OutcomeS
                                       require_future=False)
         written = settlement.settle_selection(decision_id, code, closes,
                                                benchmark_closes=bench, data_quality='good')
-        n += written
+        settled += written
         completed = {f'{h}d' for h in HORIZONS if len(closes) > h}
         for horizon in (f'{h}d' for h in HORIZONS):
             if horizon in completed:
@@ -81,8 +86,8 @@ def settle_selection_batch(batch: dict, bars: pd.DataFrame, settlement: OutcomeS
                          'available_future_bars': max(0, len(closes) - 1),
                          'status': 'pending'},
             }, subject_key=code)
-            n += 1
-    return n
+            pending += 1
+    return {'settled': settled, 'pending': pending}
 
 
 def settle_entry_signal(decision_id: str, entry_price: float, templates: list,
@@ -101,14 +106,22 @@ def settle_position_decision(decision_id: str, trade: dict, actual_exit: float,
                                       first_llm_exit, closes)
 
 
-def run(registry, batches, bars, benchmark_bars=None) -> int:
-    """对多个研究批次批量结算。返回写入 outcome 条数。"""
+def run(registry, batches, bars, benchmark_bars=None) -> dict:
+    """对多个研究批次批量结算。返回 {'settled': 已完成, 'pending': 未成熟占位}。"""
     settlement = OutcomeSettlement(registry)
-    total = 0
+    settled = pending = 0
     for batch in batches:
-        total += settle_selection_batch(batch, bars, settlement,
-                                        benchmark_bars=benchmark_bars)
-    return total
+        r = settle_selection_batch(batch, bars, settlement,
+                                   benchmark_bars=benchmark_bars)
+        settled += r['settled']
+        pending += r['pending']
+    return {'settled': settled, 'pending': pending}
+
+
+def _emit(result: dict, exit_code: int) -> int:
+    """输出结构化终态 JSON 并返回进程退出码。"""
+    print(json.dumps(result, ensure_ascii=False, default=str))
+    return exit_code
 
 
 def main():
@@ -131,11 +144,10 @@ def main():
     futu_cfg = config.get('futu', {})
     fetcher = FutuUSDataFetcher(host=futu_cfg.get('host', '127.0.0.1'),
                                 port=int(futu_cfg.get('port', 11111)))
-    from scripts.live_trading.position_registry import REGISTRY
     try:
         if not fetcher.connect():
-            print('无法连接富途 OpenD')
-            return 1
+            return _emit({'status': 'data_unavailable', 'reason_code': 'opend_connect_failed',
+                          'retryable': True}, 1)
         bars_map = {}
         for batch in batches:
             universe = batch.get('universe') or []
@@ -147,15 +159,27 @@ def main():
             end = (pd.Timestamp(as_of) + timedelta(days=30)).strftime('%Y-%m-%d')
             bars_map.update(fetcher.fetch_multiple_stocks(list(dict.fromkeys(universe + ['US.SPY'])), start, end))
         bars = merge_bars(bars_map)
-        benchmark_bars = bars[bars['code'] == 'US.SPY'] if not bars.empty else bars
-        runtime_cfg = (config.get('llm_decision', {}).get('engine_v2') or {})
-        from scripts.live_trading.position_registry import PositionRegistry
-        registry = PositionRegistry(namespace=runtime_cfg.get('account_scope', 'DRY-RUN'))
-        total = run(registry, batches, bars, benchmark_bars=benchmark_bars)
+    except Exception as exc:
+        return _emit({'status': 'data_unavailable', 'reason_code': 'fetch_error',
+                      'retryable': True, 'error': str(exc)}, 1)
     finally:
         fetcher.disconnect()
-    print(f'settled {total} outcomes')
-    return 0
+
+    benchmark_bars = bars[bars['code'] == 'US.SPY'] if not bars.empty else bars
+    runtime_cfg = (config.get('llm_decision', {}).get('engine_v2') or {})
+    from scripts.live_trading.position_registry import PositionRegistry
+    registry = PositionRegistry(namespace=runtime_cfg.get('account_scope', 'DRY-RUN'))
+    try:
+        result = run(registry, batches, bars, benchmark_bars=benchmark_bars)
+    except ValueError as exc:
+        return _emit({'status': 'settlement_conflict', 'reason_code': 'event_conflict',
+                      'retryable': False, 'error': str(exc)}, 1)
+    except Exception as exc:
+        return _emit({'status': 'settlement_error', 'reason_code': type(exc).__name__,
+                      'retryable': False, 'error': str(exc)}, 1)
+    status = 'succeeded' if result['pending'] == 0 else 'partial'
+    return _emit({'status': status, 'settled': result['settled'],
+                  'pending': result['pending']}, 0)
 
 
 if __name__ == '__main__':

@@ -162,3 +162,27 @@ def load_research_batches_report() -> tuple:
 def load_latest_research_batch() -> Optional[Dict[str, Any]]:
     batches = load_research_batches()
     return batches[-1] if batches else None
+
+
+def load_research_batch_for_session(session: str) -> Optional[Dict[str, Any]]:
+    """返回 as_of 的纽约日期 == session 的那条 batch；找不到返回 None。
+
+    不复用 load_latest_research_batch 的「最新」语义：今天 selection 在写 batch 前
+    崩溃时，不能回退到历史 batch 冒充今天的结果。
+    """
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    ny = ZoneInfo('America/New_York')
+    for batch in reversed(load_research_batches()):
+        as_of = batch.get('as_of')
+        if not as_of:
+            continue
+        try:
+            ts = datetime.fromisoformat(str(as_of).replace('Z', '+00:00'))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=ZoneInfo('UTC'))
+            if ts.astimezone(ny).date().isoformat() == session:
+                return batch
+        except (ValueError, TypeError):
+            continue
+    return None

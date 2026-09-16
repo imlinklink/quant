@@ -11,6 +11,32 @@ from .review_scheduler import ReviewScheduler
 logger = logging.getLogger(__name__)
 
 
+def _run_subprocess(cmd, *, timeout=1800):
+    """运行子进程并捕获 stdout/stderr 落日志；失败/超时可追溯，返回退出码。"""
+    try:
+        proc = subprocess.run(cmd, check=False, timeout=timeout,
+                              capture_output=True, encoding='utf-8', errors='replace')
+    except subprocess.TimeoutExpired as exc:
+        logger.error('子进程超时: %s', ' '.join(cmd))
+        for stream, data in (('stdout', exc.stdout), ('stderr', exc.stderr)):
+            if data:
+                logger.error('%s(尾):\n%s', stream, data[-4000:])
+        return -1
+    if proc.returncode:
+        logger.error('子进程失败: %s exit=%s', ' '.join(cmd), proc.returncode)
+        if proc.stdout:
+            logger.error('stdout(尾):\n%s', proc.stdout[-4000:])
+        if proc.stderr:
+            logger.error('stderr(尾):\n%s', proc.stderr[-4000:])
+    else:
+        logger.info('子进程成功: %s', ' '.join(cmd))
+        if proc.stdout:
+            logger.info('stdout(尾):\n%s', proc.stdout[-4000:])
+        if proc.stderr:
+            logger.warning('stderr(尾):\n%s', proc.stderr[-4000:])
+    return proc.returncode
+
+
 class OutcomeSchedulerThread:
     def __init__(self, config: dict, config_path: str, stop_event=None, runner=None,
                  setup_runner=None):
@@ -30,23 +56,24 @@ class OutcomeSchedulerThread:
         from .shadow_jobs import ShadowJobs
         self.jobs = ShadowJobs(self.scheduler.events)
 
-    def _selection(self):
-        for name in ('run_daily_selection.py', 'reconcile_selection_decision.py'):
-            code = subprocess.run([sys.executable, str(Path(__file__).with_name(name)),
-                                   '--config', self.config_path], check=False, timeout=1800).returncode
-            if code:
-                return code
-        return 0
+    def _selection(self, day):
+        sel_code = _run_subprocess([sys.executable, str(Path(__file__).with_name('run_daily_selection.py')),
+                                    '--config', self.config_path])
+        rec_code = _run_subprocess([sys.executable, str(Path(__file__).with_name('reconcile_selection_decision.py')),
+                                    '--config', self.config_path, '--session', day])
+        if sel_code:
+            return sel_code, 'selection_failed'
+        if rec_code:
+            return rec_code, 'reconcile_failed'
+        return 0, 'ok'
 
     def _run(self):
-        script = Path(__file__).with_name('run_outcomes.py')
-        return subprocess.run([sys.executable, str(script), '--config', self.config_path],
-                              check=False, timeout=1800).returncode
+        return _run_subprocess([sys.executable, str(Path(__file__).with_name('run_outcomes.py')),
+                                '--config', self.config_path])
 
     def _run_setups(self):
-        script = Path(__file__).with_name('run_daily_setups.py')
-        return subprocess.run([sys.executable, str(script), '--config', self.config_path,
-                               '--json'], check=False, timeout=1800).returncode
+        return _run_subprocess([sys.executable, str(Path(__file__).with_name('run_daily_setups.py')),
+                                '--config', self.config_path, '--json'])
 
     def tick(self, now=None):
         if self.integration:
@@ -83,8 +110,12 @@ class OutcomeSchedulerThread:
         ran = False
         day = local.date().isoformat()
         if (local.hour, local.minute) >= (16, 20):
-            ran |= self.jobs.execute('selection_and_reconcile', day, self._selection)
-        if self.scheduler.setup_due(local) and self.jobs.succeeded('selection_and_reconcile', day):
+            try:
+                ran |= self.jobs.execute('selection_and_reconcile', day,
+                                         lambda: self._selection(day))
+            except Exception:
+                logger.exception('selection_and_reconcile 任务异常（不阻断后续任务）')
+        if self.scheduler.setup_due(local):
             ran |= self.jobs.execute('daily_setup_shadow', day, self.setup_runner, max_attempts=3)
         if self.scheduler.outcome_due(local):
             ran |= self.jobs.execute('selection_outcomes', day, self.runner, max_attempts=3)

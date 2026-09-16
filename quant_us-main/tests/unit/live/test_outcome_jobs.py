@@ -43,6 +43,25 @@ class OutcomeJobsTests(unittest.TestCase):
                 ('d1',)).fetchone()[0]
         self.assertEqual(count, 10)
 
+    def test_pending_then_completed_does_not_conflict(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        registry = PositionRegistry(Path(tmp.name) / 'state.db', 'DRY-RUN')
+        settlement = OutcomeSettlement(registry)
+        # 先写 pending 占位：不应产生 outcome_observed 事件
+        settlement.write_outcome('d1', {
+            'horizon': '5d', 'data_quality': 'pending_future_bars',
+            'body': {'status': 'pending'}}, subject_key='A')
+        # 再写 completed：应正常产生事件，且不与 pending 冲突
+        settlement.write_outcome('d1', {
+            'horizon': '5d', 'data_quality': 'good', 'return_pct': 0.1,
+            'excess_return_pct': 0.05, 'body': {}}, subject_key='A')
+        with settlement.events.transaction() as con:
+            count = con.execute(
+                "SELECT COUNT(*) FROM decision_events WHERE event_type='outcome_observed'"
+            ).fetchone()[0]
+        self.assertEqual(count, 1)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -32,9 +32,9 @@ class ShadowJobs:
                                           f'{key}:{attempt}', payload))
         return payload
 
-    def finish(self, claim, code):
+    def finish(self, claim, code, reason=''):
         payload = dict(claim, status='succeeded' if code == 0 else 'failed',
-                       exit_code=code, time=time.time())
+                       exit_code=code, reason=reason, time=time.time())
         self.events.record('shadow_job_finished',
                            f"{claim['job_key']}:{claim['attempt']}", payload)
 
@@ -51,9 +51,13 @@ class ShadowJobs:
         if claim is None:
             return False
         try:
-            code = runner()
+            result = runner()
         except Exception:
-            self.finish(claim, -1)
+            self.finish(claim, -1, 'exception')
             raise
-        self.finish(claim, code)
+        if isinstance(result, tuple):
+            code, reason = result
+        else:
+            code, reason = result, ''
+        self.finish(claim, code, reason)
         return True

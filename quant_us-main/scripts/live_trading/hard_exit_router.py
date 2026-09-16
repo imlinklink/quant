@@ -65,6 +65,9 @@ class HardExitRouter:
         幂等 exit_id 保证同一触发只产生一个订单意图。
         """
         category = classify_exit_reason(reason, self.config)
+        # 验收项①：空 trade_id 进风险异常，不用于构造 exit_id
+        if not trade_id:
+            return {'status': 'risk_anomaly', 'reason': 'empty_trade_id', 'category': category}
         exit_id = stable_id('hard_exit', self.registry.namespace, trade_id, code, reason)
         if self.execution is None:
             # 无执行服务：纯路由记录，不落订单
@@ -76,6 +79,11 @@ class HardExitRouter:
             pos = book['positions'].get(code)
             if not pos or float(pos.get('qty', 0)) <= 0:
                 return {'status': 'no_position', 'exit_id': exit_id}
+            # 验收项②：提交时再核对 trade_id 与持仓身份一致（持仓无 trade_id 时跳过）
+            pos_trade_id = str(pos.get('trade_id', '') or '')
+            if pos_trade_id and pos_trade_id != str(trade_id):
+                return {'status': 'risk_anomaly', 'reason': 'trade_id_mismatch',
+                        'exit_id': exit_id}
             qty = float(pos.get('qty', 0))
             if exit_id in book['orders']:
                 return {'status': 'duplicate', 'exit_id': exit_id,

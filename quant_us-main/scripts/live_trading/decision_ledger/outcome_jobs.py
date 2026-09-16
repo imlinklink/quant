@@ -165,6 +165,8 @@ class OutcomeSettlement:
                 'INSERT OR REPLACE INTO decision_outcomes_v2 (' + ','.join(cols) +
                 ') VALUES (' + ','.join('?' for _ in cols) + ')',
                 [row[c] for c in cols])
+        if outcome.get('data_quality', 'good') == 'pending_future_bars':
+            return  # 占位：只更新投影，不写 outcome_observed，避免 pending→completed 事件冲突
         self.events.record('outcome_observed', [decision_id, outcome['horizon'], subject_key],
                            {'decision_id': decision_id, 'horizon': outcome['horizon'],
                             'subject_key': subject_key,
