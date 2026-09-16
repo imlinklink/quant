@@ -23,6 +23,7 @@ from .exit_matrix import (MAX_HOLD, apply_five_position_limit,
                           simulate_fixed_horizon_exits)
 from .performance import performance_metrics
 from .portfolio_engine import simulate_multi_asset_portfolio
+from .qqq_benchmark import build_qqq_benchmark
 
 HORIZONS = (20, 40, 60, 90, 120)
 COST = .002
@@ -45,6 +46,7 @@ RAW_DAILY = ROOT / 'data/m2_raw_audit/M2-RAW-AUDIT-20260912-002/raw_daily_verifi
 ACTIONS = ROOT / 'data/corporate_actions_runs/futu-survivor39-20260912/corporate_actions.csv'
 ETF_RAW = ROOT / 'data/medium_term/US-MT-MOM-BASELINE-001/prepared/etf_raw_daily.csv.gz'
 QFQ_ROOT = ROOT / 'data/market_history/raw/day/qfq'
+QQQ_DIVIDENDS = ROOT / 'data/medium_term/QQQ-ACTION-DERIVE-20260914/nasdaq_dividends.csv'
 
 
 def _hash(path: Path) -> str:
@@ -206,19 +208,22 @@ def _window(matrix: pd.DataFrame) -> tuple[pd.Timestamp, pd.Timestamp]:
     return (matrix.entry_session.min(), matrix.exit_session.max())
 
 
-def _qqq_curve(etf_path: Path, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
-    d = pd.read_csv(etf_path, usecols=['security_id', 'session', 'close'])
-    d = d[d.security_id.astype(str).eq(QQQ_ID)]
-    d['session'] = pd.to_datetime(d.session).dt.tz_localize(None).dt.normalize()
-    d = d[(d.session >= start) & (d.session <= end)].sort_values('session')
+def _load_qqq_prices(etf_path: Path) -> pd.DataFrame:
+    d = pd.read_csv(etf_path, usecols=['security_id', 'session', 'open', 'close'])
+    d = d[d.security_id.astype(str).eq(QQQ_ID)][['session', 'open', 'close']]
     if d.empty:
-        raise ValueError('QQQ_WINDOW_EMPTY')
-    first = float(d.close.iloc[0])
-    return pd.DataFrame({'session': d.session.values,
-                         'equity': (d.close.astype(float) / first).values})
+        raise ValueError('QQQ_PRICE_MISSING')
+    return d.reset_index(drop=True)
 
 
-def _run_window(label, matrix, bars, actions, etf_path, window, risk_fraction):
+def _load_qqq_dividends(path: Path) -> pd.DataFrame:
+    d = pd.read_csv(path, usecols=['ex_date', 'amount'])
+    if d.empty:
+        raise ValueError('QQQ_DIVIDENDS_MISSING')
+    return d
+
+
+def _run_window(label, matrix, bars, actions, qqq_prices, qqq_dividends, window, risk_fraction):
     start, end = window
     subset = matrix[(matrix.entry_session >= start) & (matrix.exit_session <= end)]
     prices = bars[(bars.session >= start) & (bars.session <= end)]
@@ -230,7 +235,7 @@ def _run_window(label, matrix, bars, actions, etf_path, window, risk_fraction):
             prices, group, initial_cash=INITIAL_CASH, risk_fraction=risk_fraction,
             max_weight=MAX_WEIGHT, round_trip_cost=COST, actions=actions,
             allow_fractional=False, max_positions=MAX_POSITIONS, evaluation_start=start)
-        benchmark = _qqq_curve(etf_path, start, end)
+        benchmark = build_qqq_benchmark(qqq_prices, qqq_dividends, start, end)
         metrics = performance_metrics(portfolio.equity, benchmark=benchmark)
         bench = performance_metrics(benchmark)
         trades = portfolio.trades
@@ -268,6 +273,7 @@ def _run_window(label, matrix, bars, actions, etf_path, window, risk_fraction):
 
 def run(output_dir: Path, *, entries_path=ENTRIES, quality_path=QUALITY,
         raw_path=RAW_DAILY, actions_path=ACTIONS, etf_path=ETF_RAW,
+        qqq_dividends_path=QQQ_DIVIDENDS,
         sizing='risk_1pct', denominator='paired', matrix_cache=None,
         build_only=False) -> dict:
     output_dir = Path(output_dir)
@@ -286,6 +292,8 @@ def run(output_dir: Path, *, entries_path=ENTRIES, quality_path=QUALITY,
                    for r in quality.loc[quality.quality_status.eq('verified')].itertuples()}
     bars = _load_bars(raw_path)
     actions = _load_actions(actions_path)
+    qqq_prices = _load_qqq_prices(etf_path)
+    qqq_dividends = _load_qqq_dividends(qqq_dividends_path)
     audits, blocked = {}, {}
     for row in quality.loc[quality.quality_status.eq('verified')].itertuples(index=False):
         sid = str(row.security_id)
@@ -323,11 +331,11 @@ def run(output_dir: Path, *, entries_path=ENTRIES, quality_path=QUALITY,
     print(f'[P1] matrix_rows={len(matrix)} window={window[0].date()}..{window[1].date()}', flush=True)
 
     summary, equity, trades, rejected = _run_window(
-        'all15', matrix, bars, actions, etf_path, window, risk_fraction)
+        'all15', matrix, bars, actions, qqq_prices, qqq_dividends, window, risk_fraction)
     print('[P1] all15 done', flush=True)
     tech = matrix[~matrix.security_id.isin(NON_TECH)]
     tech_summary, tech_equity, tech_trades, tech_rejected = _run_window(
-        'tech13', tech, bars, actions, etf_path, window, risk_fraction)
+        'tech13', tech, bars, actions, qqq_prices, qqq_dividends, window, risk_fraction)
     summary = pd.concat([summary, tech_summary], ignore_index=True)
     equity = pd.concat([equity, tech_equity], ignore_index=True)
     trades = pd.concat([trades, tech_trades], ignore_index=True)
@@ -343,8 +351,8 @@ def run(output_dir: Path, *, entries_path=ENTRIES, quality_path=QUALITY,
                 'run_id': output_dir.name,
                 'git_commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
                 'git_dirty': bool(subprocess.check_output(['git', 'status', '--porcelain'], cwd=ROOT, text=True).strip()),
-                'p2_gate': 'blocked_pending_same_basis_benchmark_and_review',
-                'benchmark_basis': 'QQQ_raw_close_price_only_no_dividends_no_costs',
+                'p2_gate': 'blocked_pending_p2_funnel_asof_review',
+                'benchmark_basis': 'QQQ_raw_open_entry_official_dividends_cash_per_leg_0.1pct_cost',
                 'denominator': denominator,
                 'horizons': HORIZONS, 'round_trip_cost': COST,
                 'initial_cash_usd': INITIAL_CASH, 'sizing_rule': sizing,
@@ -366,9 +374,12 @@ def run(output_dir: Path, *, entries_path=ENTRIES, quality_path=QUALITY,
                               'duplicate_records': a['duplicate_records']}
                         for sid, a in audits.items() if a['verdict'] != 'ok'}},
                 'notes': ['shares are not resumed across horizons; five horizons share identical '
-                          'rejected/right-censored policy', 'not a blind out-of-sample test'],
+                          'rejected/right-censored policy', 'not a blind out-of-sample test',
+                          'qqq_benchmark: raw open entry + official Nasdaq dividends (cash, not '
+                          'reinvested) + 0.1% per-leg cost + common dates'],
                 'input_sha256': {str(p): _hash(p) for p in
-                                 (entries_path, quality_path, raw_path, actions_path, etf_path)}}
+                                 (entries_path, quality_path, raw_path, actions_path,
+                                  etf_path, qqq_dividends_path)}}
     qfq_paths = sorted({p for r in quality.loc[quality.quality_status.eq('verified')].itertuples()
                        for p in QFQ_ROOT.glob(f'year=*/{str(r.code).replace(".", "_")}.csv.gz')})
     manifest['input_sha256'].update({str(p): _hash(p) for p in qfq_paths})
@@ -388,8 +399,8 @@ def run(output_dir: Path, *, entries_path=ENTRIES, quality_path=QUALITY,
              f"共同评价窗：{window[0].date()} → {window[1].date()}；"
              f"入场 {funnel['candidate_a_entries']} → 放行 {funnel['prepared_entries']}；"
              f"排除 {funnel['excluded']}。", '',
-             'QQQ 仅为原始收盘价格参考，未核实分红且未扣成本；差值不是同口径超额收益，P2 暂不放行。', '',
-             '| 口径 | 持有日 | 已退出笔 | 平均单笔净收益近似 | CAGR | 最大回撤 | Calmar | 仓位利用率 | 与QQQ价格CAGR差 |',
+             'QQQ 基准为同口径：原始价开盘买入 + 官方分红表（含特殊分配，进现金不滚入）+ 单边 0.1% 成本 + 共同日期；P2 候选漏斗仍待 as-of 复核。', '',
+             '| 口径 | 持有日 | 已退出笔 | 平均单笔净收益近似 | CAGR | 最大回撤 | Calmar | 仓位利用率 | 与QQQ同口径CAGR差 |',
              '|---|---:|---:|---:|---:|---:|---:|---:|---:|']
     for row in summary.itertuples(index=False):
         lines.append(f"| {row.scope} | {row.holding_sessions} | {row.round_trips} | "

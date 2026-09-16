@@ -84,7 +84,23 @@ def rank_cross_section(snapshot: pd.DataFrame) -> pd.DataFrame:
 
 def point_in_time_momentum_snapshot(raw_bars: pd.DataFrame, actions: pd.DataFrame,
                                     decision_session, **lookbacks) -> pd.DataFrame:
-    """逐决策日复权整段回看序列，避免逐日锚定价跨拆股计算虚假动量。"""
-    view = build_price_view(raw_bars, actions, price_basis='asof_adjusted',
+    """逐决策日复权整段回看序列，避免逐日锚定价跨拆股计算虚假动量。
+
+    actions 可能早于 bar 覆盖范围（历史行动表常回填多年）；只保留 ex_date 落在该证券
+    首根 bar 之后的行动，否则 build_price_view 会因缺前收盘而拒绝（MISSING_PREV_CLOSE）。
+    """
+    if actions is None or actions.empty:
+        relevant = actions
+    else:
+        bars = raw_bars[['security_id', 'session']].copy()
+        bars['security_id'] = bars.security_id.astype(str)
+        bars['session'] = pd.to_datetime(bars.session).dt.tz_localize(None).dt.normalize()
+        first = bars.groupby('security_id')['session'].min().rename('first_session')
+        act = actions.copy()
+        act['security_id'] = act.security_id.astype(str)
+        act['ex_date'] = pd.to_datetime(act.ex_date).dt.tz_localize(None).dt.normalize()
+        act = act.merge(first, left_on='security_id', right_index=True, how='inner')
+        relevant = act[act.ex_date.gt(act.first_session)]
+    view = build_price_view(raw_bars, relevant, price_basis='asof_adjusted',
                             as_of=decision_session)
     return momentum_snapshot(view, decision_session, price_col='close', **lookbacks)

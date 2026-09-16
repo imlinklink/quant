@@ -172,9 +172,10 @@ class SizingRuleTests(unittest.TestCase):
             'exit_phase': 'CLOSE', 'exit_reason': 'TIME_EXIT', 'exit_method': 'H20',
             'holding_sessions': 20, 'portfolio_accepted': False, 'net_pnl_pct': -.002}])
         benchmark = pd.DataFrame({'session': frame.session, 'equity': 1.})
-        with patch('scripts.medium_term.p1_account_check._qqq_curve', return_value=benchmark):
+        with patch('scripts.medium_term.p1_account_check.build_qqq_benchmark',
+                   return_value=benchmark):
             summary, equity, trades, rejected = _run_window(
-                'subset', matrix, frame, None, None,
+                'subset', matrix, frame, None, None, None,
                 (frame.session.iloc[0], frame.session.iloc[-1]), .01)
         self.assertEqual(summary.accepted_entries.iloc[0], 1)
         self.assertEqual(len(equity), 3)

@@ -72,7 +72,10 @@ def performance_metrics(equity: pd.DataFrame, benchmark: pd.DataFrame | None = N
             raise ValueError('BENCHMARK_SESSIONS_MISMATCH')
         if len(joined) < 2:
             raise ValueError('BENCHMARK_OVERLAP_INSUFFICIENT')
-        bench_initial, bench_final = float(joined.benchmark.iloc[0]), float(joined.benchmark.iloc[-1])
+        bench_initial = (float(benchmark.initial_equity.iloc[0])
+                         if 'initial_equity' in benchmark and pd.notna(benchmark.initial_equity.iloc[0])
+                         else float(joined.benchmark.iloc[0]))
+        bench_final = float(joined.benchmark.iloc[-1])
         bench_years = (joined.session.iloc[-1] - joined.session.iloc[0]).days / 365.2425
         bench_cagr = ((bench_final / bench_initial) ** (1 / bench_years) - 1
                       if bench_years >= 1 else None)

@@ -21,8 +21,10 @@ from .entry_risk import medium_initial_stop
 from .exit_matrix import apply_five_position_limit, simulate_fixed_horizon_exits
 from .performance import performance_metrics
 from .p1_account_check import (COST, ETF_RAW, INITIAL_CASH, MAX_POSITIONS, MAX_WEIGHT,
-                               _load_adjusted, _qqq_curve)
+                               QQQ_DIVIDENDS, _load_adjusted, _load_qqq_dividends,
+                               _load_qqq_prices)
 from .portfolio_engine import simulate_multi_asset_portfolio
+from .qqq_benchmark import build_qqq_benchmark
 from .stock_cross_section import generate_monthly_candidates
 from .timed_entries import build_timed_entries
 
@@ -44,6 +46,18 @@ def _hash(path: Path) -> str:
     with Path(path).open('rb') as stream:
         for block in iter(lambda: stream.read(1024 * 1024), b''):
             digest.update(block)
+    return digest.hexdigest()
+
+
+def _cache_signature(quality_path, actions_path, etf_path, panel_paths, top_n, strategies) -> str:
+    """缓存版本签名：输入文件 + 参数 + 代码；任一变化即缓存失效，避免复用旧产物。"""
+    digest = hashlib.sha256()
+    digest.update(str(top_n).encode())
+    digest.update(','.join(strategies).encode())
+    for p in [quality_path, actions_path, etf_path, QQQ_DIVIDENDS, *panel_paths]:
+        digest.update(_hash(Path(p)).encode())
+    for p in sorted((ROOT / 'scripts/medium_term').glob('*.py')):
+        digest.update(_hash(p).encode())
     return digest.hexdigest()
 
 
@@ -117,15 +131,23 @@ def build_entries(spec: pd.DataFrame, prices: pd.DataFrame, quality: pd.DataFram
             drop('ACTION_COVERAGE_UNEXPLAINED'); continue
         atr_day = pd.Timestamp(getattr(row, atr_session_col)).normalize()
         entry_price = float(stock.raw_open.iloc[i])
-        atr_raw = float(key.loc[(sid, atr_day), 'asof_atr']) * float(
-            key.loc[(sid, atr_day), 'scale_to_next'])
-        stop = medium_initial_stop(entry_price, atr_raw)
+        try:
+            atr_raw = float(key.loc[(sid, atr_day), 'asof_atr']) * float(
+                key.loc[(sid, atr_day), 'scale_to_next'])
+            stop = medium_initial_stop(entry_price, atr_raw)
+        except KeyError:
+            drop('ASOF_ATR_MISSING'); continue
+        except ValueError:
+            drop('INVALID_INITIAL_STOP'); continue
         rows.append({'entry_id': f'{sid}-{decision.date()}', 'security_id': sid,
                      'entry_session': exec_day, 'entry_price': entry_price,
                      'initial_stop': stop, 'decision_session': decision})
     prepared = pd.DataFrame(rows)
     if not prepared.empty:
         prepared['rank'] = range(len(prepared))
+    total_dropped = int(sum(excluded.values()))
+    if int(len(spec)) != int(len(prepared)) + total_dropped:
+        raise ValueError('FUNNEL_DENOMINATOR_MISMATCH')
     return prepared, {'candidates': int(len(spec)), 'prepared_entries': int(len(prepared)),
                       'excluded': excluded}
 
@@ -164,8 +186,7 @@ def build_matrix(prepared: pd.DataFrame, prices: pd.DataFrame,
     return pd.concat(accepted, ignore_index=True)
 
 
-def _account(strategy, matrix, prices, actions, etf_path):
-    start, end = matrix.entry_session.min(), matrix.exit_session.max()
+def _account(strategy, matrix, prices, actions, qqq_prices, qqq_dividends, start, end):
     window = prices[(prices.session >= start) & (prices.session <= end)][
         ['security_id', 'session', 'raw_open', 'raw_close']]
     rows, equity, trades, rejected = [], pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
@@ -173,8 +194,9 @@ def _account(strategy, matrix, prices, actions, etf_path):
         portfolio = simulate_multi_asset_portfolio(
             window, group, initial_cash=INITIAL_CASH, risk_fraction=RISK_FRACTION,
             max_weight=MAX_WEIGHT, round_trip_cost=COST, actions=actions,
-            allow_fractional=False, max_positions=MAX_POSITIONS)
-        benchmark = _qqq_curve(etf_path, start, end)
+            allow_fractional=False, max_positions=MAX_POSITIONS,
+            evaluation_start=start)
+        benchmark = build_qqq_benchmark(qqq_prices, qqq_dividends, start, end)
         metrics = performance_metrics(portfolio.equity, benchmark=benchmark)
         bench = performance_metrics(benchmark)
         rows.append({'strategy': strategy, 'holding_sessions': int(horizon),
@@ -210,14 +232,23 @@ def run(output_dir: Path, *, quality_path=QUALITY, actions_path=ACTIONS,
     prices, panel_paths = load_panels(panels=panels)
     actions = pd.read_csv(actions_path)
     actions['security_id'] = actions.security_id.astype(str)
+    qqq_prices = _load_qqq_prices(etf_path)
+    qqq_dividends = _load_qqq_dividends(QQQ_DIVIDENDS)
+    sig = _cache_signature(quality_path, actions_path, etf_path, panel_paths, TOP_N, strategies)
     # 前置（行动门、月度候选、B3 择时）与策略无关；可缓存后分策略运行以控制单次耗时。
     cache = Path(prep_cache) if prep_cache else None
+    loaded = False
     if cache is not None and cache.exists():
         blob = pd.read_pickle(cache)
-        audits, blocked, selected, timed = (blob['audits'], blob['blocked'],
-                                            blob['selected'], blob['timed'])
-        print(f'[P2] prep cache loaded:{cache}', flush=True)
-    else:
+        if blob.get('_signature') == sig:
+            audits, blocked, candidates, selected, timed = (
+                blob['audits'], blob['blocked'], blob['candidates'],
+                blob['selected'], blob['timed'])
+            loaded = True
+            print(f'[P2] prep cache loaded:{cache}', flush=True)
+        else:
+            print(f'[P2] prep cache stale，忽略并重算:{cache}', flush=True)
+    if not loaded:
         audits, blocked = {}, {}
         for sid in TECH:
             raw_window = (prices.loc[prices.security_id.eq(sid), ['session', 'raw_close']]
@@ -226,16 +257,32 @@ def run(output_dir: Path, *, quality_path=QUALITY, actions_path=ACTIONS,
                                           actions, sid)
             audits[sid] = audit
             blocked[sid] = blocked_sessions(audit)
-        candidates = generate_monthly_candidates(prices, market_frame(etf_path), top_n=TOP_N)
+        view_bars = prices[['security_id', 'session', 'raw_open', 'raw_high', 'raw_low',
+                            'raw_close', 'volume']].rename(columns={
+            'raw_open': 'open', 'raw_high': 'high', 'raw_low': 'low', 'raw_close': 'close'})
+        candidates = generate_monthly_candidates(view_bars, market_frame(etf_path),
+                                                 top_n=TOP_N, actions=actions)
         selected = candidates[candidates.selected.astype(bool)].copy()
         timed = build_timed_entries(
             selected[['security_id', 'decision_session', 'execution_session', 'rank']],
-            prices[['security_id', 'session', 'raw_open', 'raw_high', 'raw_low', 'raw_close']],
-            trading_calendar(etf_path))
+            prices[['security_id', 'session', 'raw_open', 'raw_high', 'raw_low',
+                    'raw_close', 'volume']],
+            trading_calendar(etf_path), actions=actions)
         if cache is not None:
-            pd.to_pickle({'audits': audits, 'blocked': blocked,
-                          'selected': selected, 'timed': timed}, cache)
+            pd.to_pickle({'audits': audits, 'blocked': blocked, 'candidates': candidates,
+                          'selected': selected, 'timed': timed, '_signature': sig}, cache)
             print(f'[P2] prep cache written:{cache}', flush=True)
+    candidate_funnel = {
+        'universe_rows': int(len(candidates)),
+        'selected': int(len(selected)),
+        'selection_reason_counts': {
+            str(k): int(v) for k, v in
+            candidates.selection_reason.fillna('').value_counts().items()},
+        'timed': {'entered': int(timed.entry_type.isin(['breakout', 'pullback']).sum()),
+                  'expired': int((timed.entry_type == 'EXPIRED').sum()),
+                  'data_blocked': int((timed.entry_type == 'DATA_BLOCKED').sum()),
+                  'no_next_open': int((timed.entry_type == 'NO_NEXT_OPEN').sum())},
+    }
     specs = {'B2': (selected, 'decision_session'),
              'B3': (timed[timed.entry_type.ne('EXPIRED') & timed.execution_session.notna()],
                     'signal_session')}
@@ -244,11 +291,16 @@ def run(output_dir: Path, *, quality_path=QUALITY, actions_path=ACTIONS,
     for strategy in strategies:
         spec, atr_col = specs[strategy]
         cache_file = Path(matrix_cache) / f'{strategy}.pkl' if matrix_cache else None
+        loaded = False
         if cache_file is not None and cache_file.exists():
             blob = pd.read_pickle(cache_file)
-            matrix, funnel = blob['matrix'], blob['funnel']
-            print(f'[P2] {strategy}: matrix cache loaded', flush=True)
-        else:
+            if blob.get('_signature') == sig:
+                matrix, funnel = blob['matrix'], blob['funnel']
+                loaded = True
+                print(f'[P2] {strategy}: matrix cache loaded', flush=True)
+            else:
+                print(f'[P2] {strategy}: matrix cache stale，忽略并重算', flush=True)
+        if not loaded:
             prepared, funnel = build_entries(spec, prices, quality, blocked,
                                              atr_session_col=atr_col)
             if prepared.empty:
@@ -260,20 +312,24 @@ def run(output_dir: Path, *, quality_path=QUALITY, actions_path=ACTIONS,
                 ].value_counts().items()}}
             if cache_file is not None:
                 cache_file.parent.mkdir(parents=True, exist_ok=True)
-                pd.to_pickle({'matrix': matrix, 'funnel': funnel}, cache_file)
+                pd.to_pickle({'matrix': matrix, 'funnel': funnel, '_signature': sig}, cache_file)
             print(f'[P2] {strategy}: prepared={funnel["prepared_entries"]} '
                   f'excluded={funnel["excluded"]}', flush=True)
         matrices[strategy] = matrix
         funnels[strategy] = funnel
-        if build_only:
-            continue
-        summary, equity, trades, rejected = _account(strategy, matrix, prices, actions, etf_path)
+    if build_only:
+        return {'funnel': funnels, 'candidate_funnel': candidate_funnel}
+    # 共同评价窗：B2/B3 同一窗比较，择时增量才可加；晚入场策略在窗首保留现金。
+    common_start = min(m.entry_session.min() for m in matrices.values())
+    common_end = max(m.exit_session.max() for m in matrices.values())
+    for strategy in strategies:
+        summary, equity, trades, rejected = _account(strategy, matrices[strategy], prices,
+                                                     actions, qqq_prices, qqq_dividends,
+                                                     common_start, common_end)
         all_summary.append(summary)
         all_equity = pd.concat([all_equity, equity], ignore_index=True)
         all_trades = pd.concat([all_trades, trades], ignore_index=True)
         all_rejected = pd.concat([all_rejected, rejected], ignore_index=True)
-    if build_only:
-        return {'funnel': funnels}
     summary = pd.concat(all_summary, ignore_index=True)
     manifest = {'status': 'exploratory_p2_b2_b3', 'strategies': list(strategies),
                 'universe': list(TECH), 'top_n': TOP_N, 'horizons': HORIZONS,
@@ -286,6 +342,7 @@ def run(output_dir: Path, *, quality_path=QUALITY, actions_path=ACTIONS,
                              'pullback': 'low<=MA20/50*(1+tol) & close>prior-day high',
                              'priority': 'pullback_before_breakout', 'tol': .01},
                 'funnel': funnels,
+                'candidate_funnel': candidate_funnel,
                 'action_coverage': {
                     'verified_securities': len(audits),
                     'total_unexplained_dates': sum(len(a['unexplained_dates']) for a in audits.values()),
@@ -293,9 +350,13 @@ def run(output_dir: Path, *, quality_path=QUALITY, actions_path=ACTIONS,
                                                 'unexplained_dates': a['unexplained_dates'],
                                                 'duplicate_records': a['duplicate_records']}
                                             for s, a in audits.items() if a['verdict'] != 'ok'}},
-                'notes': ['探索性；已知历史存续样本，非盲测', 'B1 因 ETF 行动未核验而暂缓'],
+                'notes': ['探索性；已知历史存续样本，非盲测', 'B1 因 ETF 行动未核验而暂缓',
+                          'benchmark: QQQ 同口径（原始价开盘+官方分红进现金+0.1%单边成本）',
+                          'benchmark: 分红按除息日记现金（研究近似，非支付日入账）；分数股不模拟、'
+                          '期末未平仓、滑点与现金收益未计，全部比较组一致',
+                          'B2动量/B3择时用拆股复权特征；B2/B3 共同评价窗，晚入场策略窗首保留现金'],
                 'input_sha256': {str(p): _hash(p) for p in
-                                 [quality_path, actions_path, etf_path, *panel_paths]}}
+                                 [quality_path, actions_path, etf_path, QQQ_DIVIDENDS, *panel_paths]}}
     output_dir.mkdir(parents=True)
     all_equity.to_csv(output_dir / 'equity.csv.gz', index=False, compression='gzip')
     all_trades.to_csv(output_dir / 'trades.csv.gz', index=False, compression='gzip')
@@ -330,6 +391,7 @@ if __name__ == '__main__':
     parser.add_argument('--build-only', action='store_true')
     args = parser.parse_args()
     chosen = tuple(s.strip() for s in args.strategies.split(',') if s.strip())
-    print(json.dumps(run(args.output_dir, strategies=chosen, prep_cache=args.prep_cache,
-                         matrix_cache=args.matrix_cache, build_only=args.build_only)['funnel'],
+    result = run(args.output_dir, strategies=chosen, prep_cache=args.prep_cache,
+                 matrix_cache=args.matrix_cache, build_only=args.build_only)
+    print(json.dumps(result if args.build_only else result['funnel'],
                      ensure_ascii=False))

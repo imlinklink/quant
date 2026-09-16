@@ -3,7 +3,8 @@ import unittest
 import pandas as pd
 
 from scripts.medium_term.etf_dual_momentum import generate_targets
-from scripts.medium_term.momentum_features import momentum_snapshot, rank_cross_section
+from scripts.medium_term.momentum_features import (momentum_snapshot, point_in_time_momentum_snapshot,
+                                                   rank_cross_section)
 from scripts.medium_term.monthly_calendar import month_end_sessions, next_session
 
 
@@ -97,6 +98,37 @@ class ETFDualMomentumTests(unittest.TestCase):
         row = generate_targets(data).iloc[-1]
         self.assertEqual(row.reject_reason, 'RISK_ASSET_LOOKBACK_INCOMPLETE')
         self.assertIsNone(row.target_security_id)
+
+
+class PointInTimeMomentumTests(unittest.TestCase):
+    def _bars(self, close, split_at=None):
+        sessions = pd.bdate_range('2025-01-02', periods=260)
+        rows = []
+        for i, s in enumerate(sessions):
+            c = close(i)
+            rows.append({'security_id': 'SEC-A', 'session': s, 'open': c,
+                         'high': c + 1., 'low': c - 1., 'close': c, 'volume': 1000.})
+        bars = pd.DataFrame(rows)
+        actions = pd.DataFrame(columns=['security_id', 'action_type', 'ex_date',
+                                        'ratio', 'cash_amount'])
+        if split_at is not None:
+            actions = pd.DataFrame([{'security_id': 'SEC-A', 'action_type': 'split',
+                                     'ex_date': str(sessions[split_at].date()),
+                                     'ratio': 2., 'cash_amount': 0.}])
+        return bars, actions
+
+    def test_out_of_range_dividend_is_ignored(self):
+        bars, _ = self._bars(lambda i: 100. + i)
+        actions = pd.DataFrame([{'security_id': 'SEC-A', 'action_type': 'cash_dividend',
+                                 'ex_date': '2019-06-03', 'ratio': 0., 'cash_amount': 1.0}])
+        snap = point_in_time_momentum_snapshot(bars, actions, bars.session.max())
+        self.assertTrue(snap.eligible.iloc[0])
+
+    def test_split_adjustment_removes_fake_crash(self):
+        bars, actions = self._bars(lambda i: 200. if i < 200 else 100., split_at=200)
+        snap = point_in_time_momentum_snapshot(bars, actions, bars.session.max())
+        # 复权后连续：mom_6m 应为 0（原始价会是 -50% 假崩）。
+        self.assertAlmostEqual(snap.mom_6m.iloc[0], 0.0, places=6)
 
 
 if __name__ == '__main__':
