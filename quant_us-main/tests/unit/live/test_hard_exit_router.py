@@ -34,6 +34,9 @@ class HardExitRouterContracts(unittest.TestCase):
         self.assertEqual(classify_exit_reason('卖出|fixed_stop'), 'hard_risk')  # 包装前缀
         self.assertEqual(classify_exit_reason('portfolio_breaker'), 'hard_risk')
         self.assertEqual(classify_exit_reason('broker_risk'), 'hard_risk')
+        # 监控器同义码（验收项③）
+        self.assertEqual(classify_exit_reason('HARD_STOP'), 'hard_risk')
+        self.assertEqual(classify_exit_reason('TRAILING_EXIT'), 'hard_risk')
         self.assertEqual(classify_exit_reason('thesis_invalidated'), 'thesis')
         self.assertEqual(classify_exit_reason('time_exit'), 'scheduled_review')
         self.assertEqual(classify_exit_reason('unknown_reason'), 'thesis')  # 未知 → thesis 保守

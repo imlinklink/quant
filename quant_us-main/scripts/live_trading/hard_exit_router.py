@@ -24,6 +24,8 @@ HARD_RISK_REASONS = frozenset({'fixed_stop', 'trailing_stop', 'portfolio_breaker
 THESIS_REASONS = frozenset({'thesis_invalidated', 'event_risk', 'target_realized', 'thesis_exit'})
 # 定时复核
 SCHEDULED_REASONS = frozenset({'time_exit', 'scheduled'})
+# 监控器同义码（chandelier_exit_manager._evaluate_position 产出）→ 路由标准码
+MONITOR_REASON_MAP = {'HARD_STOP': 'fixed_stop', 'TRAILING_EXIT': 'trailing_stop'}
 
 
 def classify_exit_reason(reason: str, config: Optional[Dict] = None) -> str:
@@ -34,6 +36,7 @@ def classify_exit_reason(reason: str, config: Optional[Dict] = None) -> str:
     r = str(reason or '')
     # 去掉包装前缀（如 “卖出|fixed_stop”）后取最后一段匹配
     token = r.split('|')[-1].strip()
+    token = MONITOR_REASON_MAP.get(token, token)
     hard_cfg = (config or {}).get('hard_exit') or {}
     if token in HARD_RISK_REASONS:
         return 'hard_risk'
