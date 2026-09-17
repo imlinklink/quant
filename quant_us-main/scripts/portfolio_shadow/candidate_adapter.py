@@ -13,6 +13,11 @@ from scripts.medium_term.monthly_calendar import month_end_sessions, next_sessio
 
 from .schema import Opportunity, to_micro
 
+# 未来行情成熟度用的前向窗口，必须与 `p2_selection_check.build_entries` 的
+# `INSUFFICIENT_FORWARD_BARS` / 行动覆盖窗口径一致：批处理用 max(HORIZONS)=120，
+# **不是**策略自身的 60 交易日持有期。由 test_incremental 钉死两者相等。
+DEFAULT_FORWARD_HORIZON = 120
+
 
 def adapt_schedule(experiment_id: str, parent_version: str, entry_rule: str,
                    exit_policy_id: str, schedule: list[dict]) -> list[Opportunity]:
@@ -92,7 +97,8 @@ class IncrementalCandidateGenerator:
                  actions: pd.DataFrame, blocked: dict, calendar, *,
                  experiment_id: str, parent_version: str, exit_policy_id: str = 'H60',
                  top_n: int = 5, max_wait_sessions: int = 20, entry_rule: str = 'b3',
-                 horizon: int = 60):
+                 forward_horizon: int = DEFAULT_FORWARD_HORIZON,
+                 require_matured: bool = True):
         self.prices = prices
         self.view_bars = prices[['security_id', 'session', 'raw_open', 'raw_high', 'raw_low',
                                  'raw_close', 'volume']].rename(columns={
@@ -101,7 +107,11 @@ class IncrementalCandidateGenerator:
         self.quality = quality
         self.actions = actions
         self.blocked = blocked
-        self.horizon = horizon
+        # 未来行情成熟度窗口，与 build_entries 的 max(HORIZONS) 同口径（不是策略持有期）
+        self.forward_horizon = forward_horizon
+        # True = 研究/对拍模式：要求未来结果已成熟，与冻结矩阵口径一致；
+        # False = 真实前向运行：决策日只知道截至当天的数据，不得据未来 bar 丢弃候选。
+        self.require_matured = require_matured
         self.calendar = pd.DatetimeIndex(pd.to_datetime(list(calendar))).normalize().sort_values().unique()
         self.experiment_id = experiment_id
         self.parent_version = parent_version
@@ -213,18 +223,23 @@ class IncrementalCandidateGenerator:
             if atr is None:
                 del self.pending[cid]  # 缺 ATR，无法定止损
                 continue
-            # 前向 bar 充足性（与 build_entries 的 INSUFFICIENT_FORWARD_BARS 一致；此处用策略 horizon）
-            group = self._bars_raw.get(cand['security_id'])
-            if group is None or len(group[group.session >= exec_sess]) < self.horizon:
-                del self.pending[cid]
-                continue
-            # 行动覆盖门（与 build_entries 一致）：入场→退出窗落在 blocked 日期则丢弃
-            exit_pos = int(self.calendar.searchsorted(exec_sess)) + self.horizon - 1
-            exit_sess = self.calendar[exit_pos] if exit_pos < len(self.calendar) else exec_sess
-            bdays = self.blocked.get(cand['security_id'], ())
-            if any(exec_sess <= pd.Timestamp(d).normalize() <= exit_sess for d in bdays):
-                del self.pending[cid]
-                continue
+            # 以下是「未来结果是否已成熟」的检查，只在研究/对拍模式成立：真实前向运行
+            # 在决策日只知道截至当天的数据，用未来 bar / 未来行动丢弃候选等于作弊。
+            # 前向模式下的数据缺口由引擎运行时兜底（缺行情 → VALUATION_INCOMPLETE /
+            # PROVISIONAL，公司行动在除息日按公告应用）。
+            if self.require_matured:
+                # 前向 bar 充足性（与 build_entries 的 INSUFFICIENT_FORWARD_BARS 一致）
+                group = self._bars_raw.get(cand['security_id'])
+                if group is None or len(group[group.session >= exec_sess]) < self.forward_horizon:
+                    del self.pending[cid]
+                    continue
+                # 行动覆盖门（与 build_entries 一致）：入场→退出窗落在 blocked 日期则丢弃
+                exit_pos = int(self.calendar.searchsorted(exec_sess)) + self.forward_horizon - 1
+                exit_sess = self.calendar[exit_pos] if exit_pos < len(self.calendar) else exec_sess
+                bdays = self.blocked.get(cand['security_id'], ())
+                if any(exec_sess <= pd.Timestamp(d).normalize() <= exit_sess for d in bdays):
+                    del self.pending[cid]
+                    continue
             ready.append(Opportunity(
                 experiment_id=self.experiment_id, security_id=cand['security_id'],
                 source_candidate_id=cid, parent_version=self.parent_version,
