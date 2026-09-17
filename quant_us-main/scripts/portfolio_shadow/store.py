@@ -22,7 +22,9 @@ from .schema import SHADOW_TERMINALS
 #   2 → Application 增 cost_uncertain/attempt_id；AccountState 增 model_cost_unsettled
 #       （进 state_hash）；新增事件类型 model_cost_settlement / shadow:opportunity_terminal；
 #       save_state 白名单放行 missed
-SHADOW_SCHEMA_VERSION = 2
+#   3 → entry-veto 证据包增 evidence{evidence_mode, source_packet_hash, exclusion 统计} 与
+#       model_knowledge_cutoff。这两项进 packet_id ⇒ 进 attempt_id ⇒ 进 Application payload。
+SHADOW_SCHEMA_VERSION = 3
 
 _SHADOW_DDL = '''
 CREATE TABLE IF NOT EXISTS shadow_schema(version INTEGER PRIMARY KEY);

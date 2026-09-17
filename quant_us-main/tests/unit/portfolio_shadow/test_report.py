@@ -161,15 +161,15 @@ class KnowledgeCutoffFreezeTests(unittest.TestCase):
     """真实模型必须显式声明训练数据截止，否则不许 freeze —— 这是对 L−R 的一阶威胁。"""
 
     def test_real_model_requires_declared_knowledge_cutoff(self):
-        m = manifest(llm_policy={'overlay': 'entry_veto', 'use_real_model': True})
+        m = manifest(llm_policy={'overlay': 'entry_veto', 'evidence_mode': 'strict', 'use_real_model': True})
         errors = m.validate()
         self.assertTrue(any('knowledge_cutoff' in e for e in errors), errors)
         with self.assertRaises(ValueError):
             m.freeze('2026-01-02')
 
     def test_explicit_unknown_is_accepted_so_it_stays_visible(self):
-        m = manifest(llm_policy={'overlay': 'entry_veto', 'use_real_model': True,
-                                 'knowledge_cutoff': 'unknown'})
+        m = manifest(llm_policy={'overlay': 'entry_veto', 'evidence_mode': 'strict',
+                                 'use_real_model': True, 'knowledge_cutoff': 'unknown'})
         self.assertEqual(m.validate(), [])
 
     def test_fixture_model_needs_no_cutoff(self):
@@ -182,7 +182,8 @@ class ReportDisclosureTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.store = ShadowStore(Path(self.tmp) / 'ledger.sqlite3', 'exp1')
-        self.m = manifest(llm_policy={'overlay': 'entry_veto', 'use_real_model': True,
+        self.m = manifest(llm_policy={'overlay': 'entry_veto', 'evidence_mode': 'strict',
+                                      'use_real_model': True,
                                       'knowledge_cutoff': '2025-06-01T00:00:00+00:00'}
                           ).freeze('2026-01-02')
         self.store.save_experiment(self.m)
@@ -239,3 +240,30 @@ class UnknownPolicyKeyTests(unittest.TestCase):
 
     def test_known_keys_still_pass(self):
         self.assertEqual(manifest().validate(), [])
+
+
+class EvidenceModeFreezeTests(unittest.TestCase):
+    """entry_veto 必须声明证据等级：诊断级证据上的 VETO 结论适用范围完全不同。"""
+
+    def test_entry_veto_requires_declared_evidence_mode(self):
+        m = manifest(llm_policy={'overlay': 'entry_veto'})
+        errors = m.validate()
+        self.assertTrue(any('evidence_mode' in e for e in errors), errors)
+        with self.assertRaises(ValueError):
+            m.freeze('2026-01-02')
+
+    def test_invalid_evidence_mode_is_rejected(self):
+        m = manifest(llm_policy={'overlay': 'entry_veto', 'evidence_mode': 'verified'})
+        self.assertTrue(any('evidence_mode' in e for e in m.validate()))
+
+    def test_fixed_pass_needs_no_evidence_mode(self):
+        self.assertEqual(manifest().validate(), [])
+
+    def test_report_renders_the_declared_evidence_mode(self):
+        m = manifest(llm_policy={'overlay': 'entry_veto',
+                                 'evidence_mode': 'diagnostic'}).freeze('2026-01-02')
+        tmp = tempfile.mkdtemp()
+        store = ShadowStore(Path(tmp) / 'ledger.sqlite3', 'exp1')
+        store.save_experiment(m)
+        text = render_markdown(daily_report(store, m), paired_performance(store, m))
+        self.assertIn('证据等级=diagnostic', text)

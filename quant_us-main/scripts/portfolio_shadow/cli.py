@@ -13,7 +13,7 @@ from scripts.live_trading.decision_ledger.event_store import stable_id
 
 from .candidate_adapter import adapt_schedule, intents_for_session
 from .evidence import (build_entry_packet, entry_decision_cutoff, entry_response_deadline,
-                       events_from_records)
+                       events_from_records, policy_for_mode)
 from .llm_overlay import (FakeModel, OverlayDecision, RealModel, decide_overlay,
                           model_call_expected)
 from .paper_engine import new_account_state, step
@@ -124,7 +124,11 @@ def cmd_run_session(args):
                 packet = build_entry_packet(
                     opp, item.get('quote') or {}, item.get('events', []),
                     item.get('fundamentals', {}), deadline,
-                    model_knowledge_cutoff=m.llm_policy.get('knowledge_cutoff'))
+                    model_knowledge_cutoff=m.llm_policy.get('knowledge_cutoff'),
+                    evidence={'evidence_mode': m.llm_policy.get('evidence_mode', 'strict'),
+                              'source_packet_hash': item.get('source_packet_hash'),
+                              'included_event_count': len(item.get('events', [])),
+                              'exclusion_count': 0, 'exclusion_reasons': {}})
                 attempt_id = stable_id('llm_attempt', scope, opp.opportunity_id(),
                                        packet['packet_id'])
                 cfg = item.get('model') or {}
@@ -281,14 +285,39 @@ def _reuse_or_decide(store, scope, opp, packet, attempt_id, deadline, model_fact
     return d
 
 
+def entry_packet_for(opp, quote, records, cutoff, *, evidence_mode='strict',
+                     knowledge_cutoff=None):
+    """构建某机会的 entry-veto 证据包（含证据等级 meta）。
+
+    `run_entry_overlay` 与需要复算 `attempt_id` 的调用方（含测试）必须走同一条路径 ——
+    两边各造一次包，一旦有差异 `attempt_id` 就会错位，崩溃窗口守卫会静默失效。
+    """
+    if records is None:
+        events = []
+        meta = {'evidence_mode': evidence_mode, 'source_packet_hash': None,
+                'included_event_count': 0, 'exclusion_count': 0, 'exclusion_reasons': {}}
+    else:
+        events, _, meta = events_from_records(records, opp.security_id, cutoff,
+                                              policy=policy_for_mode(evidence_mode))
+        if meta.get('evidence_mode') not in (None, evidence_mode):
+            # evidence_store 由策略反推的等级与 manifest 声明的不一致 = 两处定义漂移
+            raise ValueError(f'EVIDENCE_MODE_DRIFT:{meta["evidence_mode"]}!={evidence_mode}')
+    return build_entry_packet(opp, quote, events, {}, cutoff,
+                              model_knowledge_cutoff=knowledge_cutoff, evidence=meta)
+
+
 def run_entry_overlay(store, scope, opportunities, *, session, exec_session, quotes, records,
-                      real_model, knowledge_cutoff=None, force_recall=False):
+                      real_model, knowledge_cutoff=None, evidence_mode='strict',
+                      force_recall=False):
     """对一个 session 新生成的机会跑 L 侧 overlay。
 
     返回 (kept, known_cost_micro, uncertain_attempt_ids)。
 
     时序：决策在信号日 t 收盘后做出（证据 as_of = t 收盘，回复截止 = 次日开盘前 10 分钟）。
     BLOCK → 不调模型、不计成本，直接剔除（关键数据不可用/未来，成交本身就是前视）。
+
+    `evidence_mode` 取自学验 manifest（strict/diagnostic），并冻结进证据包 —— 账本必须
+    分得清一次 VETO 建立在严格级还是诊断级证据上。
 
     重复运行安全：已落库的决定原样复用；`shadow_job_runs` 记录堵住「模型已扣费但决定
     未落库」的崩溃窗口（见 `_reuse_or_decide`）。
@@ -297,10 +326,9 @@ def run_entry_overlay(store, scope, opportunities, *, session, exec_session, quo
     cutoff = entry_decision_cutoff(session)
     deadline = entry_response_deadline(exec_session)
     for opp in opportunities:
-        events = [] if records is None else events_from_records(
-            records, opp.security_id, cutoff)[0]
-        packet = build_entry_packet(opp, quotes.get(opp.security_id, {}), events, {}, cutoff,
-                                    model_knowledge_cutoff=knowledge_cutoff)
+        packet = entry_packet_for(opp, quotes.get(opp.security_id, {}), records, cutoff,
+                                  evidence_mode=evidence_mode,
+                                  knowledge_cutoff=knowledge_cutoff)
         attempt_id = stable_id('llm_attempt', scope, opp.opportunity_id(), packet['packet_id'])
         d = _reuse_or_decide(
             store, scope, opp, packet, attempt_id, deadline,
@@ -397,7 +425,8 @@ def cmd_run_forward(args):
                                             'observed_at': entry_decision_cutoff(session)}
                             for o in fresh},
                     records=records, real_model=real_model,
-                    knowledge_cutoff=m.llm_policy.get('knowledge_cutoff'))
+                    knowledge_cutoff=m.llm_policy.get('knowledge_cutoff'),
+                    evidence_mode=m.llm_policy.get('evidence_mode', 'strict'))
                 # 只从**本批**机会的队列里摘掉被否决/被 BLOCK 的，别动其它执行日的队列
                 dropped = ({o.opportunity_id() for o in fresh}
                            - {o.opportunity_id() for o in kept})

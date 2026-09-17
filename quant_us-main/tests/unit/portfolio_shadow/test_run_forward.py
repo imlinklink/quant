@@ -12,8 +12,8 @@ import pandas as pd
 from scripts.evidence.evidence_store import normalize_evidence
 from scripts.live_trading.decision_ledger.event_store import stable_id
 from scripts.portfolio_shadow.candidate_adapter import intents_for_session
-from scripts.portfolio_shadow.cli import (drop_from_schedule, manifest_from_dict,
-                                          run_entry_overlay)
+from scripts.portfolio_shadow.cli import (drop_from_schedule, entry_packet_for,
+                                          manifest_from_dict, run_entry_overlay)
 from scripts.portfolio_shadow.evidence import (build_entry_packet, entry_decision_cutoff,
                                                entry_response_deadline, events_from_records)
 from scripts.portfolio_shadow.llm_overlay import FakeModel, SCHEMA_VERSION
@@ -32,7 +32,7 @@ def manifest():
         account_scopes=('SHADOW:exp1:R', 'SHADOW:exp1:L'), initial_cash=to_micro(100000),
         risk_policy={'single_position_risk_bp': 100, 'max_weight_bp': 2000, 'max_positions': 5},
         execution_policy={'entry_rule': 'b3', 'exit_policy_id': 'H60', 'horizon': 3},
-        llm_policy={'overlay': 'entry_veto'}, calendar_version='v1',
+        llm_policy={'overlay': 'entry_veto', 'evidence_mode': 'strict'}, calendar_version='v1',
         evaluation_protocol={'main_metric': 'L_minus_R_return', 'enrollment_window': '3-6 months',
                              'review_date': '2026-12-31', 'cost_allocation': 'L_pays_model_cost'}
     ).freeze('2026-01-02')
@@ -173,10 +173,9 @@ class CrashWindowTests(unittest.TestCase):
         self.attempt_id = self._attempt_id()
 
     def _attempt_id(self):
-        events = events_from_records(evidence_records(), 'SEC-A',
-                                     entry_decision_cutoff(SIGNAL))[0]
-        packet = build_entry_packet(opp(), self.quotes['SEC-A'], events, {},
-                                    entry_decision_cutoff(SIGNAL))
+        # 走生产同一条路径造包：两边各造一次包会让 attempt_id 错位，守卫静默失效
+        packet = entry_packet_for(opp(), self.quotes['SEC-A'], evidence_records(),
+                                  entry_decision_cutoff(SIGNAL))
         return stable_id('llm_attempt', self.scope, self.oid, packet['packet_id'])
 
     def _run(self, model, force_recall=False):

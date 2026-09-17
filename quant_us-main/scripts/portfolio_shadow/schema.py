@@ -21,6 +21,10 @@ ACCOUNT_ACTIONS = ('RISK_REJECTED', 'VETOED', 'INTENT_CREATED', 'MISSED_EXECUTIO
 # 机会在影子账本里的全部可能状态（投影 terminal 列取值）
 SHADOW_TERMINALS = CANDIDATE_TERMINAL + ('VETOED', 'MISSED_EXECUTION', 'EXECUTED')
 
+# 证据等级。strict = 点对点可追溯（要求 observed_at + 来源已核实）；diagnostic = 只做
+# published_at 过滤。诊断级证据上的 VETO 与严格级上的不是同一个东西，故必须冻结进实验。
+EVIDENCE_MODES = ('strict', 'diagnostic')
+
 # 各策略字典的已知键。未知键必须报错：拼错一个字母（如 use_real_modle/knowledge_cutof）
 # 会被 `dict.get` 静默忽略，让本该生效的安全门无声失效 —— 然后 freeze 门报「缺失」，
 # 操作者按提示补上另一个拼写，漏洞就这么留下了。
@@ -28,7 +32,7 @@ POLICY_KEYS = {
     'risk_policy': ('single_position_risk_bp', 'max_weight_bp', 'max_positions', 'top_n',
                     'drawdown_ladder'),
     'execution_policy': ('entry_rule', 'exit_policy_id', 'horizon', 'max_wait_sessions'),
-    'llm_policy': ('overlay', 'use_real_model', 'knowledge_cutoff'),
+    'llm_policy': ('overlay', 'use_real_model', 'knowledge_cutoff', 'evidence_mode'),
     'evaluation_protocol': ('main_metric', 'enrollment_window', 'review_date',
                             'cost_allocation'),
 }
@@ -104,6 +108,13 @@ class Manifest:
             # 确实未知就填 'unknown'，让它在评审里可见，而不是留空悄悄跳过。
             errors.append('llm_policy.knowledge_cutoff 缺失（use_real_model=true 时必填；'
                           '未知请填 "unknown"）')
+        if self.llm_policy.get('overlay') == 'entry_veto':
+            # 证据等级必须冻结进实验：诊断级证据上的 VETO 与严格级上的不是同一个东西，
+            # 结论的适用范围完全不同，不能靠运行时默认值悄悄决定。
+            mode = self.llm_policy.get('evidence_mode')
+            if mode not in EVIDENCE_MODES:
+                errors.append(f'llm_policy.evidence_mode 非法或缺省：{mode!r}'
+                              f'（entry_veto 必填，允许：{list(EVIDENCE_MODES)}）')
         if not self.calendar_version:
             errors.append('calendar_version 缺失')
         # 未知键：拼错的键会被 `dict.get` 静默忽略，让安全门无声失效

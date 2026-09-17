@@ -152,6 +152,7 @@ def render_markdown(report: dict, paired: dict) -> str:
     llm = report.get('llm_policy') or {}
     lines = [f"# 实验 {report['experiment_id']} 日报（status {report['status']}）",
              f"- 账本 schema=v{report.get('schema_version')} overlay={llm.get('overlay')} "
+             f"证据等级={llm.get('evidence_mode') or 'n/a'} "
              f"模型知识截止={llm.get('knowledge_cutoff') or '未声明（非真实模型路径）'}",
              '']
     for scope, acct in report['accounts'].items():

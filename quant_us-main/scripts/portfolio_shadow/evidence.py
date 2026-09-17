@@ -14,6 +14,19 @@ from scripts.live_trading.decision_ledger.event_store import digest, stable_id
 
 QUALITY_LEVELS = ('BLOCK', 'LLM_INSUFFICIENT', 'OK')
 
+# 证据等级枚举在 schema（策略层）定义；这里只负责把模式映射成 evidence_store 的过滤策略。
+# strict = 要求 observed_at 与来源已核实（点对点可追溯，能证明「决策时确实看得到这条」）；
+# diagnostic = 放开这两项，只保留双时间里的 published_at 过滤。
+DIAGNOSTIC_POLICY = {'require_observed_at': False, 'require_verified': False}
+
+
+def policy_for_mode(mode: str) -> dict | None:
+    if mode == 'strict':
+        return None  # evidence_store 的默认策略就是严格层
+    if mode == 'diagnostic':
+        return dict(DIAGNOSTIC_POLICY)
+    raise ValueError(f'UNKNOWN_EVIDENCE_MODE:{mode}')
+
 # 进入模型 prompt 的正文长度上限。正文同时进 prompt 与落库，必须封顶；
 # `content_hash` 始终对**全文**计算，截断与否另用 summary_truncated 标记，保证可审计。
 MAX_SUMMARY_CHARS = 2000
@@ -40,16 +53,22 @@ def _parse_iso(v):
         return None
 
 
-def _norm_events(events, as_of_dt):
-    """校验事件双时间，返回 (可用事件列表, 被丢弃计数)。"""
+def _norm_events(events, as_of_dt, *, require_observed_at: bool = True):
+    """校验事件双时间，返回 (可用事件列表, 被丢弃计数)。
+
+    `require_observed_at=False`（诊断模式）时才允许缺 `observed_at`：那表示「知道何时
+    公布、但无法证明我们何时首次看到」。严格层下这必须丢弃 —— 否则点对点可得性无从证明。
+    两者必须一致：`evidence_store.select_visible` 按同一策略放行，这一层再按相反策略丢弃
+    会让诊断模式表面上被接受、实际全部流失。
+    """
     usable, dropped = [], 0
     for e in events or []:
         published = _parse_iso(e.get('published_at'))
         observed = _parse_iso(e.get('observed_at'))
-        if published is None or observed is None:
+        if published is None or (require_observed_at and observed is None):
             dropped += 1
             continue
-        if published > as_of_dt or observed > as_of_dt:
+        if published > as_of_dt or (observed is not None and observed > as_of_dt):
             dropped += 1
             continue
         summary = str(e.get('summary') or '')
@@ -75,7 +94,10 @@ def _norm_events(events, as_of_dt):
 
 def events_from_records(records, security_id, decision_cutoff, *, policy=None, resolver=None,
                         source_version: str = '', price_version: str = ''):
-    """用 `evidence_store.build_packet` 的语义产出 entry-veto 事件（返回 (events, exclusions)）。
+    """用 `evidence_store.build_packet` 的语义产出 entry-veto 事件。
+
+    返回 `(events, exclusions, meta)`。**meta 必须一路带到证据包里**：`evidence_mode`
+    决定这批事件是严格级还是诊断级，账本缺了它就分不清一次 VETO 建立在哪种证据上。
 
     可见性（双时间过滤 + 具名拒绝原因）、簇去重与修订处理全部复用 `evidence_store`，
     不另起一套更弱的实现。正文按 `evidence_id` 从原始记录回联并按 MAX_SUMMARY_CHARS 封顶；
@@ -108,11 +130,21 @@ def events_from_records(records, security_id, decision_cutoff, *, policy=None, r
             'summary_truncated': len(summary) > MAX_SUMMARY_CHARS,
             'content_hash': e.get('content_hash'),
         })
-    return events, exclusions
+    reasons = {}
+    for item in exclusions:
+        reasons[item['reason']] = reasons.get(item['reason'], 0) + 1
+    meta = {
+        'evidence_mode': packet.get('evidence_mode'),
+        'source_packet_hash': packet.get('packet_hash'),
+        'included_event_count': len(events),
+        'exclusion_count': len(exclusions),
+        'exclusion_reasons': reasons,
+    }
+    return events, exclusions, meta
 
 
 def build_entry_packet(opportunity, quote, events, fundamentals, as_of,
-                       model_knowledge_cutoff=None) -> dict:
+                       model_knowledge_cutoff=None, evidence=None) -> dict:
     """构建入场否决用的冻结证据包。
 
     opportunity: Opportunity（含 security_id / opportunity_id()）。
@@ -122,6 +154,8 @@ def build_entry_packet(opportunity, quote, events, fundamentals, as_of,
     as_of: 决策截止时刻（ISO，带时区）。
     model_knowledge_cutoff: 模型训练数据截止时刻（ISO）。写进包内一并冻结 —— 决策时点
         早于它时，as-of 证据过滤修不好泄漏，必须以显式字段披露而非默认无事。
+    evidence: `events_from_records` 的 meta（证据等级/来源包哈希/排除统计）。一并冻结进
+        包，使账本分得清一次 VETO 建立在严格级还是诊断级证据上。
     """
     as_of_dt = _parse_iso(as_of)
     if as_of_dt is None:
@@ -139,7 +173,12 @@ def build_entry_packet(opportunity, quote, events, fundamentals, as_of,
     if not getattr(opportunity, 'security_id', None):
         critical_missing.append('security_id')
 
-    usable_events, dropped = _norm_events(events, as_of_dt)
+    # 证据等级决定双时间过滤的严格程度：诊断模式允许缺 observed_at（同一策略已由
+    # evidence_store.select_visible 施加过一次，这里保持一致，不能反过来再卡一次）
+    evidence = evidence or {}
+    require_observed_at = evidence.get('evidence_mode') != 'diagnostic'
+    usable_events, dropped = _norm_events(events, as_of_dt,
+                                          require_observed_at=require_observed_at)
     fundamentals = fundamentals or {}
 
     if critical_missing or (quote_observed is not None and quote_observed > as_of_dt):
@@ -161,6 +200,7 @@ def build_entry_packet(opportunity, quote, events, fundamentals, as_of,
                          'dropped_event_count': dropped},
         'as_of': as_of_iso,
         'model_knowledge_cutoff': model_knowledge_cutoff,
+        'evidence': evidence or {},
     }
     packet['packet_id'] = stable_id('entry_packet', packet)
     return packet
