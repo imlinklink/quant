@@ -59,6 +59,23 @@ def _to_utc(value):
     return stamp.tz_convert(UTC).isoformat()
 
 
+def to_utc_series(values) -> pd.Series:
+    """逐元素解析成带时区的 datetime 列。
+
+    **不要用 `pd.to_datetime(series)` 直接解析原始列**：混合格式（有的带微秒、有的不带）
+    会让 pandas 按多数派推断，把少数派整列判成 `NaT` —— **静默丢数据**。实测：
+    `pd.to_datetime(pd.Series(['2026-09-11T10:05:05.447198+00:00', '2026-08-04T20:00:00+00:00']))`
+    返回 `[正确, NaT]`。逐元素解析没有格式推断这一步。
+    """
+    stamps = []
+    for value in values:
+        try:
+            stamps.append(pd.Timestamp(_to_utc(value)) if _to_utc(value) else pd.NaT)
+        except ValueError:
+            stamps.append(pd.NaT)
+    return pd.Series(stamps, dtype='datetime64[ns, UTC]')
+
+
 def _hash_text(text: str) -> str:
     return hashlib.sha256(str(text).encode('utf-8')).hexdigest()
 
@@ -112,8 +129,8 @@ def validate_evidence(frame: pd.DataFrame) -> list:
         return ['EVIDENCE_MISSING_COLUMNS:' + ','.join(sorted(missing))]
     if frame['evidence_id'].duplicated().any():
         errors.append('DUPLICATE_EVIDENCE_ID')
-    pub = pd.to_datetime(frame['published_at'], errors='coerce', utc=True)
-    obs = pd.to_datetime(frame['observed_at'], errors='coerce', utc=True)
+    pub = to_utc_series(frame['published_at'])
+    obs = to_utc_series(frame['observed_at'])
     if (obs.notna() & pub.notna() & (obs < pub)).any():
         errors.append('OBSERVED_BEFORE_PUBLISHED')     # 首次可见不能早于公开
     if frame['ingested_at'].map(lambda v: v is None or str(v).strip() == '').any():
@@ -291,9 +308,9 @@ def validate_labels(labels: list, packets: dict) -> list:
 def audit_source(records: pd.DataFrame, sample=100) -> dict:
     """来源可用性审计（§3.3）：时间字段、时区、修订可见性、批量回填、许可。"""
     d = records.head(sample).copy()
-    pub = pd.to_datetime(d['published_at'], errors='coerce', utc=True)
-    obs = pd.to_datetime(d['observed_at'], errors='coerce', utc=True)
-    ing = pd.to_datetime(d['ingested_at'], errors='coerce', utc=True)
+    pub = to_utc_series(d['published_at'])
+    obs = to_utc_series(d['observed_at'])
+    ing = to_utc_series(d['ingested_at'])
     backfilled = int((pub.notna() & ing.notna() &
                       ((ing - pub) > pd.Timedelta(days=365 * 5)).fillna(False)).sum())
     return {

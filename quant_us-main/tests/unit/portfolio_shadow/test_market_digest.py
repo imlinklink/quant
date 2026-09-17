@@ -122,3 +122,54 @@ class AppendSemanticsTests(unittest.TestCase):
             'quality_status': 'verified'}) + '\n', encoding='utf-8')
         self.assertEqual(self._import('2026-09-17T21:00:00+00:00')['added'], 1)
         self.assertEqual(len(pd.read_csv(self.out)), 2)
+
+
+class MixedTimestampFormatTests(unittest.TestCase):
+    """回归：混合时间格式（带/不带微秒）会让列级 to_datetime 把少数派整列判成 NaT。
+
+    日报的 `published_at` 是文件 mtime（**带微秒**），财报事件是整秒 —— 两者同库时，
+    列级解析会静默丢掉日报。这是「数据在库里、包却是空的」那种最难查的故障。
+    """
+
+    WITH_MICRO = '2026-09-11T10:05:05.447198+00:00'
+    WHOLE_SECOND = '2026-08-04T20:00:00+00:00'
+
+    def test_column_level_parse_really_drops_the_minority(self):
+        """先钉住 pandas 的这个行为，说明为什么不能直接用列级解析。"""
+        naive = pd.to_datetime(pd.Series([self.WITH_MICRO, self.WHOLE_SECOND]),
+                               errors='coerce', utc=True)
+        self.assertEqual(int(naive.isna().sum()), 1)
+
+    def test_to_utc_series_parses_both_formats(self):
+        from scripts.evidence.evidence_store import to_utc_series
+        parsed = to_utc_series(pd.Series([self.WITH_MICRO, self.WHOLE_SECOND]))
+        self.assertEqual(int(parsed.isna().sum()), 0)
+        self.assertEqual(str(parsed.iloc[0])[:19], '2026-09-11 10:05:05')
+
+    def test_digest_survives_alongside_whole_second_events(self):
+        """端到端：日报与整秒事件同库时，日报必须仍然进包。"""
+        tmp = Path(tempfile.mkdtemp())
+        store = tmp / 'store.csv'
+        with_micro = tmp / 'digest.jsonl'
+        with_micro.write_text(json.dumps({
+            'security_id': MARKET_SECURITY, 'event_type': MARKET_EVENT_TYPE,
+            'summary': '市场综述', 'source_url': 'file://x',
+            'source_type': 'daily_market_report',
+            'published_at': self.WITH_MICRO, 'quality_status': 'verified'}) + '\n',
+            encoding='utf-8')
+        whole = tmp / 'events.jsonl'
+        whole.write_text(json.dumps({
+            'security_id': 'SEC-US-AMD', 'event_type': 'earnings', 'summary': '财报',
+            'source_url': 'futu://x', 'source_type': 'futu',
+            'published_at': self.WHOLE_SECOND, 'quality_status': 'verified'}) + '\n',
+            encoding='utf-8')
+        import_evidence_jsonl(whole, store, observed_at_policy='unknown')
+        import_evidence_jsonl(with_micro, store, append=True, observed_at_policy='unknown')
+
+        from scripts.portfolio_shadow.evidence_source import JsonlEvidenceSource
+        src = JsonlEvidenceSource(store, window_days=120, max_events=50)
+        fetch = src.load_events('SEC-US-AMD', '2026-09-16T13:20:00+00:00',
+                                evidence_mode='diagnostic')
+        kinds = [e['event_type'] for e in fetch.events]
+        self.assertIn(MARKET_EVENT_TYPE, kinds, f'日报被静默丢掉：{kinds}')
+        self.assertIn('earnings', kinds)

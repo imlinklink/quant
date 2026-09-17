@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from scripts.evidence.evidence_store import normalize_evidence
+from scripts.evidence.evidence_store import normalize_evidence, to_utc_series
 
 from .evidence import events_from_records, policy_for_mode
 from .market_digest import MARKET_SECURITY
@@ -200,7 +200,8 @@ class JsonlEvidenceSource:
                                        status='FAILED', source=str(self.path),
                                        error=f'CUTOFF_INVALID:{cutoff}')
         window_start = cutoff_dt - timedelta(days=self.window_days)
-        published = pd.to_datetime(records.get('published_at'), errors='coerce', utc=True)
+        # 逐元素解析：混合格式（日报带微秒、财报不带）会让列级解析把少数派判成 NaT
+        published = to_utc_series(records.get('published_at'))
         in_window = records[(published.notna()) & (published >= window_start)]
         events, exclusions, meta = events_from_records(
             in_window, security_id, cutoff, policy=policy_for_mode(evidence_mode))
