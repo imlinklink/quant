@@ -728,6 +728,107 @@ def cmd_settle_session(args):
     return 0
 
 
+def sessions_to_settle(store, target: str, last_settled: str | None) -> list:
+    """该由本次运行结算的 session：**只取有机会排期**的日子，且晚于上次已结算的。
+
+    按全部历史 session 扫会把 ~2900 个交易日各跑一遍（每个都要重载行情），首次运行直接
+    卡死；没有排期的日子本来也无事可做。
+    """
+    due = sorted({(o or {}).get('planned_execution_session')
+                  for o in store.opportunities()} - {None})
+    return [d for d in due if d <= target and (last_settled is None or d > last_settled)]
+
+
+def last_settled_session(store, scopes) -> str | None:
+    last = None
+    for scope in scopes:
+        row = store.latest_state(scope)
+        if row and row[1].get('last_session'):
+            last = max(last or '', row[1]['last_session'])
+    return last
+
+
+def cmd_run_daily(args):
+    """每日前向运行（设计 §3 的时序，一次做完三件事）。
+
+    窗口是「T 收盘后 → T+1 开盘前」，所以一次运行按顺序做：
+
+        settle(T)    执行昨天为 T 冻结的动作（需要 T 的行情，故必须在收盘后）
+        prepare(T)   冻结 T 的机会与证据，机会排在 T+1 执行
+        review(T+1)  为 T+1 冻结动作 —— **必须在 T+1 开盘前截止之前**
+
+    `review` 错过截止时不补：`settle(T+1)` 会按设计 §3.3 明确冻结
+    `ABSTAIN/DECISION_DEADLINE_MISSED`，而不是静默跳过或事后补一个动作。
+    """
+    from types import SimpleNamespace
+    import pandas as pd
+    m = manifest_from_dict(json.loads(Path(args.manifest).read_text()))
+    store = ShadowStore(Path(args.output) / m.experiment_id / 'ledger.sqlite3', m.experiment_id)
+    etf_raw = getattr(args, 'etf_raw', None)
+    prices, _, _, etf_path = _market_data(etf_raw)
+    cal = _forward_calendar(sorted(pd.DatetimeIndex(prices.session.unique())),
+                            args.session or prices.session.max())
+    data_sessions = [str(pd.Timestamp(x).date()) for x in
+                     sorted(pd.DatetimeIndex(prices.session.unique()))]
+    target = args.session or data_sessions[-1]
+    if target not in data_sessions:
+        raise ValueError(f'NO_MARKET_DATA_FOR_SESSION:{target}')
+    exec_session = _next_session(cal, target)
+    deadline = entry_response_deadline(exec_session) if exec_session else None
+    now = now_iso()
+
+    result = {'session': target, 'execution_session': exec_session,
+              'now': now, 'phase_deadline': deadline, 'steps': {}}
+
+    # ① 结算：补做上次运行以来所有有行情但未结算的 session（settle 本身幂等）
+    to_settle = sessions_to_settle(store, target,
+                                   last_settled_session(store, m.account_scopes))
+    for day in to_settle:
+        _capture(cmd_settle_session, manifest=args.manifest, output=args.output,
+                 session=day, etf_raw=etf_raw)
+    result['steps']['settled'] = to_settle
+
+    # ② 准备 T 的机会与证据（排在 T+1 执行）
+    prepared = _capture(cmd_prepare_entry_reviews, manifest=args.manifest, output=args.output,
+                        session=target, evidence=getattr(args, 'evidence', None),
+                        etf_raw=etf_raw)
+    result['steps']['prepare'] = prepared
+    if prepared.get('opportunities') == 0:
+        # 无候选不是失败，但必须如实记录，不能制造候选或强行调用模型（设计 §4）
+        result['steps']['no_opportunities'] = True
+
+    # ③ 评审 T+1：只在截止之前做；错过就留给 settle 按规则冻结 ABSTAIN
+    if exec_session is None:
+        result['steps']['review'] = {'skipped': 'NO_NEXT_SESSION'}
+    elif now > deadline:
+        result['steps']['review'] = {'skipped': 'DECISION_WINDOW_MISSED',
+                                     'deadline': deadline,
+                                     'note': 'settle 会按 §3.3 冻结 ABSTAIN/DECISION_DEADLINE_MISSED'}
+    else:
+        result['steps']['review'] = _capture(
+            cmd_review_entries, manifest=args.manifest, output=args.output,
+            execution_session=exec_session, model=args.model,
+            fixture_action=getattr(args, 'fixture_action', 'PASS'))
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _capture(fn, **kwargs):
+    """调用子命令并捕获它打印的 JSON（子命令各自打印一行 JSON 摘要）。"""
+    import contextlib
+    import io
+    from types import SimpleNamespace
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        fn(SimpleNamespace(**kwargs))
+    for line in reversed(buf.getvalue().strip().splitlines()):
+        try:
+            return json.loads(line)
+        except ValueError:
+            continue
+    return {}
+
+
 def cmd_run_forward(args):
     """逐日增量信号生成 + 前向运行 R/L 账户（真实候选 + 可选真实 LLM）。
 
@@ -874,6 +975,7 @@ def main(argv=None):
                      ('run-session', cmd_run_session), ('run-forward', cmd_run_forward),
                      ('replay', cmd_replay), ('report', cmd_report),
                      ('import-evidence', cmd_import_evidence),
+                     ('run-daily', cmd_run_daily),
                      ('prepare-entry-reviews', cmd_prepare_entry_reviews),
                      ('review-entries', cmd_review_entries),
                      ('settle-session', cmd_settle_session)):
@@ -905,8 +1007,14 @@ def main(argv=None):
                            help='fixture 模型的动作（设计 §11 的确定性 VETO 验收用）')
         if name == 'settle-session':
             p.add_argument('--session', required=True)
-        if name in ('prepare-entry-reviews', 'settle-session'):
+        if name in ('prepare-entry-reviews', 'settle-session', 'run-daily'):
             p.add_argument('--etf-raw', help='活的 ETF 快照（交易日历与市场门来源）')
+        if name == 'run-daily':
+            p.add_argument('--session', help='默认取最新有行情的 session')
+            p.add_argument('--evidence', help='已导入的规范证据存储')
+            p.add_argument('--model', choices=('real', 'fixture'), default='real')
+            p.add_argument('--fixture-action', choices=('PASS', 'VETO', 'ABSTAIN'),
+                           default='PASS')
         if name == 'report':
             p.add_argument('--trace', action='append',
                            help='要展开的 opportunity_id（可重复）')

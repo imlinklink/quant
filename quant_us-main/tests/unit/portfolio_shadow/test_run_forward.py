@@ -19,6 +19,7 @@ from scripts.portfolio_shadow.cli import (_ensure_reviewed, _forward_calendar, _
                                           _settle_intents, _settle_marks,
                                           apply_entry_reviews, drop_from_schedule,
                                           entry_packet_for, freeze_entry_reviews,
+                                          last_settled_session, sessions_to_settle,
                                           manifest_from_dict, record_data_blocked)
 from scripts.portfolio_shadow.evidence import (entry_market_cutoff,
                                                entry_response_deadline)
@@ -645,3 +646,41 @@ class ForwardCalendarTests(unittest.TestCase):
         # 实际日线覆盖临时休市：规则历里没有的日子也能由价格序列补进来
         union = _forward_calendar(pd.DatetimeIndex(pd.to_datetime(['2026-09-17'])), '2026-09-16')
         self.assertIn(pd.Timestamp('2026-09-17'), union)
+
+
+class DailyRunnerTests(unittest.TestCase):
+    """每日运行器：一次做完结算 T、准备 T、评审 T+1（设计 §3 的时序）。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.store = ShadowStore(Path(self.tmp) / 'ledger.sqlite3', 'exp1')
+        self.store.save_experiment(manifest())
+
+    def test_only_sessions_with_scheduled_opportunities_are_settled(self):
+        """回归：按全部历史 session 扫会让首次运行卡死（~2900 个日子各重载一次行情）。"""
+        self.store.put_opportunity(opp('SEC-A', '2026-01-06'))
+        self.store.put_opportunity(opp('SEC-C', '2026-01-08'))
+        self.assertEqual(sessions_to_settle(self.store, '2026-01-10', None),
+                         ['2026-01-06', '2026-01-08'])
+
+    def test_settle_scope_excludes_future_and_already_settled(self):
+        self.store.put_opportunity(opp('SEC-A', '2026-01-06'))
+        self.store.put_opportunity(opp('SEC-B', '2026-01-09'))
+        # 只结算 <= target 且晚于上次已结算的
+        self.assertEqual(sessions_to_settle(self.store, '2026-01-07', None), ['2026-01-06'])
+        self.assertEqual(sessions_to_settle(self.store, '2026-01-10', '2026-01-06'),
+                         ['2026-01-09'])
+        self.assertEqual(sessions_to_settle(self.store, '2026-01-10', '2026-01-09'), [])
+
+    def test_no_opportunities_means_nothing_to_settle(self):
+        self.assertEqual(sessions_to_settle(self.store, '2026-01-10', None), [])
+
+    def test_last_settled_session_takes_the_max_across_scopes(self):
+        self.assertIsNone(last_settled_session(self.store, ('SHADOW:exp1:R',)))
+        for scope, session in (('SHADOW:exp1:R', '2026-01-06'),
+                               ('SHADOW:exp1:L', '2026-01-08')):
+            res = step(new_account_state(scope, to_micro(100000)), session=session, bars={},
+                       corporate_actions=[], intents=[], manifest=manifest())
+            self.store.save_state(scope, res.state, res.nav, res.events, session=session)
+        self.assertEqual(last_settled_session(self.store, ('SHADOW:exp1:R', 'SHADOW:exp1:L')),
+                         '2026-01-08')
