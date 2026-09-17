@@ -1055,7 +1055,8 @@ def main(argv=None):
             p.add_argument('--to-session', required=True)
             p.add_argument('--evidence',
                            help='已导入的规范证据存储（由 import-evidence 产出）')
-        p.add_argument('--output', required=True)
+        if name != 'validate':          # validate 不写任何东西，不该要求 --output
+            p.add_argument('--output', required=True)
         p.set_defaults(fn=fn)
     args = parser.parse_args(argv)
     return args.fn(args)
