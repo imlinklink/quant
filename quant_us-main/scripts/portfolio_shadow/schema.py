@@ -18,6 +18,8 @@ MANIFEST_STATUSES = ('DRAFT', 'FROZEN', 'RUNNING', 'PAUSED', 'CLOSED')
 CANDIDATE_TERMINAL = ('RULE_REJECTED', 'DATA_BLOCKED', 'WAITING', 'EXPIRED', 'READY')
 # READY 之后的账户级动作
 ACCOUNT_ACTIONS = ('RISK_REJECTED', 'VETOED', 'INTENT_CREATED', 'MISSED_EXECUTION')
+# 机会在影子账本里的全部可能状态（投影 terminal 列取值）
+SHADOW_TERMINALS = CANDIDATE_TERMINAL + ('VETOED', 'MISSED_EXECUTION', 'EXECUTED')
 
 
 def to_micro(value) -> int:
@@ -159,12 +161,24 @@ class AccountState:
     positions: dict = field(default_factory=dict)  # security_id -> Position
     fees: int = 0
     model_cost: int = 0
+    # 成本不可知、已挂账待补记的模型尝试 id（金额尚未计入 model_cost）。
+    # 「不在这里」= 已结清或从未发生；计数由它派生，避免两个字段漂移。
+    model_cost_unsettled: tuple = ()
     initial_equity: int = 0
     high_water: int = 0
     last_session: str | None = None
     valuation_status: str = 'OK'  # OK / PROVISIONAL
     risk_state: str = 'NORMAL'  # 回撤阶梯状态
     recovery_streak: int = 0
+
+    @property
+    def model_cost_uncertain_count(self) -> int:
+        return len(self.model_cost_unsettled)
+
+    @property
+    def cost_status(self) -> str:
+        """PROVISIONAL = 尚有非负费用未扣，full_cost_equity 只是上界。"""
+        return 'PROVISIONAL' if self.model_cost_unsettled else 'OK'
 
     def equity(self, mark_prices: dict[str, int]) -> int:
         mv = sum(p.shares * mark_prices[p.security_id] for p in self.positions.values())
@@ -192,6 +206,7 @@ class AccountState:
             'unsettled_cash': self.unsettled_cash,
             'dividend_receivable': {k: v for k, v in sorted(self.dividend_receivable.items())},
             'fees': self.fees, 'model_cost': self.model_cost,
+            'model_cost_unsettled': list(self.model_cost_unsettled),
             'initial_equity': self.initial_equity, 'high_water': self.high_water,
             'last_session': self.last_session, 'valuation_status': self.valuation_status,
             'risk_state': self.risk_state, 'recovery_streak': self.recovery_streak,
@@ -218,3 +233,5 @@ class Application:
     model_cost: int = 0
     raw_action: str = ''
     late_response_observed: bool = False
+    cost_uncertain: bool = False  # 调用发生过但成本不可知 → 待补记
+    attempt_id: str = ''  # 绑定该次模型尝试，供补记事件关联

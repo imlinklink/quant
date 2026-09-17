@@ -46,6 +46,9 @@ def daily_report(store: ShadowStore, manifest) -> dict:
             'equity': _to_dollars(latest.get('equity')),
             'full_cost_equity': _to_dollars(latest.get('full_cost_equity')),
             'model_cost': _to_dollars(state.model_cost),
+            # 成本不可知时全成本净值只是上界，不能宣称已完整扣费
+            'cost_status': state.cost_status,
+            'model_cost_uncertain_count': state.model_cost_uncertain_count,
             'drawdown': drawdown,
             'valuation_status': state.valuation_status,
             'invariant_violations': state.invariants(),
@@ -128,7 +131,19 @@ def paired_performance(store: ShadowStore, manifest, calendar=None) -> dict:
         'L_PASS': _count(l_scope, 'PASS'),
         'R_model_cost': _to_dollars(r_series[-1].get('model_cost', 0)),
         'L_model_cost': _to_dollars(l_series[-1].get('model_cost', 0)),
+        # 成本口径：PROVISIONAL 时收益/MDD 都是「同一已执行交易路径下、待扣非负费用后的
+        # 净值上界」，不是策略真实表现的上界 —— 注意区分，不要泛称。
+        'R_cost_status': r_series[-1].get('cost_status', 'OK'),
+        'L_cost_status': l_series[-1].get('cost_status', 'OK'),
+        'L_model_cost_uncertain_count': l_series[-1].get('model_cost_uncertain_count', 0),
+        'full_cost_is_upper_bound': (l_series[-1].get('cost_status') == 'PROVISIONAL' or
+                                     r_series[-1].get('cost_status') == 'PROVISIONAL'),
     }
+
+
+def _pct(value) -> str:
+    """None 安全格式化：paired_performance 在无公共 session 时走早退分支，缺键。"""
+    return 'n/a' if value is None else f'{value:.2%}'
 
 
 def render_markdown(report: dict, paired: dict) -> str:
@@ -139,8 +154,14 @@ def render_markdown(report: dict, paired: dict) -> str:
             continue
         lines.append(f"## {scope}")
         lines.append(f"- session={acct['session']} 净值={acct['equity']:.2f} "
-                     f"全成本净值={acct['full_cost_equity']:.2f} 回撤={acct['drawdown']:.2%}")
-        lines.append(f"- model_cost={acct['model_cost']} 估值={acct['valuation_status']} "
+                     f"全成本净值={acct['full_cost_equity']:.2f} "
+                     f"回撤={_pct(acct['drawdown'])}")
+        cost_note = ''
+        if acct.get('cost_status') == 'PROVISIONAL':
+            cost_note = ('（暂定：扣除已知成本；同一已执行交易路径下、待扣非负费用后的净值上界）')
+        lines.append(f"- model_cost={acct['model_cost']} 成本口径={acct.get('cost_status', 'OK')}"
+                     f" 未结清={acct.get('model_cost_uncertain_count', 0)}{cost_note}")
+        lines.append(f"- 估值={acct['valuation_status']} "
                      f"异常={acct['invariant_violations'] or '无'}")
         pos_str = ', '.join(f"{sid}×{p['shares']}" for sid, p in acct['positions'].items()) or '空'
         lines.append(f"- 持仓 {len(acct['positions'])}: {pos_str}")
@@ -153,7 +174,12 @@ def render_markdown(report: dict, paired: dict) -> str:
     lines.append('')
     lines.append('## 配对绩效')
     lines.append(f"- 共同 session={paired.get('common_sessions')}")
-    lines.append(f"- L−R 全成本收益差={paired.get('L_minus_R_return'):.2%}")
-    lines.append(f"- R MDD={paired.get('R_max_drawdown'):.2%} L MDD={paired.get('L_max_drawdown'):.2%}")
-    lines.append(f"- VETO={paired.get('L_VETO')} ABSTAIN={paired.get('L_ABSTAIN')} PASS={paired.get('L_PASS')}")
+    lines.append(f"- L−R 全成本收益差={_pct(paired.get('L_minus_R_return'))}")
+    lines.append(f"- R MDD={_pct(paired.get('R_max_drawdown'))} "
+                 f"L MDD={_pct(paired.get('L_max_drawdown'))}")
+    lines.append(f"- VETO={paired.get('L_VETO')} ABSTAIN={paired.get('L_ABSTAIN')} "
+                 f"PASS={paired.get('L_PASS')}")
+    if paired.get('full_cost_is_upper_bound'):
+        lines.append('- 成本口径 PROVISIONAL：上列收益/MDD 为「同一已执行交易路径下、'
+                     '待扣非负费用后的净值上界」，不是策略真实表现的上界')
     return '\n'.join(lines)

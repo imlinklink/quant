@@ -4,7 +4,8 @@ import unittest
 from pathlib import Path
 
 from scripts.portfolio_shadow.paper_engine import new_account_state, step
-from scripts.portfolio_shadow.report import daily_report, paired_performance
+from scripts.portfolio_shadow.report import (daily_report, paired_performance,
+                                              render_markdown)
 from scripts.portfolio_shadow.schema import Manifest, Opportunity, to_micro
 from scripts.portfolio_shadow.store import ShadowStore
 
@@ -102,3 +103,54 @@ class DrawdownTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class CostStatusReportTests(unittest.TestCase):
+    """成本不可知时报告必须标 PROVISIONAL，收益/MDD 只能表述为净值上界。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.store = ShadowStore(Path(self.tmp) / 'ledger.sqlite3', 'exp1')
+        self.m = manifest().freeze('2026-01-02')
+        self.store.save_experiment(self.m)
+        bars = {'SEC-A': {'open': to_micro(100), 'high': to_micro(101),
+                          'low': to_micro(99), 'close': to_micro(100.5)}}
+        for scope in self.m.account_scopes:
+            res = step(new_account_state(scope, self.m.initial_cash), session='2026-01-05',
+                       bars=bars, corporate_actions=[], intents=[opp('SEC-A', '2026-01-05')],
+                       manifest=self.m, model_cost_uncertain=('a1',))
+            self.store.save_state(scope, res.state, res.nav, res.events)
+
+    def test_daily_report_marks_cost_provisional(self):
+        acct = daily_report(self.store, self.m)['accounts']['SHADOW:exp1:L']
+        self.assertEqual(acct['cost_status'], 'PROVISIONAL')
+        self.assertEqual(acct['model_cost_uncertain_count'], 1)
+
+    def test_paired_performance_flags_upper_bound(self):
+        paired = paired_performance(self.store, self.m)
+        self.assertEqual(paired['L_cost_status'], 'PROVISIONAL')
+        self.assertTrue(paired['full_cost_is_upper_bound'])
+
+    def test_render_marks_provisional_with_bound_wording(self):
+        text = render_markdown(daily_report(self.store, self.m),
+                               paired_performance(self.store, self.m))
+        self.assertIn('暂定', text)
+        self.assertIn('待扣非负费用后的净值上界', text)
+
+    def test_render_tolerates_no_common_sessions(self):
+        """paired_performance 无公共 session 时走早退分支，缺 L_minus_R_return 等键。"""
+        tmp = tempfile.mkdtemp()
+        store = ShadowStore(Path(tmp) / 'ledger.sqlite3', 'exp2')
+        m = manifest(experiment_id='exp2',
+                     account_scopes=('SHADOW:exp2:R', 'SHADOW:exp2:L')).freeze('2026-01-02')
+        store.save_experiment(m)
+        # 只有 R 有状态 → 无公共 session
+        bars = {'SEC-A': {'open': to_micro(100), 'high': to_micro(101),
+                          'low': to_micro(99), 'close': to_micro(100.5)}}
+        res = step(new_account_state('SHADOW:exp2:R', m.initial_cash), session='2026-01-05',
+                   bars=bars, corporate_actions=[], intents=[], manifest=m)
+        store.save_state('SHADOW:exp2:R', res.state, res.nav, res.events)
+        paired = paired_performance(store, m)
+        self.assertEqual(paired['common_sessions'], 0)
+        text = render_markdown(daily_report(store, m), paired)  # 不得抛 TypeError
+        self.assertIn('L−R 全成本收益差=n/a', text)

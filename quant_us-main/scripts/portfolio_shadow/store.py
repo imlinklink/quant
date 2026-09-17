@@ -14,6 +14,8 @@ from pathlib import Path
 from scripts.live_trading.decision_ledger.event_store import (
     canonical, digest, insert_event, make_event, migrate)
 
+from .schema import SHADOW_TERMINALS
+
 SHADOW_SCHEMA_VERSION = 1
 
 _SHADOW_DDL = '''
@@ -117,10 +119,50 @@ class ShadowStore:
         oid = opp.opportunity_id()
         body = json.dumps(_asdict(opp), ensure_ascii=False, sort_keys=True)
         with self.transaction() as con:
+            row = con.execute('SELECT terminal FROM shadow_opportunities WHERE experiment_id=? '
+                              'AND opportunity_id=?', (self.experiment_id, oid)).fetchone()
+            if row and row[0] != opp.terminal and opp.terminal == 'READY':
+                # 已落终态（VETOED/MISSED_EXECUTION/...）；重跑重新生成的 READY 不得覆盖
+                return
             con.execute('INSERT OR REPLACE INTO shadow_opportunities VALUES (?,?,?,?,?,?,?)',
                         (self.experiment_id, oid, opp.security_id, opp.signal_session,
                          opp.rank, opp.terminal, body))
             _insert_event(con, self.experiment_scope, 'shadow:opportunity', oid, _asdict(opp))
+
+    def set_opportunity_terminal(self, opportunity_id: str, terminal: str,
+                                 session: str, note: str = '') -> None:
+        """机会终态转移（共享漏斗级：READY → EXECUTED / MISSED_EXECUTION）。
+
+        不能走 `put_opportunity`：它按 oid 键事件，改 terminal 会变成「同 event_id 异
+        payload」而整事务回滚。这里按 (oid, terminal) 键，同一次转移重放幂等。
+
+        注意投影表 `shadow_opportunities` 是实验级（无 scope 列），所以这里不区分 R/L；
+        每账户的 VETO / 引擎 miss 记在 `shadow_applications` 与 step 事件里。
+        """
+        if terminal not in SHADOW_TERMINALS:
+            raise ValueError(f'UNKNOWN_TERMINAL:{terminal}')
+        with self.transaction() as con:
+            con.execute('UPDATE shadow_opportunities SET terminal=? WHERE experiment_id=? '
+                        'AND opportunity_id=?', (terminal, self.experiment_id, opportunity_id))
+            _insert_event(con, self.experiment_scope, 'shadow:opportunity_terminal',
+                          (opportunity_id, terminal),
+                          {'experiment_id': self.experiment_id,
+                           'opportunity_id': opportunity_id, 'terminal': terminal,
+                           'session': session, 'note': note})
+
+    def opportunity_terminals(self) -> dict:
+        """{opportunity_id: terminal}（实验级共享漏斗终态）。"""
+        with self.transaction(immediate=False) as con:
+            rows = con.execute(
+                'SELECT body FROM decision_events WHERE account_scope LIKE ?',
+                (f'SHADOW:{self.experiment_id}%',)).fetchall()
+            out = {}
+            for (body,) in rows:
+                ev = json.loads(body)
+                if ev.get('event_type') == 'shadow:opportunity_terminal':
+                    p = ev['payload']
+                    out[p['opportunity_id']] = p['terminal']
+            return out
 
     def opportunities(self) -> list[dict]:
         with self.transaction(immediate=False) as con:
@@ -172,7 +214,7 @@ class ShadowStore:
                 raise ValueError(f'SEQUENCE_GAP:{scope}:seq={seq}!=latest+1={latest + 1}')
             for i, e in enumerate(events or []):
                 if e['type'] in ('fill', 'split', 'dividend_record', 'dividend_pay', 'settle',
-                                 'nav', 'model_cost', 'hold'):
+                                 'nav', 'model_cost', 'model_cost_settlement', 'hold', 'missed'):
                     payload = {**e, '_sequence': seq, '_index': i}
                     _insert_event(con, scope, 'shadow:step', (seq, i), payload)
             con.execute('INSERT OR REPLACE INTO shadow_account_state VALUES (?,?,?,?,?)',
@@ -255,6 +297,7 @@ def state_from_dict(d: dict):
                         unsettled_cash=d['unsettled_cash'],
                         dividend_receivable=d['dividend_receivable'], positions=positions,
                         fees=d['fees'], model_cost=d['model_cost'],
+                        model_cost_unsettled=tuple(d.get('model_cost_unsettled', ())),
                         initial_equity=d['initial_equity'], high_water=d['high_water'],
                         last_session=d['last_session'], valuation_status=d['valuation_status'],
                         risk_state=d.get('risk_state', 'NORMAL'),

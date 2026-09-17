@@ -35,12 +35,16 @@ class StoreReplayTests(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         self.path = Path(self.tmp) / 'ledger.sqlite3'
 
-    def _run_and_save(self, store, scope, session):
+    def _run_and_save(self, store, scope, session, bars=None, **kw):
         m = manifest()
-        bars = {'SEC-A': {'open': to_micro(100), 'high': to_micro(101),
-                          'low': to_micro(99), 'close': to_micro(100.5)}}
-        res = step(new_account_state(scope, m.initial_cash), session=session, bars=bars,
-                   corporate_actions=[], intents=[opp('SEC-A', session)], manifest=m)
+        if bars is None:
+            bars = {'SEC-A': {'open': to_micro(100), 'high': to_micro(101),
+                              'low': to_micro(99), 'close': to_micro(100.5)}}
+        row = store.latest_state(scope)
+        state = state_from_dict(row[1]) if row else new_account_state(scope, m.initial_cash)
+        res = step(state, session=session, bars=bars,
+                   corporate_actions=[], intents=kw.pop('intents', [opp('SEC-A', session)]),
+                   manifest=m, **kw)
         store.save_state(scope, res.state, res.nav, res.events)
         return res
 
@@ -76,6 +80,33 @@ class StoreReplayTests(unittest.TestCase):
         opps = store.opportunities()
         self.assertEqual(len(opps), 1)
         self.assertEqual(opps[0]['security_id'], 'SEC-A')
+
+    def test_missed_events_reach_the_ledger(self):
+        """missed 事件此前被 save_state 白名单丢弃，只在内存断言里存在过。"""
+        store = ShadowStore(self.path, 'exp1')
+        store.save_experiment(manifest())
+        scope = 'SHADOW:exp1:R'
+        # SEC-B 无行情 → DATA_BLOCKED，产出 missed 事件
+        self._run_and_save(store, scope, '2026-01-05', bars={},
+                           intents=[opp('SEC-B', '2026-01-05')])
+        missed = [e for e in store.events(scope) if e['type'] == 'missed']
+        self.assertEqual(len(missed), 1)
+        self.assertEqual(missed[0]['reason'], 'DATA_BLOCKED')
+
+    def test_uncertain_cost_and_settlement_roundtrip_through_store(self):
+        store = ShadowStore(self.path, 'exp1')
+        store.save_experiment(manifest())
+        scope = 'SHADOW:exp1:L'
+        self._run_and_save(store, scope, '2026-01-05', model_cost_uncertain=('a1',))
+        r2 = self._run_and_save(store, scope, '2026-01-06', model_cost_settlements={'a1': 500})
+
+        events = store.events(scope)
+        self.assertTrue(any(e['type'] == 'model_cost' and e.get('uncertain') for e in events))
+        self.assertTrue(any(e['type'] == 'model_cost_settlement' for e in events))
+        state = replay(scope, manifest().initial_cash, events)
+        self.assertEqual(state.state_hash(), r2.state.state_hash())
+        self.assertEqual(state.model_cost, 500)
+        self.assertEqual(state.cost_status, 'OK')
 
 
 if __name__ == '__main__':

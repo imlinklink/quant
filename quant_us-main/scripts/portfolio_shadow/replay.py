@@ -16,6 +16,15 @@ def apply_event(state: AccountState, event: dict) -> AccountState:
         s.unsettled_cash -= event['amount_micro']
     elif t == 'model_cost':
         s.model_cost += event['amount_micro']
+        if event.get('uncertain'):
+            aid = event['attempt_id']
+            if aid not in s.model_cost_unsettled:
+                s.model_cost_unsettled = tuple(sorted((*s.model_cost_unsettled, aid)))
+    elif t == 'model_cost_settlement':
+        aid = event['attempt_id']
+        if aid in s.model_cost_unsettled:
+            s.model_cost_unsettled = tuple(x for x in s.model_cost_unsettled if x != aid)
+            s.model_cost += event['amount_micro']
     elif t == 'hold':
         sid = event['security_id']
         s.positions[sid] = replace(s.positions[sid], holding_sessions=event['holding_sessions'])
@@ -69,11 +78,11 @@ def apply_event(state: AccountState, event: dict) -> AccountState:
 
 
 def replay(scope: str, initial_cash: int, events: list[dict]) -> AccountState:
-    """按事件顺序重放，返回重建状态（不含 holding_sessions，state_hash 已排除它）。"""
+    """按事件顺序重放，返回重建状态（与落库状态的 state_hash 对比）。"""
     state = new_account_state(scope, initial_cash)
     for event in events:
         if event.get('type') in ('settle', 'dividend_pay', 'dividend_record', 'split', 'fill',
-                                 'model_cost', 'hold'):
+                                 'model_cost', 'model_cost_settlement', 'hold'):
             state = apply_event(state, event)
         elif event.get('type') == 'nav':
             kwargs = {'sequence': state.sequence + 1, 'last_session': event['session'],

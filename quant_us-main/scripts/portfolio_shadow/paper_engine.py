@@ -53,7 +53,8 @@ def _fee(gross_micro: int, fee_bp: int) -> int:
 
 
 def step(state: AccountState, *, session: str, bars: dict, corporate_actions: list,
-         intents: list, manifest, fee_bp: int = 10, model_cost: int = 0) -> StepResult:
+         intents: list, manifest, fee_bp: int = 10, model_cost: int = 0,
+         model_cost_uncertain: tuple = (), model_cost_settlements: dict | None = None) -> StepResult:
     """执行一个交易日。bars={sid:{open,high,low,close}}（微美元/股）；公司行动用微美元。"""
     if state.last_session is not None and session < state.last_session:
         # 乱序：旧 session 必须拒绝，不得倒退推进账户
@@ -65,9 +66,25 @@ def step(state: AccountState, *, session: str, bars: dict, corporate_actions: li
     s.sequence = state.sequence + 1
     s.last_session = session
     events: list = []
+    # 成本记账：已知成本直接累计；不可知成本金额记 0 但必须挂账待补记，
+    # 不能被真值判断跳过（0 表示「本次尚未计入费用」，不是「实际免费」）。
     if model_cost:
         s.model_cost += model_cost
         events.append({'type': 'model_cost', 'session': session, 'amount_micro': model_cost})
+    for attempt_id in model_cost_uncertain:
+        if attempt_id in s.model_cost_unsettled:
+            continue  # 已挂账，幂等
+        s.model_cost_unsettled = tuple(sorted((*s.model_cost_unsettled, attempt_id)))
+        events.append({'type': 'model_cost', 'session': session, 'amount_micro': 0,
+                       'uncertain': True, 'attempt_id': attempt_id})
+    # 补记：关联原 attempt_id 补扣成本并结清；重复补记幂等，不改动原事件
+    for attempt_id, amount in sorted((model_cost_settlements or {}).items()):
+        if attempt_id not in s.model_cost_unsettled:
+            continue  # 未知或已结清 → no-op，绝不重复扣减
+        s.model_cost_unsettled = tuple(x for x in s.model_cost_unsettled if x != attempt_id)
+        s.model_cost += amount
+        events.append({'type': 'model_cost_settlement', 'session': session,
+                       'attempt_id': attempt_id, 'amount_micro': amount})
     horizon = int(manifest.execution_policy.get('horizon', 60))
     base_bp = int(manifest.risk_policy['single_position_risk_bp'])
     risk_bp = budget_bp(s.risk_state, base_bp)
@@ -236,6 +253,8 @@ def step(state: AccountState, *, session: str, bars: dict, corporate_actions: li
     nav = {'session': session, 'equity': equity, 'cash_available': s.cash_available,
            'gross_exposure': mv, 'fees': s.fees, 'valuation_status': s.valuation_status,
            'model_cost': s.model_cost, 'full_cost_equity': full_cost_equity,
+           'model_cost_uncertain_count': s.model_cost_uncertain_count,
+           'cost_status': s.cost_status,
            'risk_state': s.risk_state, 'recovery_streak': s.recovery_streak,
            'revision': 1}
     events.append({'type': 'nav', **nav})
