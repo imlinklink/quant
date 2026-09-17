@@ -9,9 +9,24 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from scripts.evidence.evidence_store import market_close, market_time
 from scripts.live_trading.decision_ledger.event_store import digest, stable_id
 
 QUALITY_LEVELS = ('BLOCK', 'LLM_INSUFFICIENT', 'OK')
+
+# 进入模型 prompt 的正文长度上限。正文同时进 prompt 与落库，必须封顶；
+# `content_hash` 始终对**全文**计算，截断与否另用 summary_truncated 标记，保证可审计。
+MAX_SUMMARY_CHARS = 2000
+
+
+def entry_decision_cutoff(session) -> str:
+    """决策信息截止时刻 = 信号日 t 收盘。晚于此刻可见的信息不得进入证据包。"""
+    return market_close(session).isoformat()
+
+
+def entry_response_deadline(exec_session) -> str:
+    """模型回复截止 = 执行日开盘前 10 分钟（最晚仍可执行的时刻，非决策时刻）。"""
+    return market_time(exec_session, 9, 20).isoformat()
 
 
 def _parse_iso(v):
@@ -28,7 +43,7 @@ def _parse_iso(v):
 def _norm_events(events, as_of_dt):
     """校验事件双时间，返回 (可用事件列表, 被丢弃计数)。"""
     usable, dropped = [], 0
-    for i, e in enumerate(events or []):
+    for e in events or []:
         published = _parse_iso(e.get('published_at'))
         observed = _parse_iso(e.get('observed_at'))
         if published is None or observed is None:
@@ -37,15 +52,63 @@ def _norm_events(events, as_of_dt):
         if published > as_of_dt or observed > as_of_dt:
             dropped += 1
             continue
+        summary = str(e.get('summary') or '')
+        content_hash = e.get('content_hash') or digest(summary)
         usable.append({
-            'evidence_id': e.get('evidence_id') or stable_id('evidence', i, e.get('source')),
+            # 内容寻址：不用列表下标，否则前面少一条事件会让后面所有 id 错位，
+            # 已记录的 VETO 再也无法复验。
+            'evidence_id': e.get('evidence_id') or stable_id(
+                'evidence', e.get('source', ''), content_hash,
+                e.get('published_at'), e.get('observed_at')),
             'source': e.get('source', 'internal:rule'),
             'kind': e.get('kind', 'rule'),
             'published_at': e.get('published_at'),
             'observed_at': e.get('observed_at'),
-            'content_hash': e.get('content_hash', digest(e.get('summary', ''))),
+            # 可读正文：模型必须能看到证据内容才能判断，只留哈希等于让它瞎猜
+            'title': str(e.get('title') or '')[:MAX_SUMMARY_CHARS],
+            'summary': summary[:MAX_SUMMARY_CHARS],
+            'summary_truncated': len(summary) > MAX_SUMMARY_CHARS,
+            'content_hash': content_hash,
         })
     return usable, dropped
+
+
+def events_from_records(records, security_id, decision_cutoff, *, policy=None, resolver=None,
+                        source_version: str = '', price_version: str = ''):
+    """用 `evidence_store.build_packet` 的语义产出 entry-veto 事件（返回 (events, exclusions)）。
+
+    可见性（双时间过滤 + 具名拒绝原因）、簇去重与修订处理全部复用 `evidence_store`，
+    不另起一套更弱的实现。正文按 `evidence_id` 从原始记录回联并按 MAX_SUMMARY_CHARS 封顶；
+    `build_packet` 本身只保 `content_hash`，不落明文。
+
+    records 须是 `evidence_store.normalize_evidence` 规整过的帧（含 evidence_id）。
+    """
+    from scripts.evidence.evidence_store import build_packet
+    packet, exclusions = build_packet(records, security_id, decision_cutoff,
+                                      source_version=source_version,
+                                      price_version=price_version,
+                                      policy=policy, resolver=resolver)
+    by_id = {str(r.get('evidence_id')): r for r in records.to_dict('records')}
+    events = []
+    for e in packet['events']:
+        raw = by_id.get(str(e['evidence_id']), {})
+        summary = ''
+        for column in ('summary', 'summary_text', 'text', 'headline'):
+            if raw.get(column):
+                summary = str(raw[column])
+                break
+        events.append({
+            'evidence_id': e['evidence_id'],
+            'source': e.get('source_id'),
+            'kind': e.get('kind'),
+            'published_at': e.get('published_at'),
+            'observed_at': e.get('observed_at'),
+            'title': str(raw.get('title') or '')[:MAX_SUMMARY_CHARS],
+            'summary': summary[:MAX_SUMMARY_CHARS],
+            'summary_truncated': len(summary) > MAX_SUMMARY_CHARS,
+            'content_hash': e.get('content_hash'),
+        })
+    return events, exclusions
 
 
 def build_entry_packet(opportunity, quote, events, fundamentals, as_of) -> dict:

@@ -1,9 +1,10 @@
 """真实 LLM 模型 RealModel 测试（mock advisor，无真实 API 调用）。"""
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import Mock
 
 from scripts.portfolio_shadow.evidence import build_entry_packet
-from scripts.portfolio_shadow.llm_overlay import RealModel, resolve_overlay
+from scripts.portfolio_shadow.llm_overlay import RealModel, decide_overlay, resolve_overlay
 from scripts.portfolio_shadow.schema import Opportunity, to_micro
 
 
@@ -20,7 +21,15 @@ QUOTE = {'price': to_micro(100.0), 'observed_at': '2026-01-04T21:00:00+00:00'}
 EVENT = {'summary': '公司下调指引', 'source': 'filing', 'kind': 'filing',
          'published_at': '2026-01-04T12:00:00+00:00',
          'observed_at': '2026-01-04T13:00:00+00:00', 'content_hash': 'abc'}
-DEADLINE = '2026-01-05T13:20:00+00:00'
+DEADLINE = '2026-01-05T13:20:00+00:00'  # 决策截止（次日开盘前）
+NOW = datetime(2026, 1, 5, 13, 0, tzinfo=timezone.utc)  # 截止前 20 分钟：够新，且不算晚到
+
+
+def advisor_with(output, metadata):
+    advisor = Mock()
+    advisor.chat.return_value = output
+    advisor.last_metadata = metadata
+    return advisor
 
 
 class RealModelTests(unittest.TestCase):
@@ -29,18 +38,17 @@ class RealModelTests(unittest.TestCase):
 
     def test_call_maps_ok_and_cost(self):
         p = self._packet()
-        advisor = Mock()
-        advisor.last_metadata = {'cost_usd': 0.00123}
-        advisor.chat.return_value = {'schema_version': 'entry-veto-v1',
-                                     'opportunity_id': p['opportunity_id'],
-                                     'packet_id': p['packet_id'], 'action': 'VETO',
-                                     'reason_code': 'MATERIAL_COMPANY_EVENT_RISK',
-                                     'evidence_ids': [p['events'][0]['evidence_id']],
-                                     'explanation': ''}
-        mr = RealModel(advisor).call(p, DEADLINE)
+        advisor = advisor_with(
+            {'schema_version': 'entry-veto-v1', 'opportunity_id': p['opportunity_id'],
+             'packet_id': p['packet_id'], 'action': 'VETO',
+             'reason_code': 'MATERIAL_COMPANY_EVENT_RISK',
+             'evidence_ids': [p['events'][0]['evidence_id']], 'explanation': ''},
+            {'cost_usd': 0.00123})
+        mr = RealModel(advisor, now=lambda: NOW).call(p, DEADLINE)
         self.assertEqual(mr['status'], 'OK')
         self.assertEqual(mr['output']['action'], 'VETO')
         self.assertEqual(mr['cost_micro'], 1230)
+        self.assertFalse(mr['cost_uncertain'])
         # prompt 含 entry_veto + opportunity_id
         prompt = advisor.chat.call_args[0][0]
         self.assertIn('entry_veto', prompt)
@@ -48,10 +56,8 @@ class RealModelTests(unittest.TestCase):
 
     def test_chat_none_maps_to_failed(self):
         p = self._packet()
-        advisor = Mock()
-        advisor.last_metadata = {}
-        advisor.chat.return_value = None
-        mr = RealModel(advisor).call(p, DEADLINE)
+        advisor = advisor_with(None, {'cost_usd': 0.0})
+        mr = RealModel(advisor, now=lambda: NOW).call(p, DEADLINE)
         self.assertEqual(mr['status'], 'FAILED')
         self.assertIsNone(mr['output'])
         self.assertEqual(mr['cost_micro'], 0)
@@ -59,6 +65,87 @@ class RealModelTests(unittest.TestCase):
         d = resolve_overlay(p, mr, DEADLINE)
         self.assertEqual(d.action, 'ABSTAIN')
         self.assertEqual(d.reason_code, 'FAILED')
+
+    def test_historical_as_of_never_calls_the_model(self):
+        p = self._packet()
+        advisor = advisor_with({'action': 'VETO'}, {'cost_usd': 0.01})
+        # now 远晚于 deadline（历史回放）：不得发起实时调用
+        mr = RealModel(advisor, now=lambda: NOW).call(p, '2026-01-01T13:20:00+00:00')
+        self.assertEqual(mr['status'], 'HISTORICAL_AS_OF')
+        self.assertEqual(mr['cost_micro'], 0)
+        advisor.chat.assert_not_called()
+        d = resolve_overlay(p, mr, DEADLINE)
+        self.assertEqual(d.action, 'ABSTAIN')
+        self.assertEqual(d.reason_code, 'HISTORICAL_AS_OF')
+        self.assertEqual(d.model_cost, 0)
+
+    def test_unknown_cost_is_not_recorded_as_free(self):
+        p = self._packet()
+        # advisor 在 cost_uncertain 时故意返回 cost_usd=None（见 mutifactor/llm/advisor.py）
+        advisor = advisor_with(None, {'cost_usd': None, 'cost_uncertain': True})
+        mr = RealModel(advisor, now=lambda: NOW).call(p, DEADLINE)
+        self.assertIsNone(mr['cost_micro'])
+        self.assertTrue(mr['cost_uncertain'])
+        d = resolve_overlay(p, mr, DEADLINE)
+        # 金额 0 但标记待补记 —— 不是「免费调用」
+        self.assertEqual(d.model_cost, 0)
+        self.assertTrue(d.cost_uncertain)
+        self.assertEqual(d.reason_code, 'FAILED')
+
+    def test_decide_overlay_binds_attempt_id(self):
+        p = self._packet()
+        advisor = advisor_with(
+            {'schema_version': 'entry-veto-v1', 'opportunity_id': p['opportunity_id'],
+             'packet_id': p['packet_id'], 'action': 'PASS', 'reason_code': '',
+             'evidence_ids': [], 'explanation': ''}, {'cost_usd': 0.002})
+        d = decide_overlay(p, RealModel(advisor, now=lambda: NOW), DEADLINE,
+                           attempt_id='llm_attempt_abc')
+        self.assertEqual(d.action, 'PASS')
+        self.assertEqual(d.attempt_id, 'llm_attempt_abc')
+        self.assertEqual(d.model_cost, 2000)
+        self.assertFalse(d.cost_uncertain)
+
+
+class QualityGateTests(unittest.TestCase):
+    """数据质量门：BLOCK / LLM_INSUFFICIENT 直接 ABSTAIN，不调模型、不产生费用。"""
+
+    def test_no_evidence_abstains_without_calling_model(self):
+        p = build_entry_packet(opp(), QUOTE, [], {}, DEADLINE)
+        self.assertEqual(p['data_quality']['level'], 'LLM_INSUFFICIENT')
+        model = Mock()
+        d = decide_overlay(p, model, DEADLINE, attempt_id='a1')
+        self.assertEqual(d.action, 'ABSTAIN')
+        self.assertEqual(d.reason_code, 'INSUFFICIENT_EVIDENCE')
+        self.assertEqual(d.model_cost, 0)
+        self.assertFalse(d.cost_uncertain)
+        model.call.assert_not_called()
+
+    def test_blocked_quote_blocks_without_calling_model(self):
+        p = build_entry_packet(opp(), {'price': None, 'observed_at': QUOTE['observed_at']},
+                               [EVENT], {}, DEADLINE)
+        self.assertEqual(p['data_quality']['level'], 'BLOCK')
+        model = Mock()
+        d = decide_overlay(p, model, DEADLINE, attempt_id='a1')
+        # BLOCK 不是 ABSTAIN：ABSTAIN＝采用父策略（照常成交），BLOCK＝剔除
+        self.assertEqual(d.action, 'BLOCK')
+        self.assertEqual(d.reason_code, 'DATA_BLOCKED_QUOTE')
+        self.assertEqual(d.model_cost, 0)
+        model.call.assert_not_called()
+
+    def test_veto_with_evidence_is_reachable(self):
+        """真实路径的可达性：证据正文进包 → VETO 能引用 → 校验通过（回归 #3）。"""
+        p = build_entry_packet(opp(), QUOTE, [EVENT], {}, DEADLINE)
+        self.assertEqual(p['data_quality']['level'], 'OK')
+        self.assertEqual(p['events'][0]['summary'], '公司下调指引')  # 正文未被丢弃
+        advisor = advisor_with(
+            {'schema_version': 'entry-veto-v1', 'opportunity_id': p['opportunity_id'],
+             'packet_id': p['packet_id'], 'action': 'VETO',
+             'reason_code': 'MATERIAL_THESIS_CONTRADICTION',
+             'evidence_ids': [p['events'][0]['evidence_id']], 'explanation': ''},
+            {'cost_usd': 0.0})
+        d = decide_overlay(p, RealModel(advisor, now=lambda: NOW), DEADLINE, attempt_id='a1')
+        self.assertEqual(d.action, 'VETO')
+        self.assertEqual(d.reason_code, 'MATERIAL_THESIS_CONTRADICTION')
 
 
 if __name__ == '__main__':
