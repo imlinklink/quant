@@ -14,7 +14,7 @@ from pathlib import Path
 from scripts.live_trading.decision_ledger.event_store import (
     canonical, digest, insert_event, make_event, migrate)
 
-from .schema import SHADOW_TERMINALS
+from .schema import ATTEMPT_TERMINAL, SHADOW_TERMINALS
 
 # 账本结构版本。任何会改变**已落库事件 payload 或 state_hash 输入**的改动都必须递增，
 # 否则旧账本会在续写时报「同 event_id 异内容」或用新哈希误判状态冲突。
@@ -31,7 +31,10 @@ from .schema import SHADOW_TERMINALS
 #   6 → 证据源接入：事件字段做缺失值清洗（NaN → None，原先会变成字面量 'nan'）、
 #       data_quality.fetch_status 取值扩展（OK/EMPTY/FAILED/NOT_CONFIGURED）、
 #       evidence.meta 增窗口/容量截断统计。
-SHADOW_SCHEMA_VERSION = 6
+#   7 → 编排落地（设计 §7）：Application 的 applied 拆成 decision_frozen/execution_applied，
+#       新增 shadow:execution_applied 事件；shadow_job_runs 状态机改为
+#       PREPARED/CALL_STARTED/COMPLETED/FAILED/TIMED_OUT/UNKNOWN。
+SHADOW_SCHEMA_VERSION = 7
 
 _SHADOW_DDL = '''
 CREATE TABLE IF NOT EXISTS shadow_schema(version INTEGER PRIMARY KEY);
@@ -55,7 +58,7 @@ CREATE TABLE IF NOT EXISTS shadow_applications (
     opportunity_id TEXT NOT NULL,
     action TEXT NOT NULL,
     decision_id TEXT NOT NULL,
-    applied INTEGER NOT NULL,
+    execution_applied INTEGER NOT NULL,
     body TEXT NOT NULL,
     PRIMARY KEY (experiment_id, scope, opportunity_id));
 CREATE TABLE IF NOT EXISTS shadow_account_state (
@@ -216,7 +219,7 @@ class ShadowStore:
         with self.transaction() as con:
             con.execute('INSERT OR REPLACE INTO shadow_applications VALUES (?,?,?,?,?,?,?)',
                         (self.experiment_id, app.scope, app.opportunity_id, app.action,
-                         app.decision_id, 1 if app.applied else 0, body))
+                         app.decision_id, 1 if app.execution_applied else 0, body))
             _insert_event(con, app.scope, 'shadow:application', app.opportunity_id, _asdict(app),
                           decision_id=app.decision_id)
 
@@ -226,6 +229,28 @@ class ShadowStore:
                               'AND scope=? AND opportunity_id=?',
                               (self.experiment_id, scope, opportunity_id)).fetchone()
             return json.loads(row[0]) if row else None
+
+    def mark_execution_applied(self, scope: str, opportunity_id: str, session: str) -> None:
+        """标记该账户动作已在执行日结算（设计 §7：动作冻结 ≠ 成交）。
+
+        单独键事件（(opportunity_id, session)）—— 不能走 `put_application`：那是按
+        opportunity_id 键的，改 execution_applied 会变成「同 event_id 异 payload」。
+        """
+        with self.transaction() as con:
+            row = con.execute('SELECT body FROM shadow_applications WHERE experiment_id=? '
+                              'AND scope=? AND opportunity_id=?',
+                              (self.experiment_id, scope, opportunity_id)).fetchone()
+            if row is None:
+                raise ValueError(f'APPLICATION_MISSING:{scope}:{opportunity_id}')
+            body = {**json.loads(row[0]), 'execution_applied': True}
+            # 列与 body 必须一起更新：`application()` 读的是 body，只改列会让两者不一致
+            con.execute('UPDATE shadow_applications SET execution_applied=1, body=? '
+                        'WHERE experiment_id=? AND scope=? AND opportunity_id=?',
+                        (json.dumps(body, ensure_ascii=False, sort_keys=True),
+                         self.experiment_id, scope, opportunity_id))
+            _insert_event(con, scope, 'shadow:execution_applied', (opportunity_id, session),
+                          {'experiment_id': self.experiment_id, 'scope': scope,
+                           'opportunity_id': opportunity_id, 'session': session})
 
     # ---- frozen evidence packets ----
     def put_packet(self, opportunity_id: str, packet: dict) -> None:
@@ -254,16 +279,21 @@ class ShadowStore:
                               (self.experiment_id, opportunity_id)).fetchone()
             return json.loads(row[0]) if row else None
 
-    # ---- model attempts（崩溃窗口防护）----
+    # ---- model attempts（设计 §7：原子领取 + 尝试状态机 + 租约）----
+    def prepare_job_run(self, job_key: str, attempt: int = 1,
+                        body: dict | None = None) -> None:
+        """登记一次尝试，但**不覆盖已有记录**。
+
+        用 `INSERT OR IGNORE` 而非 REPLACE：覆盖会把 CALL_STARTED 连同它的租约一起抹掉，
+        于是重启后的接管者会以为自己是首次调用 —— 崩溃证据被"登记"这一步自己销毁了。
+        """
+        with self.transaction() as con:
+            con.execute('INSERT OR IGNORE INTO shadow_job_runs VALUES (?,?,?,?,?,?)',
+                        (self.experiment_id, job_key, attempt, 'PREPARED', None,
+                         json.dumps(body or {}, ensure_ascii=False, sort_keys=True)))
+
     def put_job_run(self, job_key: str, attempt: int, status: str,
                     body: dict | None = None, fencing_token: str | None = None) -> None:
-        """记录一次模型尝试的状态（PENDING → COMPLETED / ABANDONED）。
-
-        调用发生在模型 API 上、结果落在本表之前存在崩溃窗口。先写 PENDING，重启后
-        看到 PENDING 就知道「钱可能已经花了且金额不可知」，据此不重试付费，改为把
-        该次尝试挂账待补记。COMPLETED 的 body 携带完整决定，使「调用完成但决定未落库」
-        的窗口也能恢复而不必重调。
-        """
         with self.transaction() as con:
             con.execute('INSERT OR REPLACE INTO shadow_job_runs VALUES (?,?,?,?,?,?)',
                         (self.experiment_id, job_key, attempt, status, fencing_token,
@@ -271,10 +301,54 @@ class ShadowStore:
 
     def job_run(self, job_key: str, attempt: int = 1) -> dict | None:
         with self.transaction(immediate=False) as con:
-            row = con.execute('SELECT status, body FROM shadow_job_runs WHERE experiment_id=? '
-                              'AND job_key=? AND attempt=?',
+            row = con.execute('SELECT status, fencing_token, body FROM shadow_job_runs '
+                              'WHERE experiment_id=? AND job_key=? AND attempt=?',
                               (self.experiment_id, job_key, attempt)).fetchone()
-            return {'status': row[0], **(json.loads(row[1]) or {})} if row else None
+            if not row:
+                return None
+            return {'status': row[0], 'fencing_token': row[1],
+                    **(json.loads(row[2]) or {})}
+
+    def claim_attempt(self, job_key: str, *, lease_until: str, body: dict | None = None,
+                      attempt: int = 1) -> str:
+        """原子领取一次模型尝试（设计 §7）。整个检查+写入在同一事务内完成。
+
+        返回：
+        - `'claimed'`        ：首次领取（本机会从未调用过）→ 调用方可以发起网络请求；
+        - `'already_started'`：租约未过期，另一个 worker 正在调用 → 不得重复调用；
+        - `'abandoned'`      ：上一次领取的租约已过期且无结果（进程在发送后崩溃）→
+          **不盲目重发**，按设计 §7 判为 UNKNOWN 并以 ABSTAIN 冻结；
+        - `'finalized'`      ：已进入终态 → 直接读取结果，绝不再次调用。
+
+        `fencing_token` 存租约到期时刻。三种「已存在」情形必须分开返回：把过期租约也当成
+        `claimed` 会把崩溃后的重启变成一次静默重发。
+        """
+        with self.transaction() as con:            # BEGIN IMMEDIATE：写者串行化
+            row = con.execute('SELECT status, fencing_token FROM shadow_job_runs '
+                              'WHERE experiment_id=? AND job_key=? AND attempt=?',
+                              (self.experiment_id, job_key, attempt)).fetchone()
+            if row is None:
+                con.execute('INSERT OR REPLACE INTO shadow_job_runs VALUES (?,?,?,?,?,?)',
+                            (self.experiment_id, job_key, attempt, 'CALL_STARTED',
+                             lease_until,
+                             json.dumps(body or {}, ensure_ascii=False, sort_keys=True)))
+                return 'claimed'
+            status, lease = row
+            if status in ATTEMPT_TERMINAL or status == 'PREPARED':
+                if status == 'PREPARED':           # 已登记但从未领取
+                    con.execute('UPDATE shadow_job_runs SET status=?, fencing_token=?, body=? '
+                                'WHERE experiment_id=? AND job_key=? AND attempt=?',
+                                ('CALL_STARTED', lease_until,
+                                 json.dumps(body or {}, ensure_ascii=False, sort_keys=True),
+                                 self.experiment_id, job_key, attempt))
+                    return 'claimed'
+                return 'finalized'
+            if lease and str(lease) >= str(lease_until):
+                # 存储的租约 = 该次开始时刻 + 租期；新的 lease_until = now + 租期。
+                # `>= now + 租期` ⇔ `开始时刻 >= now` ⇔ 仍在飞行中。用 `>` 会让
+                # 「同一时刻的第二次领取」被误判为崩溃遗留。
+                return 'already_started'           # 租约仍有效：别的 worker 在调用
+            return 'abandoned'                     # 租约过期且无结果：崩溃遗留
 
     # ---- account state / nav ----
     def save_state(self, scope: str, state, nav: dict, events: list | None = None) -> None:

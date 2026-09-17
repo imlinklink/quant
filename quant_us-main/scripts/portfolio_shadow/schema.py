@@ -21,6 +21,12 @@ ACCOUNT_ACTIONS = ('RISK_REJECTED', 'VETOED', 'INTENT_CREATED', 'MISSED_EXECUTIO
 # 机会在影子账本里的全部可能状态（投影 terminal 列取值）
 SHADOW_TERMINALS = CANDIDATE_TERMINAL + ('VETOED', 'MISSED_EXECUTION', 'EXECUTED')
 
+# 模型尝试状态机（设计 §7）：PREPARED → CALL_STARTED → 终态。
+# UNKNOWN = 已领取但无回复（进程在发送后崩溃）；不盲目重发，截止时按 ABSTAIN 冻结。
+ATTEMPT_STATUSES = ('PREPARED', 'CALL_STARTED', 'COMPLETED', 'FAILED', 'TIMED_OUT',
+                    'UNKNOWN')
+ATTEMPT_TERMINAL = ('COMPLETED', 'FAILED', 'TIMED_OUT', 'UNKNOWN')
+
 # 证据等级。strict = 点对点可追溯（要求 observed_at + 来源已核实）；diagnostic = 只做
 # published_at 过滤。诊断级证据上的 VETO 与严格级上的不是同一个东西，故必须冻结进实验。
 EVIDENCE_MODES = ('strict', 'diagnostic')
@@ -281,14 +287,20 @@ class AccountState:
 
 @dataclass(frozen=True)
 class Application:
-    """每账户对某 opportunity 的最终动作（LLM 动作 PASS/VETO/ABSTAIN 或账户级动作）。"""
+    """每账户对某 opportunity 的最终动作（LLM 动作 PASS/VETO/ABSTAIN 或账户级动作）。
+
+    `decision_frozen` 与 `execution_applied` 必须分开（设计 §7）：动作在决策时点冻结，
+    成交要到执行日结算才发生。把两者合成一个布尔会让「已决策未成交」看起来像「已成交」，
+    崩溃恢复时也就分不清该跳过还是该补做。
+    """
     scope: str
     opportunity_id: str
-    action: str  # PASS/VETO/ABSTAIN 或 ACCOUNT_ACTIONS 之一
+    action: str  # PASS/VETO/ABSTAIN/BLOCK 或 ACCOUNT_ACTIONS 之一
     reason_code: str
     decision_id: str
     as_of: str
-    applied: bool = False
+    decision_frozen: bool = True
+    execution_applied: bool = False
     model_cost: int = 0
     raw_action: str = ''
     late_response_observed: bool = False

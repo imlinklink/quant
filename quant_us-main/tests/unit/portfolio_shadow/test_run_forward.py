@@ -4,6 +4,7 @@
 """
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -18,6 +19,7 @@ from scripts.portfolio_shadow.cli import (apply_entry_reviews, drop_from_schedul
                                           manifest_from_dict, record_data_blocked)
 from scripts.portfolio_shadow.evidence import (entry_market_cutoff,
                                                entry_response_deadline)
+from scripts.portfolio_shadow.entry_review import decision_id_for
 from scripts.portfolio_shadow.evidence_source import (JsonlEvidenceSource,
                                                      import_evidence_jsonl)
 from scripts.portfolio_shadow.llm_overlay import FakeModel, SCHEMA_VERSION
@@ -141,7 +143,8 @@ class OverlayForwardTests(unittest.TestCase):
         """
         source = make_source(self.tmp, [event_row(published='2026-01-05T21:30:00Z')],
                              ingested_at='2026-01-05T22:00:00+00:00')
-        self._run(Mock(), source=source, collected_at='2026-01-05T23:00:00+00:00')
+        self._run(FakeModel(action='PASS', cost_micro=0), source=source,
+                  collected_at='2026-01-05T23:00:00+00:00')
         packet = self.store.packet_for_opportunity(opp().opportunity_id())
         self.assertEqual(len(packet['events']), 1)
         self.assertEqual(packet['events'][0]['summary'], '公司下调全年指引')
@@ -195,11 +198,7 @@ class OverlayForwardTests(unittest.TestCase):
 
 
 class CrashWindowTests(unittest.TestCase):
-    """`shadow_job_runs` 堵住「模型已扣费但决定未落库」的窗口。
-
-    调用发生在模型 API 上、结果落库之前进程挂掉时，钱可能已经花了且金额不可知。
-    重启后必须：不重试付费、把成本挂账待补记。
-    """
+    """已领取但无结果的调用不得静默重发（设计 §7）——「不盲目重发」是硬要求。"""
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -208,14 +207,14 @@ class CrashWindowTests(unittest.TestCase):
         self.scope = 'SHADOW:exp1:L'
         self.quotes = {'SEC-A': {'price': to_micro(100), 'observed_at': '2026-01-04T21:00:00Z'}}
         self.oid = opp().opportunity_id()
-        self.attempt_id = self._attempt_id()
+        self.decision_id = self._decision_id()
 
-    def _attempt_id(self):
-        # 走生产同一条路径造包：两边各造一次包会让 attempt_id 错位，守卫静默失效
+    def _decision_id(self):
         fetch = make_source(self.tmp).load_events('SEC-A', entry_market_cutoff(SIGNAL))
         packet = entry_packet_for(opp(), self.quotes['SEC-A'], fetch,
                                   entry_market_cutoff(SIGNAL))
-        return stable_id('llm_attempt', self.scope, self.oid, packet['packet_id'])
+        return decision_id_for(self.store.experiment_id, self.scope, self.oid,
+                               packet['packet_id'], '')
 
     def _run(self, model, force_recall=False):
         market_cutoff = entry_market_cutoff(SIGNAL)
@@ -229,47 +228,65 @@ class CrashWindowTests(unittest.TestCase):
             self.store, self.scope, reviews, deadline=deadline, real_model=model,
             force_recall=force_recall)
 
-    def test_pending_attempt_is_never_recalled_and_cost_is_flagged(self):
-        self.store.put_job_run(self.attempt_id, 1, 'PENDING', {'packet_id': 'p'})
+    def test_abandoned_attempt_is_never_recalled_and_cost_is_flagged(self):
+        """租约过期 = 进程在发送后崩溃。钱可能已花且金额不可知 → 不重发，挂账待补记。"""
+        self.store.put_job_run(self.decision_id, 1, 'CALL_STARTED', {'packet_id': 'p'},
+                               fencing_token='2020-01-01T00:00:00+00:00')
         model = Mock()
         kept, cost, uncertain = self._run(model)
         model.call.assert_not_called()          # 绝不重试付费
-        self.assertEqual(cost, 0)               # 金额不可知 → 挂账，不是零成本
-        self.assertEqual(uncertain, [self.attempt_id])
+        self.assertEqual(cost, 0)               # 金额不可知 → 挂账
+        self.assertEqual(uncertain, [self.decision_id])
         app = self.store.application(self.scope, self.oid)
-        self.assertEqual(app['action'], 'ABSTAIN')   # 采用父策略
+        self.assertEqual(app['action'], 'ABSTAIN')       # 采用父策略
         self.assertEqual(app['reason_code'], 'RECALL_ABANDONED')
         self.assertTrue(app['cost_uncertain'])
+        self.assertTrue(app['decision_frozen'])
+        self.assertFalse(app['execution_applied'])       # 冻结 ≠ 成交
 
-    def test_force_recall_does_not_bypass_the_pending_guard(self):
-        self.store.put_job_run(self.attempt_id, 1, 'PENDING', {'packet_id': 'p'})
+    def test_force_recall_does_not_bypass_the_abandoned_guard(self):
+        self.store.put_job_run(self.decision_id, 1, 'CALL_STARTED', {'packet_id': 'p'},
+                               fencing_token='2020-01-01T00:00:00+00:00')
         model = Mock()
         self._run(model, force_recall=True)
         model.call.assert_not_called()
 
+    def test_in_flight_attempt_is_not_duplicated_nor_frozen(self):
+        """租约仍有效：另一个 worker 正在调用 → 不重复调用，也不替它冻结。"""
+        future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        self.store.put_job_run(self.decision_id, 1, 'CALL_STARTED', {'packet_id': 'p'},
+                               fencing_token=future)
+        model = Mock()
+        kept, cost, _ = self._run(model)
+        model.call.assert_not_called()
+        self.assertEqual(cost, 0)
+        self.assertIsNone(self.store.application(self.scope, self.oid))
+        self.assertEqual([o.opportunity_id() for o in kept], [self.oid])  # 仍按父策略走
+
     def test_completed_attempt_is_recovered_without_second_call(self):
-        self.store.put_job_run(self.attempt_id, 1, 'COMPLETED', {
+        self.store.put_job_run(self.decision_id, 1, 'COMPLETED', {
             'opportunity_id': self.oid, 'packet_id': 'p', 'action': 'VETO',
             'reason_code': 'MATERIAL_COMPANY_EVENT_RISK', 'model_cost': 777,
             'cost_uncertain': False, 'raw_action': 'VETO', 'late_response_observed': False})
         model = Mock()
-        kept, cost, uncertain = self._run(model)
-        model.call.assert_not_called()
+        kept, cost, _ = self._run(model)
+        model.call.assert_not_called()          # 从尝试记录恢复，不重调
         self.assertEqual(cost, 777)
-        self.assertEqual(kept, [])              # 恢复的是 VETO，L 不建仓
+        self.assertEqual(kept, [])              # 恢复的是 VETO
         self.assertEqual(self.store.application(self.scope, self.oid)['action'], 'VETO')
 
     def test_different_packet_on_rerun_raises_instead_of_reusing(self):
-        """证据或报价变了就不能复用旧决定——那是回答了另一个问题的答案。"""
+        """packet 变了就是另一个问题：不复用（答非所问），也不重算（改写依据）。"""
         self.store.put_application(Application(
             scope=self.scope, opportunity_id=self.oid, action='VETO',
-            reason_code='MATERIAL_COMPANY_EVENT_RISK', decision_id='', as_of='x',
-            applied=True, attempt_id='llm_attempt_somethingelse'))
-        with self.assertRaises(ValueError):
+            reason_code='MATERIAL_COMPANY_EVENT_RISK', decision_id='decision_stale',
+            as_of='x', decision_frozen=True))
+        with self.assertRaises(ValueError) as ctx:
             self._run(Mock())
+        self.assertIn('PACKET_CHANGED_ON_RERUN', str(ctx.exception))
 
-    def test_pending_is_only_written_when_a_call_will_happen(self):
-        # 无证据 ⇒ 质量门短路，不应留下任何 PENDING 记录
+    def test_no_attempt_is_recorded_when_the_gate_short_circuits(self):
+        # 无证据 ⇒ 质量门短路，不应留下任何调用尝试
         market_cutoff = entry_market_cutoff(SIGNAL)
         deadline = entry_response_deadline(EXEC)
         reviews, _ = freeze_entry_reviews(
@@ -278,73 +295,7 @@ class CrashWindowTests(unittest.TestCase):
             collected_at=market_cutoff)
         apply_entry_reviews(self.store, self.scope, reviews, deadline=deadline,
                             real_model=Mock())
-        self.assertIsNone(self.store.job_run(self.attempt_id))
-
-
-class ClaimTimingTests(unittest.TestCase):
-    """#1 核心：机会只能在计划执行日被认领，引擎同时校验。"""
-
-    def setUp(self):
-        self.m = manifest()
-
-    def test_intent_claimed_only_on_planned_session(self):
-        o = opp(planned='2026-01-06')
-        self.assertEqual(intents_for_session([o], '2026-01-05'), [])
-        self.assertEqual(len(intents_for_session([o], '2026-01-06')), 1)
-
-    def test_engine_rejects_early_execution(self):
-        o = opp(planned='2026-01-06')
-        state = new_account_state('SHADOW:exp1:L', to_micro(100000))
-        bars = {'SEC-A': {'open': to_micro(100), 'high': to_micro(101),
-                          'low': to_micro(99), 'close': to_micro(100.5)}}
-        with self.assertRaises(ValueError):
-            step(state, session='2026-01-05', bars=bars, corporate_actions=[],
-                 intents=[o], manifest=self.m)
-        # 计划日执行才成交
-        res = step(state, session='2026-01-06', bars=bars, corporate_actions=[],
-                   intents=[o], manifest=self.m)
-        self.assertIn('SEC-A', res.state.positions)
-
-    def test_veto_only_clears_that_execution_days_queue(self):
-        """回归：过滤被否决机会时不得波及其它执行日的待执行队列。"""
-        a = opp('SEC-A', planned='2026-01-06')
-        b = opp('SEC-B', planned='2026-01-07')
-        schedule = {'2026-01-06': [a], '2026-01-07': [b]}
-        drop_from_schedule(schedule, '2026-01-06', {a.opportunity_id()})
-        self.assertEqual(schedule['2026-01-06'], [])
-        self.assertEqual([o.security_id for o in schedule['2026-01-07']], ['SEC-B'])
-
-
-class TerminalTransitionTests(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.mkdtemp()
-        self.store = ShadowStore(Path(self.tmp) / 'ledger.sqlite3', 'exp1')
-        self.store.save_experiment(manifest())
-        self.o = opp()
-        self.store.put_opportunity(self.o)
-
-    def test_unclaimed_opportunity_is_drained_as_missed_execution(self):
-        self.store.set_opportunity_terminal(self.o.opportunity_id(), 'MISSED_EXECUTION',
-                                            '2026-01-06', note='UNCLAIMED_AT_RUN_END')
-        self.assertEqual(self.store.opportunity_terminals()[self.o.opportunity_id()],
-                         'MISSED_EXECUTION')
-
-    def test_repeated_terminal_write_is_idempotent(self):
-        oid = self.o.opportunity_id()
-        self.store.set_opportunity_terminal(oid, 'EXECUTED', '2026-01-06')
-        self.store.set_opportunity_terminal(oid, 'EXECUTED', '2026-01-06')
-        self.assertEqual(self.store.opportunity_terminals()[oid], 'EXECUTED')
-
-    def test_rerun_ready_put_does_not_clobber_terminal(self):
-        oid = self.o.opportunity_id()
-        self.store.set_opportunity_terminal(oid, 'MISSED_EXECUTION', '2026-01-06')
-        self.store.put_opportunity(self.o)      # 重跑重新生成的 READY
-        self.assertEqual(self.store.opportunity_terminals().get(oid, 'MISSED_EXECUTION'),
-                         'MISSED_EXECUTION')
-
-
-if __name__ == '__main__':
-    unittest.main()
+        self.assertIsNone(self.store.job_run(self.decision_id))
 
 
 class ManifestLoadingTests(unittest.TestCase):

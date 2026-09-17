@@ -66,7 +66,7 @@ class ReportTests(unittest.TestCase):
         self.store.put_application(Application(
             scope='SHADOW:exp1:L', opportunity_id=opp('SEC-A', '2026-01-05').opportunity_id(),
             action='VETO', reason_code='MATERIAL_COMPANY_EVENT_RISK', decision_id='',
-            as_of='2026-01-05T13:20:00+00:00', applied=True, model_cost=100))
+            as_of='2026-01-05T13:20:00+00:00', execution_applied=True, model_cost=100))
         self.store.put_opportunity(opp('SEC-A', '2026-01-05'))
 
     def test_daily_report_counts_scope_differences(self):
