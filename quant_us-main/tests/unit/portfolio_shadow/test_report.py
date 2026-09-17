@@ -4,10 +4,11 @@ import unittest
 from pathlib import Path
 
 from scripts.portfolio_shadow.paper_engine import new_account_state, step
-from scripts.portfolio_shadow.report import (daily_report, paired_performance,
-                                              render_markdown)
-from scripts.portfolio_shadow.schema import (LADDER_KEYS, Manifest, Opportunity,
-                                              to_micro)
+from scripts.portfolio_shadow.report import (daily_report, decision_trace, entry_metrics,
+                                              paired_performance, render_markdown,
+                                              render_trace)
+from scripts.portfolio_shadow.schema import (LADDER_KEYS, Application, Manifest,
+                                              Opportunity, to_micro)
 from scripts.portfolio_shadow.store import SHADOW_SCHEMA_VERSION, ShadowStore
 
 
@@ -272,3 +273,136 @@ class EvidenceModeFreezeTests(unittest.TestCase):
         store.save_experiment(m)
         text = render_markdown(daily_report(store, m), paired_performance(store, m))
         self.assertIn('证据等级=diagnostic', text)
+
+
+class EntryMetricsTests(unittest.TestCase):
+    """设计 §8 三项指标：分母为 0 时返回 None，不把「没有对象可评」混成「评了全放行」。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.store = ShadowStore(Path(self.tmp) / 'ledger.sqlite3', 'exp1')
+        self.m = manifest().freeze('2026-01-02')
+        self.store.save_experiment(self.m)
+        self.l = 'SHADOW:exp1:L'
+
+    def _opportunity(self, sid='SEC-A'):
+        o = opp(sid, '2026-01-06')
+        self.store.put_opportunity(o)
+        return o.opportunity_id()
+
+    def _packet(self, oid, mode='strict'):
+        self.store.put_packet(oid, {'packet_id': f'pkt_{oid}', 'as_of': '2026-01-05T23:00:00Z',
+                                    'rule_plan': {'entry_rule': 'b3'},
+                                    'market_context': {'price': 100},
+                                    'data_quality': {'level': 'OK'}, 'events': [],
+                                    'evidence': {'evidence_mode': mode}})
+
+    def _application(self, oid, action, *, decision_id='d1', model_id=None,
+                     status='COMPLETED', gated=False, execution_applied=False):
+        self.store.put_application(Application(
+            scope=self.l, opportunity_id=oid, action=action, reason_code='R', decision_id=decision_id,
+            as_of='2026-01-05T23:00:00Z', decision_frozen=True,
+            execution_applied=execution_applied))
+        if decision_id:
+            self.store.put_job_run(decision_id, 1, status, {'model_id': model_id,
+                                                            'gated': gated})
+    def test_no_opportunities_is_not_a_failure(self):
+        m = entry_metrics(self.store, self.m)
+        self.assertIsNone(m['real_review_coverage'])
+        self.assertIsNone(m['plan_change_rate'])
+        self.assertEqual(m['eligible_for_review'], 0)
+
+    def test_fixture_review_does_not_count_as_real_coverage(self):
+        """夹具评审绝不能冒充「已接入真实模型」。"""
+        oid = self._opportunity()
+        self._packet(oid)
+        self._application(oid, 'PASS', model_id='fixture')
+        m = entry_metrics(self.store, self.m)
+        self.assertEqual(m['eligible_for_review'], 1)
+        self.assertEqual(m['real_model_reviews'], 0)
+        self.assertEqual(m['real_review_coverage'], 0.0)
+        self.assertTrue(m['note'])
+
+    def test_real_model_attempt_counts_as_coverage(self):
+        oid = self._opportunity()
+        self._packet(oid)
+        self._application(oid, 'PASS', model_id='deepseek-chat')
+        m = entry_metrics(self.store, self.m)
+        self.assertEqual(m['real_model_reviews'], 1)
+        self.assertEqual(m['real_review_coverage'], 1.0)
+        self.assertEqual(m['note'], '')
+
+    def test_gated_call_is_not_a_real_review(self):
+        """质量门短路根本没发起调用，不能算评审。"""
+        oid = self._opportunity()
+        self._packet(oid)
+        self._application(oid, 'ABSTAIN', model_id='deepseek-chat', gated=True)
+        self.assertEqual(entry_metrics(self.store, self.m)['real_model_reviews'], 0)
+
+    def test_plan_change_rate_counts_veto(self):
+        for sid, action in (('SEC-A', 'VETO'), ('SEC-B', 'PASS')):
+            oid = self._opportunity(sid)
+            self._packet(oid)
+            self._application(oid, action, decision_id=f'd{sid}', model_id='deepseek-chat')
+        m = entry_metrics(self.store, self.m)
+        self.assertEqual(m['plan_change_count'], 1)
+        self.assertEqual(m['plan_change_rate'], 0.5)
+
+    def test_trackable_completion_counts_executed_and_missed_terminal(self):
+        oid_a = self._opportunity('SEC-A')
+        self._packet(oid_a)
+        self._application(oid_a, 'PASS', decision_id='da', model_id='deepseek-chat',
+                          execution_applied=True)
+        oid_b = self._opportunity('SEC-B')
+        self._packet(oid_b)
+        self._application(oid_b, 'PASS', decision_id='db', model_id='deepseek-chat')
+        self.store.set_opportunity_terminal(oid_b, 'MISSED_EXECUTION', '2026-01-06')
+        m = entry_metrics(self.store, self.m)
+        self.assertEqual(m['approved_applications'], 2)
+        self.assertEqual(m['execution_completed'], 1)
+        self.assertEqual(m['execution_failed_terminal'], 1)
+        self.assertEqual(m['trackable_completion_rate'], 1.0)
+
+
+class DecisionTraceTests(unittest.TestCase):
+    """设计 §8：每次决策都要能展示规则原计划、证据、模型动作、最终动作、执行结果、费用。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.store = ShadowStore(Path(self.tmp) / 'ledger.sqlite3', 'exp1')
+        self.m = manifest().freeze('2026-01-02')
+        self.store.save_experiment(self.m)
+
+    def test_trace_covers_the_whole_chain(self):
+        o = opp('SEC-A', '2026-01-06')
+        oid = o.opportunity_id()
+        self.store.put_opportunity(o)
+        self.store.put_packet(oid, {
+            'packet_id': 'pkt1', 'as_of': '2026-01-05T23:00:00Z',
+            'rule_plan': {'entry_rule': 'b3', 'parent_version': '1',
+                          'rule_reason_codes': ['pullback']},
+            'market_context': {'price': 100, 'price_unit': 'micro_usd'},
+            'data_quality': {'level': 'OK'},
+            'events': [{'summary': '公司下调指引', 'source_url': 'https://example.com/8k'}],
+            'evidence': {'evidence_mode': 'strict'}})
+        self.store.put_application(Application(
+            scope='SHADOW:exp1:L', opportunity_id=oid, action='ABSTAIN',
+            reason_code='INVALID_OUTPUT', decision_id='d1', as_of='2026-01-05T23:00:00Z',
+            decision_frozen=True, raw_action='VETO', model_cost=77, cost_uncertain=True))
+        self.store.put_job_run('d1', 1, 'COMPLETED', {
+            'model_id': 'deepseek-chat', 'validation_errors': ['REASON_NOT_ALLOWED'],
+            'action': 'ABSTAIN'})
+        trace = decision_trace(self.store, oid, self.m.account_scopes)
+        self.assertEqual(trace['rule_plan']['rule_reason_codes'], ['pullback'])
+        self.assertEqual(trace['evidence_mode'], 'strict')
+        self.assertEqual(trace['events'][0]['source_url'], 'https://example.com/8k')
+        acct = trace['accounts']['SHADOW:exp1:L']
+        self.assertEqual(acct['raw_action'], 'VETO')
+        self.assertEqual(acct['degraded_from'], 'VETO')     # 被校验降级
+        self.assertEqual(acct['attempt_status'], 'COMPLETED')
+        self.assertEqual(acct['attempt_errors'], ['REASON_NOT_ALLOWED'])
+        self.assertTrue(acct['cost_uncertain'])
+        text = render_trace(trace)
+        self.assertIn('规则原计划', text)
+        self.assertIn('VETO', text)
+        self.assertIn('成本未知，待补记', text)

@@ -213,6 +213,20 @@ class ShadowStore:
                 'SELECT body FROM shadow_opportunities WHERE experiment_id=? '
                 'ORDER BY session, rank, opportunity_id', (self.experiment_id,))]
 
+    def opportunity_rows(self) -> list[tuple[str, dict]]:
+        """(opportunity_id, body)。机会体里不含**计算出来**的 id，故单独给出。"""
+        with self.transaction(immediate=False) as con:
+            return [(r[0], json.loads(r[1])) for r in con.execute(
+                'SELECT opportunity_id, body FROM shadow_opportunities WHERE experiment_id=? '
+                'ORDER BY session, rank, opportunity_id', (self.experiment_id,))]
+
+    def opportunity(self, opportunity_id: str) -> dict | None:
+        with self.transaction(immediate=False) as con:
+            row = con.execute('SELECT body FROM shadow_opportunities WHERE experiment_id=? '
+                              'AND opportunity_id=?',
+                              (self.experiment_id, opportunity_id)).fetchone()
+            return json.loads(row[0]) if row else None
+
     # ---- applications ----
     def put_application(self, app) -> None:
         body = json.dumps(_asdict(app), ensure_ascii=False, sort_keys=True)

@@ -198,17 +198,26 @@ def cmd_replay(args):
 
 
 def cmd_report(args):
-    from .report import daily_report, paired_performance, render_markdown
+    from .report import (daily_report, decision_trace, paired_performance, render_markdown,
+                         render_trace)
     m = manifest_from_dict(json.loads(Path(args.manifest).read_text()))
     store = ShadowStore(Path(args.output) / m.experiment_id / 'ledger.sqlite3', m.experiment_id)
     report = daily_report(store, m)
     paired = paired_performance(store, m)
     out_dir = Path(args.output) / m.experiment_id
     out_dir.mkdir(parents=True, exist_ok=True)
+    traces = {oid: decision_trace(store, oid, m.account_scopes)
+              for oid in (getattr(args, 'trace', None) or [])}
+    payload = {'daily_report': report, 'paired_performance': paired,
+               'entry_metrics': report.get('entry_metrics', {})}
+    if traces:
+        payload['decision_traces'] = traces
     (out_dir / 'summary.json').write_text(
-        json.dumps({'daily_report': report, 'paired_performance': paired},
-                   ensure_ascii=False, indent=2) + '\n')
+        json.dumps(payload, ensure_ascii=False, indent=2) + '\n')
     print(render_markdown(report, paired))
+    for trace in traces.values():
+        print()
+        print(render_trace(trace))
     return 0
 
 
@@ -723,6 +732,9 @@ def main(argv=None):
             p.add_argument('--model', choices=('real', 'fixture'), default='fixture')
         if name == 'settle-session':
             p.add_argument('--session', required=True)
+        if name == 'report':
+            p.add_argument('--trace', action='append',
+                           help='要展开的 opportunity_id（可重复）')
         if name == 'run-forward':
             p.add_argument('--to-session', required=True)
             p.add_argument('--evidence',
