@@ -14,7 +14,8 @@ from scripts.live_trading.decision_ledger.event_store import stable_id
 from .candidate_adapter import adapt_schedule, intents_for_session
 from .evidence import (build_entry_packet, entry_decision_cutoff, entry_response_deadline,
                        events_from_records)
-from .llm_overlay import FakeModel, RealModel, decide_overlay
+from .llm_overlay import (FakeModel, OverlayDecision, RealModel, decide_overlay,
+                          model_call_expected)
 from .paper_engine import new_account_state, step
 from .replay import replay
 from .schema import Application, Manifest, to_micro
@@ -91,26 +92,28 @@ def cmd_run_session(args):
             from mutifactor.llm import LLMAdvisor
             cfg_path = Path(__file__).resolve().parents[2] / 'config.yaml'
             llm_cfg = (yaml.safe_load(cfg_path.read_text()) or {}).get('llm', {})
-            real_model = RealModel(LLMAdvisor(llm_cfg))
-        # L 侧 overlay：entry_veto 时构建 packet → decide → VETO/BLOCK 剔除 + 计成本
+            real_model = RealModel(LLMAdvisor(llm_cfg),
+                                   knowledge_cutoff=m.llm_policy.get('knowledge_cutoff'))
+        # L 侧 overlay：entry_veto 时构建 packet → 复用或决定 → VETO/BLOCK 剔除 + 计成本
         if overlay == 'entry_veto' and scope.endswith(':L'):
             kept = []
             for item, opp in zip(sess.get('opportunities', []), opportunities):
-                packet = build_entry_packet(opp, item.get('quote') or {}, item.get('events', []),
-                                            item.get('fundamentals', {}), deadline)
-                if real_model is not None:
-                    model = real_model
-                else:
-                    cfg = item.get('model') or {}
-                    model = FakeModel(action=cfg.get('action', 'PASS'),
-                                      reason_code=cfg.get('reason_code', ''),
-                                      evidence_ids=cfg.get('evidence_ids', []),
-                                      status=cfg.get('status', 'OK'),
-                                      completed_at=cfg.get('completed_at', deadline),
-                                      cost_micro=cfg.get('cost_micro', 0))
+                packet = build_entry_packet(
+                    opp, item.get('quote') or {}, item.get('events', []),
+                    item.get('fundamentals', {}), deadline,
+                    model_knowledge_cutoff=m.llm_policy.get('knowledge_cutoff'))
                 attempt_id = stable_id('llm_attempt', scope, opp.opportunity_id(),
                                        packet['packet_id'])
-                d = decide_overlay(packet, model, deadline, attempt_id=attempt_id)
+                cfg = item.get('model') or {}
+                d = _reuse_or_decide(
+                    store, scope, opp, packet, attempt_id, deadline,
+                    lambda cfg=cfg: real_model if real_model is not None else FakeModel(
+                        action=cfg.get('action', 'PASS'), reason_code=cfg.get('reason_code', ''),
+                        evidence_ids=cfg.get('evidence_ids', []),
+                        status=cfg.get('status', 'OK'),
+                        completed_at=cfg.get('completed_at', deadline),
+                        cost_micro=cfg.get('cost_micro', 0)),
+                    force_recall=False)
                 cost += d.model_cost
                 if d.cost_uncertain and d.attempt_id:
                     uncertain.append(d.attempt_id)
@@ -197,7 +200,8 @@ def _make_real_model(m):
     import yaml
     from mutifactor.llm import LLMAdvisor
     cfg_path = Path(__file__).resolve().parents[2] / 'config.yaml'
-    return RealModel(LLMAdvisor((yaml.safe_load(cfg_path.read_text()) or {}).get('llm', {})))
+    return RealModel(LLMAdvisor((yaml.safe_load(cfg_path.read_text()) or {}).get('llm', {})),
+                     knowledge_cutoff=m.llm_policy.get('knowledge_cutoff'))
 
 
 def drop_from_schedule(schedule: dict, exec_session: str, dropped: set) -> None:
@@ -211,49 +215,85 @@ def drop_from_schedule(schedule: dict, exec_session: str, dropped: set) -> None:
                               if o.opportunity_id() not in dropped]
 
 
+def _assert_same_packet(recorded_attempt_id, attempt_id, opp) -> None:
+    """重跑时证据包变了就不能复用旧决定 —— 那是回答了另一个问题的答案。"""
+    if recorded_attempt_id and recorded_attempt_id != attempt_id:
+        raise ValueError(f'PACKET_CHANGED_ON_RERUN:{opp.opportunity_id()}')
+
+
+def _reuse_or_decide(store, scope, opp, packet, attempt_id, deadline, model_factory,
+                     force_recall):
+    """返回该机会的 overlay 决定：优先复用已落库记录，否则按需发起调用。"""
+    job = store.job_run(attempt_id)
+    if job is not None and job['status'] in ('PENDING', 'ABANDONED'):
+        # 上一次调用已发起、结果未知。钱可能已经花了且金额不可知 —— 绝不重试付费。
+        # 这一步不受 force_recall 影响：绕过它等于用一次重复调用掩盖成本缺口。
+        return OverlayDecision('ABSTAIN', 'RECALL_ABANDONED', 0, '', False, True, attempt_id)
+    if not force_recall:
+        recorded = store.application(scope, opp.opportunity_id())
+        if recorded:
+            _assert_same_packet(recorded.get('attempt_id'), attempt_id, opp)
+            return OverlayDecision(recorded['action'], recorded['reason_code'],
+                                   recorded.get('model_cost', 0), recorded.get('raw_action', ''),
+                                   recorded.get('late_response_observed', False),
+                                   recorded.get('cost_uncertain', False),
+                                   recorded.get('attempt_id', ''))
+        if job is not None and job['status'] == 'COMPLETED':
+            # 调用完成但 Application 未落库（崩溃窗口的另一半）：按记录恢复，不重调
+            return OverlayDecision(job['action'], job['reason_code'], job.get('model_cost', 0),
+                                   job.get('raw_action', ''),
+                                   job.get('late_response_observed', False),
+                                   job.get('cost_uncertain', False), attempt_id)
+    if not model_call_expected(packet):
+        return decide_overlay(packet, None, deadline, attempt_id=attempt_id)
+    store.put_job_run(attempt_id, 1, 'PENDING',
+                      {'opportunity_id': opp.opportunity_id(),
+                       'packet_id': packet['packet_id']})
+    d = decide_overlay(packet, model_factory(), deadline, attempt_id=attempt_id)
+    store.put_job_run(attempt_id, 1, 'COMPLETED', {
+        'opportunity_id': opp.opportunity_id(), 'packet_id': packet['packet_id'],
+        'action': d.action, 'reason_code': d.reason_code, 'model_cost': d.model_cost,
+        'cost_uncertain': d.cost_uncertain, 'raw_action': d.raw_action,
+        'late_response_observed': d.late_response_observed})
+    return d
+
+
 def run_entry_overlay(store, scope, opportunities, *, session, exec_session, quotes, records,
-                      real_model, force_recall=False):
+                      real_model, knowledge_cutoff=None, force_recall=False):
     """对一个 session 新生成的机会跑 L 侧 overlay。
 
     返回 (kept, known_cost_micro, uncertain_attempt_ids)。
 
     时序：决策在信号日 t 收盘后做出（证据 as_of = t 收盘，回复截止 = 次日开盘前 10 分钟）。
     BLOCK → 不调模型、不计成本，直接剔除（关键数据不可用/未来，成交本身就是前视）。
-    已记录过的决定直接复用，重跑不重复付费。
+
+    重复运行安全：已落库的决定原样复用；`shadow_job_runs` 记录堵住「模型已扣费但决定
+    未落库」的崩溃窗口（见 `_reuse_or_decide`）。
     """
     kept, known_cost, uncertain = [], 0, []
     cutoff = entry_decision_cutoff(session)
     deadline = entry_response_deadline(exec_session)
     for opp in opportunities:
-        recorded = store.application(scope, opp.opportunity_id())
-        if recorded and not force_recall:
-            # 复用已落库决定（原样，不重算）：重跑不得重复调用付费模型
-            action, reason = recorded['action'], recorded['reason_code']
-            cost = recorded.get('model_cost', 0)
-            is_uncertain = recorded.get('cost_uncertain', False)
-            attempt_id = recorded.get('attempt_id', '')
-            raw, late = recorded.get('raw_action', ''), recorded.get('late_response_observed', False)
-        else:
-            events = [] if records is None else events_from_records(
-                records, opp.security_id, cutoff)[0]
-            packet = build_entry_packet(opp, quotes.get(opp.security_id, {}), events, {}, cutoff)
-            attempt_id = stable_id('llm_attempt', scope, opp.opportunity_id(),
-                                   packet['packet_id'])
-            model = real_model if real_model is not None else FakeModel(action='PASS',
-                                                                       cost_micro=0)
-            d = decide_overlay(packet, model, deadline, attempt_id=attempt_id)
-            action, reason = d.action, d.reason_code
-            cost, is_uncertain, attempt_id = d.model_cost, d.cost_uncertain, d.attempt_id
-            raw, late = d.raw_action, d.late_response_observed
-            store.put_application(Application(
-                scope=scope, opportunity_id=opp.opportunity_id(), action=action,
-                reason_code=reason, decision_id='', as_of=cutoff, applied=True,
-                model_cost=cost, raw_action=raw, late_response_observed=late,
-                cost_uncertain=is_uncertain, attempt_id=attempt_id))
-        known_cost += cost
-        if is_uncertain and attempt_id:
-            uncertain.append(attempt_id)
-        if action not in ('VETO', 'BLOCK'):
+        events = [] if records is None else events_from_records(
+            records, opp.security_id, cutoff)[0]
+        packet = build_entry_packet(opp, quotes.get(opp.security_id, {}), events, {}, cutoff,
+                                    model_knowledge_cutoff=knowledge_cutoff)
+        attempt_id = stable_id('llm_attempt', scope, opp.opportunity_id(), packet['packet_id'])
+        d = _reuse_or_decide(
+            store, scope, opp, packet, attempt_id, deadline,
+            lambda: real_model if real_model is not None else FakeModel(action='PASS',
+                                                                       cost_micro=0),
+            force_recall)
+        store.put_application(Application(
+            scope=scope, opportunity_id=opp.opportunity_id(), action=d.action,
+            reason_code=d.reason_code, decision_id='', as_of=cutoff, applied=True,
+            model_cost=d.model_cost, raw_action=d.raw_action,
+            late_response_observed=d.late_response_observed,
+            cost_uncertain=d.cost_uncertain, attempt_id=d.attempt_id))
+        known_cost += d.model_cost
+        if d.cost_uncertain and d.attempt_id:
+            uncertain.append(d.attempt_id)
+        if d.action not in ('VETO', 'BLOCK'):
             kept.append(opp)
     return kept, known_cost, uncertain
 
@@ -333,7 +373,8 @@ def cmd_run_forward(args):
                     quotes={o.security_id: {'price': close_micro[(session, o.security_id)],
                                             'observed_at': entry_decision_cutoff(session)}
                             for o in fresh},
-                    records=records, real_model=real_model)
+                    records=records, real_model=real_model,
+                    knowledge_cutoff=m.llm_policy.get('knowledge_cutoff'))
                 # 只从**本批**机会的队列里摘掉被否决/被 BLOCK 的，别动其它执行日的队列
                 dropped = ({o.opportunity_id() for o in fresh}
                            - {o.opportunity_id() for o in kept})

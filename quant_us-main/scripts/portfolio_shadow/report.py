@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from .store import ShadowStore, state_from_dict
+from .store import SHADOW_SCHEMA_VERSION, ShadowStore, state_from_dict
 
 
 def _to_dollars(micro) -> float | None:
@@ -27,7 +27,9 @@ def _max_drawdown(navs: list[dict], key: str = 'equity', initial: int | None = N
 
 
 def daily_report(store: ShadowStore, manifest) -> dict:
-    report = {'experiment_id': manifest.experiment_id, 'status': manifest.status, 'accounts': {}}
+    report = {'experiment_id': manifest.experiment_id, 'status': manifest.status, 'accounts': {},
+              # 披露模型训练数据截止：它决定了哪些 session 上的 LLM 决策是可信的
+              'llm_policy': dict(manifest.llm_policy), 'schema_version': SHADOW_SCHEMA_VERSION}
     for scope in manifest.account_scopes:
         row = store.latest_state(scope)
         if row is None:
@@ -147,7 +149,11 @@ def _pct(value) -> str:
 
 
 def render_markdown(report: dict, paired: dict) -> str:
-    lines = [f"# 实验 {report['experiment_id']} 日报（status {report['status']}）", '']
+    llm = report.get('llm_policy') or {}
+    lines = [f"# 实验 {report['experiment_id']} 日报（status {report['status']}）",
+             f"- 账本 schema=v{report.get('schema_version')} overlay={llm.get('overlay')} "
+             f"模型知识截止={llm.get('knowledge_cutoff') or '未声明（非真实模型路径）'}",
+             '']
     for scope, acct in report['accounts'].items():
         if acct.get('status') == 'no_state':
             lines.append(f'- {scope}: 无状态')

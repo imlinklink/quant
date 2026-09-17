@@ -7,7 +7,7 @@ from scripts.portfolio_shadow.paper_engine import new_account_state, step
 from scripts.portfolio_shadow.report import (daily_report, paired_performance,
                                               render_markdown)
 from scripts.portfolio_shadow.schema import Manifest, Opportunity, to_micro
-from scripts.portfolio_shadow.store import ShadowStore
+from scripts.portfolio_shadow.store import SHADOW_SCHEMA_VERSION, ShadowStore
 
 
 def manifest(**overrides):
@@ -154,3 +154,42 @@ class CostStatusReportTests(unittest.TestCase):
         self.assertEqual(paired['common_sessions'], 0)
         text = render_markdown(daily_report(store, m), paired)  # 不得抛 TypeError
         self.assertIn('L−R 全成本收益差=n/a', text)
+
+
+class KnowledgeCutoffFreezeTests(unittest.TestCase):
+    """真实模型必须显式声明训练数据截止，否则不许 freeze —— 这是对 L−R 的一阶威胁。"""
+
+    def test_real_model_requires_declared_knowledge_cutoff(self):
+        m = manifest(llm_policy={'overlay': 'entry_veto', 'use_real_model': True})
+        errors = m.validate()
+        self.assertTrue(any('knowledge_cutoff' in e for e in errors), errors)
+        with self.assertRaises(ValueError):
+            m.freeze('2026-01-02')
+
+    def test_explicit_unknown_is_accepted_so_it_stays_visible(self):
+        m = manifest(llm_policy={'overlay': 'entry_veto', 'use_real_model': True,
+                                 'knowledge_cutoff': 'unknown'})
+        self.assertEqual(m.validate(), [])
+
+    def test_fixture_model_needs_no_cutoff(self):
+        self.assertEqual(manifest().validate(), [])   # overlay=fixed_pass
+
+
+class ReportDisclosureTests(unittest.TestCase):
+    """报告必须披露账本版本与模型知识截止 —— 否则读报告的人无法判断数字在什么前提下成立。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.store = ShadowStore(Path(self.tmp) / 'ledger.sqlite3', 'exp1')
+        self.m = manifest(llm_policy={'overlay': 'entry_veto', 'use_real_model': True,
+                                      'knowledge_cutoff': '2025-06-01T00:00:00+00:00'}
+                          ).freeze('2026-01-02')
+        self.store.save_experiment(self.m)
+
+    def test_report_discloses_schema_version_and_cutoff(self):
+        rep = daily_report(self.store, self.m)
+        self.assertEqual(rep['schema_version'], SHADOW_SCHEMA_VERSION)
+        self.assertEqual(rep['llm_policy']['knowledge_cutoff'], '2025-06-01T00:00:00+00:00')
+        text = render_markdown(rep, paired_performance(self.store, self.m))
+        self.assertIn('模型知识截止=2025-06-01T00:00:00+00:00', text)
+        self.assertIn(f'schema=v{SHADOW_SCHEMA_VERSION}', text)

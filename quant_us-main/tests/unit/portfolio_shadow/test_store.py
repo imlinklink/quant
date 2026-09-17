@@ -1,4 +1,5 @@
 """store + replay 集成：save_state / latest_state / events 重放一致 + scope 隔离。"""
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -6,7 +7,8 @@ from pathlib import Path
 from scripts.portfolio_shadow.paper_engine import new_account_state, step
 from scripts.portfolio_shadow.replay import replay
 from scripts.portfolio_shadow.schema import Manifest, Opportunity, to_micro
-from scripts.portfolio_shadow.store import ShadowStore, state_from_dict
+from scripts.portfolio_shadow.store import (SHADOW_SCHEMA_VERSION, LedgerSchemaMismatch,
+                                           ShadowStore, state_from_dict)
 
 
 def manifest():
@@ -111,3 +113,46 @@ class StoreReplayTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class LedgerSchemaVersionTests(unittest.TestCase):
+    """影子账本是追加式证据：跨代码版本续写必须显式拒绝，不能让实验中途悄悄换尺子。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.path = Path(self.tmp) / 'ledger.sqlite3'
+
+    def _stored_version(self):
+        con = sqlite3.connect(str(self.path))
+        try:
+            return con.execute('SELECT MAX(version) FROM shadow_schema').fetchone()[0]
+        finally:
+            con.close()
+
+    def test_fresh_ledger_records_the_code_version(self):
+        store = ShadowStore(self.path, 'exp1')
+        store.save_experiment(manifest())
+        self.assertEqual(self._stored_version(), SHADOW_SCHEMA_VERSION)
+
+    def test_ledger_from_another_version_is_refused_on_write(self):
+        store = ShadowStore(self.path, 'exp1')
+        store.save_experiment(manifest())
+        con = sqlite3.connect(str(self.path))
+        con.execute('DELETE FROM shadow_schema')
+        con.execute('INSERT INTO shadow_schema(version) VALUES (?)', (99,))
+        con.commit()
+        con.close()
+        with self.assertRaises(LedgerSchemaMismatch):
+            store.save_experiment(manifest())
+
+    def test_ledger_from_another_version_is_refused_on_read_too(self):
+        store = ShadowStore(self.path, 'exp1')
+        store.save_experiment(manifest())
+        con = sqlite3.connect(str(self.path))
+        con.execute('DELETE FROM shadow_schema')
+        con.execute('INSERT INTO shadow_schema(version) VALUES (?)', (1,))
+        con.commit()
+        con.close()
+        # 读也拒绝：state_hash 的输入集变了，用新代码解读旧状态只会得出错误结论
+        with self.assertRaises(LedgerSchemaMismatch):
+            store.latest_state('SHADOW:exp1:R')

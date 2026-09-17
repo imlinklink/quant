@@ -16,7 +16,13 @@ from scripts.live_trading.decision_ledger.event_store import (
 
 from .schema import SHADOW_TERMINALS
 
-SHADOW_SCHEMA_VERSION = 1
+# 账本结构版本。任何会改变**已落库事件 payload 或 state_hash 输入**的改动都必须递增，
+# 否则旧账本会在续写时报「同 event_id 异内容」或用新哈希误判状态冲突。
+#   1 → 初始版本
+#   2 → Application 增 cost_uncertain/attempt_id；AccountState 增 model_cost_unsettled
+#       （进 state_hash）；新增事件类型 model_cost_settlement / shadow:opportunity_terminal；
+#       save_state 白名单放行 missed
+SHADOW_SCHEMA_VERSION = 2
 
 _SHADOW_DDL = '''
 CREATE TABLE IF NOT EXISTS shadow_schema(version INTEGER PRIMARY KEY);
@@ -74,6 +80,10 @@ CREATE TABLE IF NOT EXISTS shadow_job_runs (
 '''
 
 
+class LedgerSchemaMismatch(RuntimeError):
+    """账本由不同版本的代码写入。影子账本是追加式证据，禁止跨版本续写。"""
+
+
 class ShadowStore:
     def __init__(self, path: Path, experiment_id: str):
         self.path = Path(path)
@@ -90,8 +100,18 @@ class ShadowStore:
             con.executescript(_SHADOW_DDL)
             if immediate:
                 con.execute('BEGIN IMMEDIATE')
-            con.execute('INSERT OR IGNORE INTO shadow_schema(version) VALUES (?)',
-                        (SHADOW_SCHEMA_VERSION,))
+            stored = con.execute('SELECT MAX(version) FROM shadow_schema').fetchone()[0]
+            if stored is None:
+                con.execute('INSERT INTO shadow_schema(version) VALUES (?)',
+                            (SHADOW_SCHEMA_VERSION,))
+            elif stored != SHADOW_SCHEMA_VERSION:
+                # 事件按稳定 id + payload 哈希追加，改结构必然改变哈希 —— 用新代码续写
+                # 旧账本会表现为「同 event_id 异内容」报错，或用新 state_hash 判定旧状态
+                # 冲突。这里显式拒绝，逼操作者做明确选择，而不是让实验中途悄悄换了尺子。
+                raise LedgerSchemaMismatch(
+                    f'LEDGER_SCHEMA_MISMATCH:{self.path}:'
+                    f'ledger={stored}:code={SHADOW_SCHEMA_VERSION}:'
+                    f'experiment={self.experiment_id}')
             yield con
             con.commit()
         except BaseException:
@@ -186,6 +206,28 @@ class ShadowStore:
                               'AND scope=? AND opportunity_id=?',
                               (self.experiment_id, scope, opportunity_id)).fetchone()
             return json.loads(row[0]) if row else None
+
+    # ---- model attempts（崩溃窗口防护）----
+    def put_job_run(self, job_key: str, attempt: int, status: str,
+                    body: dict | None = None, fencing_token: str | None = None) -> None:
+        """记录一次模型尝试的状态（PENDING → COMPLETED / ABANDONED）。
+
+        调用发生在模型 API 上、结果落在本表之前存在崩溃窗口。先写 PENDING，重启后
+        看到 PENDING 就知道「钱可能已经花了且金额不可知」，据此不重试付费，改为把
+        该次尝试挂账待补记。COMPLETED 的 body 携带完整决定，使「调用完成但决定未落库」
+        的窗口也能恢复而不必重调。
+        """
+        with self.transaction() as con:
+            con.execute('INSERT OR REPLACE INTO shadow_job_runs VALUES (?,?,?,?,?,?)',
+                        (self.experiment_id, job_key, attempt, status, fencing_token,
+                         json.dumps(body or {}, ensure_ascii=False, sort_keys=True)))
+
+    def job_run(self, job_key: str, attempt: int = 1) -> dict | None:
+        with self.transaction(immediate=False) as con:
+            row = con.execute('SELECT status, body FROM shadow_job_runs WHERE experiment_id=? '
+                              'AND job_key=? AND attempt=?',
+                              (self.experiment_id, job_key, attempt)).fetchone()
+            return {'status': row[0], **(json.loads(row[1]) or {})} if row else None
 
     # ---- account state / nav ----
     def save_state(self, scope: str, state, nav: dict, events: list | None = None) -> None:

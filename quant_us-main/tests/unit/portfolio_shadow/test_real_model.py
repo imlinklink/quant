@@ -150,3 +150,49 @@ class QualityGateTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class KnowledgeCutoffTests(unittest.TestCase):
+    """模型训练数据截止披露：决策时点早于它时，as-of 证据过滤修不好泄漏，必须拒绝。"""
+
+    def _packet(self, cutoff=None):
+        return build_entry_packet(opp(), QUOTE, [EVENT], {}, DEADLINE,
+                                  model_knowledge_cutoff=cutoff)
+
+    def test_cutoff_is_frozen_into_the_packet(self):
+        p = self._packet('2026-06-01T00:00:00+00:00')
+        self.assertEqual(p['model_knowledge_cutoff'], '2026-06-01T00:00:00+00:00')
+        # 换了声明值就是换了包，不能与旧包混为一谈
+        self.assertNotEqual(p['packet_id'], self._packet()['packet_id'])
+
+    def test_session_before_cutoff_is_refused_without_calling(self):
+        p = self._packet('2026-06-01T00:00:00+00:00')  # 决策在 2026-01-05，早于截止
+        advisor = advisor_with({'action': 'VETO'}, {'cost_usd': 0.01})
+        mr = RealModel(advisor, now=lambda: NOW,
+                       knowledge_cutoff='2026-06-01T00:00:00+00:00').call(p, DEADLINE)
+        self.assertEqual(mr['status'], 'MODEL_KNOWLEDGE_CUTOFF')
+        self.assertEqual(mr['cost_micro'], 0)
+        advisor.chat.assert_not_called()
+        d = resolve_overlay(p, mr, DEADLINE)
+        self.assertEqual(d.action, 'ABSTAIN')
+        self.assertEqual(d.reason_code, 'MODEL_KNOWLEDGE_CUTOFF')
+
+    def test_session_after_cutoff_proceeds(self):
+        p = self._packet('2025-01-01T00:00:00+00:00')
+        advisor = advisor_with(
+            {'schema_version': 'entry-veto-v1', 'opportunity_id': p['opportunity_id'],
+             'packet_id': p['packet_id'], 'action': 'PASS', 'reason_code': '',
+             'evidence_ids': [], 'explanation': ''}, {'cost_usd': 0.0})
+        mr = RealModel(advisor, now=lambda: NOW,
+                       knowledge_cutoff='2025-01-01T00:00:00+00:00').call(p, DEADLINE)
+        self.assertEqual(mr['status'], 'OK')
+
+    def test_unknown_cutoff_declaration_skips_the_check(self):
+        # 'unknown' 无法解析 ⇒ 不做检查（但 manifest 的 freeze 门保证它被显式声明过）
+        p = self._packet('unknown')
+        advisor = advisor_with(
+            {'schema_version': 'entry-veto-v1', 'opportunity_id': p['opportunity_id'],
+             'packet_id': p['packet_id'], 'action': 'PASS', 'reason_code': '',
+             'evidence_ids': [], 'explanation': ''}, {'cost_usd': 0.0})
+        mr = RealModel(advisor, now=lambda: NOW, knowledge_cutoff='unknown').call(p, DEADLINE)
+        self.assertEqual(mr['status'], 'OK')

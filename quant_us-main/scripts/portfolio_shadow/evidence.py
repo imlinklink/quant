@@ -111,7 +111,8 @@ def events_from_records(records, security_id, decision_cutoff, *, policy=None, r
     return events, exclusions
 
 
-def build_entry_packet(opportunity, quote, events, fundamentals, as_of) -> dict:
+def build_entry_packet(opportunity, quote, events, fundamentals, as_of,
+                       model_knowledge_cutoff=None) -> dict:
     """构建入场否决用的冻结证据包。
 
     opportunity: Opportunity（含 security_id / opportunity_id()）。
@@ -119,6 +120,8 @@ def build_entry_packet(opportunity, quote, events, fundamentals, as_of) -> dict:
     events: [{'summary','source','published_at','observed_at','kind','content_hash'}]。
     fundamentals: {'earnings_date', 'revenue_change', ...}（可选新闻）。
     as_of: 决策截止时刻（ISO，带时区）。
+    model_knowledge_cutoff: 模型训练数据截止时刻（ISO）。写进包内一并冻结 —— 决策时点
+        早于它时，as-of 证据过滤修不好泄漏，必须以显式字段披露而非默认无事。
     """
     as_of_dt = _parse_iso(as_of)
     if as_of_dt is None:
@@ -157,6 +160,7 @@ def build_entry_packet(opportunity, quote, events, fundamentals, as_of) -> dict:
         'data_quality': {'level': quality, 'critical_missing': critical_missing,
                          'dropped_event_count': dropped},
         'as_of': as_of_iso,
+        'model_knowledge_cutoff': model_knowledge_cutoff,
     }
     packet['packet_id'] = stable_id('entry_packet', packet)
     return packet

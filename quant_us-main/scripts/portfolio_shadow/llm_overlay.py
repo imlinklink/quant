@@ -22,12 +22,19 @@ VETO_REASON_CODES = ('MATERIAL_THESIS_CONTRADICTION', 'MATERIAL_COMPANY_EVENT_RI
 ABSTAIN_REASONS = ('TIMED_OUT', 'FAILED', 'INVALID_OUTPUT', 'LATE_RESPONSE',
                    # 历史 as-of：不该发起实时调用（回复只会因迟到被弃权）
                    'HISTORICAL_AS_OF',
+                   # 决策时点早于模型训练数据截止：模型「知道」当时还不可能知道的事。
+                   # 这是 as-of 证据过滤修不好的泄漏，只能拒绝并如实披露。
+                   'MODEL_KNOWLEDGE_CUTOFF',
                    # 数据质量门：关键行情/身份缺失或未来
                    'DATA_BLOCKED_QUOTE',
                    # 数据质量门：无可用证据，模型无从判断（引用不到证据的 VETO 必被拒）
-                   'INSUFFICIENT_EVIDENCE')
+                   'INSUFFICIENT_EVIDENCE',
+                   # 上一次调用已发起但结果未落库（进程挂在两者之间）：钱可能已花且金额
+                   # 不可知，不复用也不重试付费，按 ABSTAIN 采用父策略并把成本挂账待补记
+                   'RECALL_ABANDONED')
 # 未发起任何调用、因而确实零成本的原因（区别于「调用过但成本未知」）
-NO_CALL_REASONS = ('HISTORICAL_AS_OF', 'DATA_BLOCKED_QUOTE', 'INSUFFICIENT_EVIDENCE')
+NO_CALL_REASONS = ('HISTORICAL_AS_OF', 'MODEL_KNOWLEDGE_CUTOFF', 'DATA_BLOCKED_QUOTE',
+                   'INSUFFICIENT_EVIDENCE')
 
 
 def _parse(v):
@@ -110,6 +117,21 @@ def resolve_overlay(packet: dict, model_result: dict, deadline: str) -> OverlayD
                            False, uncertain)
 
 
+def _gate(packet: dict) -> tuple[str, str] | None:
+    """数据质量门。返回 (action, reason) 表示短路；None 表示可以发起模型调用。"""
+    level = (packet.get('data_quality') or {}).get('level')
+    if level == 'BLOCK':
+        return 'BLOCK', 'DATA_BLOCKED_QUOTE'
+    if level == 'LLM_INSUFFICIENT':
+        return 'ABSTAIN', 'INSUFFICIENT_EVIDENCE'
+    return None
+
+
+def model_call_expected(packet: dict) -> bool:
+    """该包是否会真正发起模型调用。调用方据此决定要不要先写 PENDING 尝试记录。"""
+    return _gate(packet) is None
+
+
 def decide_overlay(packet: dict, model, deadline: str, *, attempt_id: str = '') -> OverlayDecision:
     """数据质量门 → 模型调用 → 校验，是 overlay 的唯一入口。
 
@@ -122,11 +144,9 @@ def decide_overlay(packet: dict, model, deadline: str, *, attempt_id: str = '') 
 
     模型必须能看到证据正文（`summary`/`title`），否则三态判断没有依据。
     """
-    level = (packet.get('data_quality') or {}).get('level')
-    if level == 'BLOCK':
-        return OverlayDecision('BLOCK', 'DATA_BLOCKED_QUOTE', 0, '', False, False, attempt_id)
-    if level == 'LLM_INSUFFICIENT':
-        return OverlayDecision('ABSTAIN', 'INSUFFICIENT_EVIDENCE', 0, '', False, False, attempt_id)
+    gated = _gate(packet)
+    if gated is not None:
+        return OverlayDecision(gated[0], gated[1], 0, '', False, False, attempt_id)
     result = resolve_overlay(packet, model.call(packet, deadline), deadline)
     return replace(result, attempt_id=attempt_id)
 
@@ -194,24 +214,37 @@ class RealModel:
     前置拒绝：截止时刻已过期超 `max_staleness_seconds` → 'HISTORICAL_AS_OF'：历史回放里
     实时调用只会在截止后返回，必然被 LATE_RESPONSE 丢弃，不该发起。
 
+    另两条在 `call` 里：
+    - 决策时点早于 `knowledge_cutoff` → 'MODEL_KNOWLEDGE_CUTOFF'。这是 as-of 证据过滤
+      修不好的泄漏（模型知道当时不可能知道的事），只能拒绝并在包/账本里如实披露。
+    - `cost_usd is None`（含 advisor 的 `cost_uncertain`）→ `cost_micro=None`，由调用方
+      记成待补记，**不当作零成本**。
+
     注意 `deadline` 的语义是「决策最晚仍可执行的时刻」（如次日开盘前的截止），**不是**
     决策发生的时刻：决策在 t 收盘后做出，`completed_at` 落在 as_of 与 deadline 之间才算
     按时。deadline 在调用时天然处于未来，不能据此判前视。
-
-    另：`cost_usd is None`（含 advisor 的 `cost_uncertain`）→ `cost_micro=None`，由调用方
-    记成待补记，**不当作零成本**。
     """
 
-    def __init__(self, advisor, *, now=None, max_staleness_seconds: float = 6 * 3600):
+    def __init__(self, advisor, *, now=None, max_staleness_seconds: float = 6 * 3600,
+                 knowledge_cutoff=None):
         self.advisor = advisor
         self._now = now or (lambda: datetime.now(timezone.utc))
         self.max_staleness_seconds = max_staleness_seconds
+        # 模型训练数据的截止时刻（ISO）。决策时点早于它 ⇒ 模型「知道」当时还不可能
+        # 知道的事，as-of 证据过滤修不好，只能拒绝。None = 未声明（不做该检查，但
+        # 这种未声明本身会被 manifest 的 freeze 门挡在正式运行之外）。
+        self.knowledge_cutoff = knowledge_cutoff
 
     def call(self, packet: dict, deadline: str) -> dict:
         now = self._now()
         deadline_dt = _parse(deadline)
         if deadline_dt is None or (now - deadline_dt).total_seconds() > self.max_staleness_seconds:
             return {'status': 'HISTORICAL_AS_OF', 'output': None,
+                    'completed_at': now.isoformat(), 'cost_micro': 0, 'cost_uncertain': False}
+        cutoff = _parse(self.knowledge_cutoff)
+        as_of = _parse(packet.get('as_of'))
+        if cutoff is not None and as_of is not None and as_of < cutoff:
+            return {'status': 'MODEL_KNOWLEDGE_CUTOFF', 'output': None,
                     'completed_at': now.isoformat(), 'cost_micro': 0, 'cost_uncertain': False}
         prompt = json.dumps({'decision_type': 'entry_veto',
                              'evidence_packet': packet,

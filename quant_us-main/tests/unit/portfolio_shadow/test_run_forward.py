@@ -10,12 +10,14 @@ from unittest.mock import Mock
 import pandas as pd
 
 from scripts.evidence.evidence_store import normalize_evidence
+from scripts.live_trading.decision_ledger.event_store import stable_id
 from scripts.portfolio_shadow.candidate_adapter import intents_for_session
 from scripts.portfolio_shadow.cli import drop_from_schedule, run_entry_overlay
-from scripts.portfolio_shadow.evidence import entry_decision_cutoff, entry_response_deadline
+from scripts.portfolio_shadow.evidence import (build_entry_packet, entry_decision_cutoff,
+                                               entry_response_deadline, events_from_records)
 from scripts.portfolio_shadow.llm_overlay import FakeModel, SCHEMA_VERSION
 from scripts.portfolio_shadow.paper_engine import new_account_state, step
-from scripts.portfolio_shadow.schema import Manifest, Opportunity, to_micro
+from scripts.portfolio_shadow.schema import Application, Manifest, Opportunity, to_micro
 from scripts.portfolio_shadow.store import ShadowStore
 
 SIGNAL = pd.Timestamp('2026-01-05')
@@ -151,6 +153,81 @@ class OverlayForwardTests(unittest.TestCase):
         app = self.store.application(self.scope, opp().opportunity_id())
         self.assertTrue(app['cost_uncertain'])
         self.assertEqual(app['attempt_id'], uncertain[0])
+
+
+class CrashWindowTests(unittest.TestCase):
+    """`shadow_job_runs` 堵住「模型已扣费但决定未落库」的窗口。
+
+    调用发生在模型 API 上、结果落库之前进程挂掉时，钱可能已经花了且金额不可知。
+    重启后必须：不重试付费、把成本挂账待补记。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.store = ShadowStore(Path(self.tmp) / 'ledger.sqlite3', 'exp1')
+        self.store.save_experiment(manifest())
+        self.scope = 'SHADOW:exp1:L'
+        self.quotes = {'SEC-A': {'price': to_micro(100), 'observed_at': '2026-01-04T21:00:00Z'}}
+        self.oid = opp().opportunity_id()
+        self.attempt_id = self._attempt_id()
+
+    def _attempt_id(self):
+        events = events_from_records(evidence_records(), 'SEC-A',
+                                     entry_decision_cutoff(SIGNAL))[0]
+        packet = build_entry_packet(opp(), self.quotes['SEC-A'], events, {},
+                                    entry_decision_cutoff(SIGNAL))
+        return stable_id('llm_attempt', self.scope, self.oid, packet['packet_id'])
+
+    def _run(self, model, force_recall=False):
+        return run_entry_overlay(self.store, self.scope, [opp()], session=SIGNAL,
+                                 exec_session=EXEC, quotes=self.quotes,
+                                 records=evidence_records(), real_model=model,
+                                 force_recall=force_recall)
+
+    def test_pending_attempt_is_never_recalled_and_cost_is_flagged(self):
+        self.store.put_job_run(self.attempt_id, 1, 'PENDING', {'packet_id': 'p'})
+        model = Mock()
+        kept, cost, uncertain = self._run(model)
+        model.call.assert_not_called()          # 绝不重试付费
+        self.assertEqual(cost, 0)               # 金额不可知 → 挂账，不是零成本
+        self.assertEqual(uncertain, [self.attempt_id])
+        app = self.store.application(self.scope, self.oid)
+        self.assertEqual(app['action'], 'ABSTAIN')   # 采用父策略
+        self.assertEqual(app['reason_code'], 'RECALL_ABANDONED')
+        self.assertTrue(app['cost_uncertain'])
+
+    def test_force_recall_does_not_bypass_the_pending_guard(self):
+        self.store.put_job_run(self.attempt_id, 1, 'PENDING', {'packet_id': 'p'})
+        model = Mock()
+        self._run(model, force_recall=True)
+        model.call.assert_not_called()
+
+    def test_completed_attempt_is_recovered_without_second_call(self):
+        self.store.put_job_run(self.attempt_id, 1, 'COMPLETED', {
+            'opportunity_id': self.oid, 'packet_id': 'p', 'action': 'VETO',
+            'reason_code': 'MATERIAL_COMPANY_EVENT_RISK', 'model_cost': 777,
+            'cost_uncertain': False, 'raw_action': 'VETO', 'late_response_observed': False})
+        model = Mock()
+        kept, cost, uncertain = self._run(model)
+        model.call.assert_not_called()
+        self.assertEqual(cost, 777)
+        self.assertEqual(kept, [])              # 恢复的是 VETO，L 不建仓
+        self.assertEqual(self.store.application(self.scope, self.oid)['action'], 'VETO')
+
+    def test_different_packet_on_rerun_raises_instead_of_reusing(self):
+        """证据或报价变了就不能复用旧决定——那是回答了另一个问题的答案。"""
+        self.store.put_application(Application(
+            scope=self.scope, opportunity_id=self.oid, action='VETO',
+            reason_code='MATERIAL_COMPANY_EVENT_RISK', decision_id='', as_of='x',
+            applied=True, attempt_id='llm_attempt_somethingelse'))
+        with self.assertRaises(ValueError):
+            self._run(Mock())
+
+    def test_pending_is_only_written_when_a_call_will_happen(self):
+        # 无证据 ⇒ 质量门短路，不应留下任何 PENDING 记录
+        run_entry_overlay(self.store, self.scope, [opp()], session=SIGNAL, exec_session=EXEC,
+                          quotes=self.quotes, records=None, real_model=Mock())
+        self.assertIsNone(self.store.job_run(self.attempt_id))
 
 
 class ClaimTimingTests(unittest.TestCase):

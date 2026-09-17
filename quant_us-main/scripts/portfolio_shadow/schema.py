@@ -83,6 +83,12 @@ class Manifest:
             errors.append('execution_policy.horizon 缺失')
         if not self.llm_policy.get('overlay'):
             errors.append('llm_policy.overlay 缺失（本轮须为 fixed_pass/entry_veto）')
+        if self.llm_policy.get('use_real_model') and not self.llm_policy.get('knowledge_cutoff'):
+            # 真实模型的训练数据截止必须显式声明。决策时点早于它时，as-of 证据过滤修不好
+            # 泄漏（模型知道当时不可能知道的事），这是对 L−R 指标的一阶威胁，不能默认无事。
+            # 确实未知就填 'unknown'，让它在评审里可见，而不是留空悄悄跳过。
+            errors.append('llm_policy.knowledge_cutoff 缺失（use_real_model=true 时必填；'
+                          '未知请填 "unknown"）')
         if not self.calendar_version:
             errors.append('calendar_version 缺失')
         # 前瞻协议（设计 §3：缺完整研究协议拒绝冻结）
