@@ -6,7 +6,8 @@ from pathlib import Path
 from scripts.portfolio_shadow.paper_engine import new_account_state, step
 from scripts.portfolio_shadow.report import (daily_report, paired_performance,
                                               render_markdown)
-from scripts.portfolio_shadow.schema import Manifest, Opportunity, to_micro
+from scripts.portfolio_shadow.schema import (LADDER_KEYS, Manifest, Opportunity,
+                                              to_micro)
 from scripts.portfolio_shadow.store import SHADOW_SCHEMA_VERSION, ShadowStore
 
 
@@ -193,3 +194,48 @@ class ReportDisclosureTests(unittest.TestCase):
         text = render_markdown(rep, paired_performance(self.store, self.m))
         self.assertIn('模型知识截止=2025-06-01T00:00:00+00:00', text)
         self.assertIn(f'schema=v{SHADOW_SCHEMA_VERSION}', text)
+
+
+class UnknownPolicyKeyTests(unittest.TestCase):
+    """拼错的键必须被指出来：它会被 dict.get 静默忽略，让安全门无声失效。"""
+
+    def test_ladder_keys_match_risk_policy_defaults(self):
+        from scripts.portfolio_shadow.risk_policy import _DEFAULTS
+        self.assertEqual(set(LADDER_KEYS), set(_DEFAULTS))
+
+    def test_misspelled_llm_policy_key_is_named(self):
+        # 拼错的 knowledge_cutoff 原先只会让 freeze 门报「缺失」，操作者按提示补上
+        # 另一个拼写 —— 真正的错字反而看不见
+        m = manifest(llm_policy={'overlay': 'entry_veto', 'use_real_model': True,
+                                 'knowledge_cutof': '2025-06-01'})
+        errors = m.validate()
+        self.assertTrue(any('knowledge_cutof' in e for e in errors), errors)
+        self.assertTrue(any('llm_policy' in e for e in errors), errors)
+
+    def test_unknown_keys_in_each_policy_dict_are_flagged(self):
+        cases = {
+            'risk_policy': {'single_position_risk_bp': 100, 'max_weight_bp': 2000,
+                            'max_positions': 5, 'typo_here': 1},
+            'execution_policy': {'entry_rule': 'b3', 'exit_policy_id': 'H60', 'horizon': 60,
+                                 'max_wait_sesson': 20},
+            'evaluation_protocol': {'main_metric': 'L_minus_R_return',
+                                    'enrollment_window': '3-6 months',
+                                    'review_date': '2026-12-31',
+                                    'cost_allocation': 'L_pays_model_cost', 'extra': 1},
+        }
+        for key, value in cases.items():
+            with self.subTest(key):
+                errors = manifest(**{key: value}).validate()
+                self.assertTrue(any(f'{key} 含未知键' in e for e in errors), errors)
+                with self.assertRaises(ValueError):
+                    manifest(**{key: value}).freeze('2026-01-02')
+
+    def test_unknown_ladder_key_is_flagged(self):
+        m = manifest(risk_policy={'single_position_risk_bp': 100, 'max_weight_bp': 2000,
+                                  'max_positions': 5,
+                                  'drawdown_ladder': {'reduced': 0.1, 'tpyo': 0.2}})
+        errors = m.validate()
+        self.assertTrue(any('drawdown_ladder' in e and 'tpyo' in e for e in errors), errors)
+
+    def test_known_keys_still_pass(self):
+        self.assertEqual(manifest().validate(), [])

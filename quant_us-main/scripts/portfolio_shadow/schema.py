@@ -21,6 +21,21 @@ ACCOUNT_ACTIONS = ('RISK_REJECTED', 'VETOED', 'INTENT_CREATED', 'MISSED_EXECUTIO
 # 机会在影子账本里的全部可能状态（投影 terminal 列取值）
 SHADOW_TERMINALS = CANDIDATE_TERMINAL + ('VETOED', 'MISSED_EXECUTION', 'EXECUTED')
 
+# 各策略字典的已知键。未知键必须报错：拼错一个字母（如 use_real_modle/knowledge_cutof）
+# 会被 `dict.get` 静默忽略，让本该生效的安全门无声失效 —— 然后 freeze 门报「缺失」，
+# 操作者按提示补上另一个拼写，漏洞就这么留下了。
+POLICY_KEYS = {
+    'risk_policy': ('single_position_risk_bp', 'max_weight_bp', 'max_positions', 'top_n',
+                    'drawdown_ladder'),
+    'execution_policy': ('entry_rule', 'exit_policy_id', 'horizon', 'max_wait_sessions'),
+    'llm_policy': ('overlay', 'use_real_model', 'knowledge_cutoff'),
+    'evaluation_protocol': ('main_metric', 'enrollment_window', 'review_date',
+                            'cost_allocation'),
+}
+# 与 risk_policy._DEFAULTS 的键一致，由测试钉死
+LADDER_KEYS = ('limit_breach', 'review_required', 'paused_entry', 'reduced',
+               'normal_recover', 'reduced_recover', 'recover_sessions')
+
 
 def to_micro(value) -> int:
     """把美元金额/价格转成 int 微美元（四舍五入到 1e-6）。"""
@@ -91,6 +106,16 @@ class Manifest:
                           '未知请填 "unknown"）')
         if not self.calendar_version:
             errors.append('calendar_version 缺失')
+        # 未知键：拼错的键会被 `dict.get` 静默忽略，让安全门无声失效
+        for name, allowed in POLICY_KEYS.items():
+            unknown = sorted(set(getattr(self, name) or {}) - set(allowed))
+            if unknown:
+                errors.append(f'{name} 含未知键 {unknown}（允许：{sorted(allowed)}）')
+        ladder = (self.risk_policy or {}).get('drawdown_ladder') or {}
+        unknown_ladder = sorted(set(ladder) - set(LADDER_KEYS))
+        if unknown_ladder:
+            errors.append(f'risk_policy.drawdown_ladder 含未知键 {unknown_ladder}'
+                          f'（允许：{sorted(LADDER_KEYS)}）')
         # 前瞻协议（设计 §3：缺完整研究协议拒绝冻结）
         for key in ('main_metric', 'enrollment_window', 'review_date', 'cost_allocation'):
             if not self.evaluation_protocol.get(key):

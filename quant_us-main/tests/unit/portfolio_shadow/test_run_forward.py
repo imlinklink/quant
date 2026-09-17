@@ -12,7 +12,8 @@ import pandas as pd
 from scripts.evidence.evidence_store import normalize_evidence
 from scripts.live_trading.decision_ledger.event_store import stable_id
 from scripts.portfolio_shadow.candidate_adapter import intents_for_session
-from scripts.portfolio_shadow.cli import drop_from_schedule, run_entry_overlay
+from scripts.portfolio_shadow.cli import (drop_from_schedule, manifest_from_dict,
+                                          run_entry_overlay)
 from scripts.portfolio_shadow.evidence import (build_entry_packet, entry_decision_cutoff,
                                                entry_response_deadline, events_from_records)
 from scripts.portfolio_shadow.llm_overlay import FakeModel, SCHEMA_VERSION
@@ -294,3 +295,39 @@ class TerminalTransitionTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ManifestLoadingTests(unittest.TestCase):
+    """manifest.json 顶层键严格校验：拼错的键不能让安全门无声失效。"""
+
+    def _base(self):
+        return {'experiment_id': 'exp1', 'parent_strategy_id': 'B3', 'parent_version': '1',
+                'parent_code_hash': 'abc', 'universe_id': 'u', 'universe_hash': 'uh',
+                'account_scopes': ['SHADOW:exp1:R', 'SHADOW:exp1:L'], 'initial_cash': 100000,
+                'risk_policy': {'single_position_risk_bp': 100, 'max_weight_bp': 2000,
+                                'max_positions': 5},
+                'execution_policy': {'entry_rule': 'b3', 'exit_policy_id': 'H60', 'horizon': 60},
+                'llm_policy': {'overlay': 'fixed_pass'}, 'calendar_version': 'v1',
+                'evaluation_protocol': {'main_metric': 'L_minus_R_return',
+                                        'enrollment_window': '3-6 months',
+                                        'review_date': '2026-12-31',
+                                        'cost_allocation': 'L_pays_model_cost'}}
+
+    def test_valid_dict_loads_and_validates(self):
+        self.assertEqual(manifest_from_dict(self._base()).validate(), [])
+
+    def test_misspelled_top_level_field_is_named_not_silently_ignored(self):
+        d = self._base()
+        d['llm_polcy'] = d.pop('llm_policy')       # 错字：原先是裸 KeyError
+        with self.assertRaises(ValueError) as ctx:
+            manifest_from_dict(d)
+        self.assertIn('MANIFEST_UNKNOWN_FIELDS', str(ctx.exception))
+        self.assertIn('llm_polcy', str(ctx.exception))
+
+    def test_missing_required_field_gives_a_clear_error(self):
+        d = self._base()
+        del d['calendar_version']
+        with self.assertRaises(ValueError) as ctx:
+            manifest_from_dict(d)
+        self.assertIn('MANIFEST_MISSING_FIELDS', str(ctx.exception))
+        self.assertIn('calendar_version', str(ctx.exception))

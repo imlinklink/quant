@@ -22,7 +22,30 @@ from .schema import Application, Manifest, to_micro
 from .store import ShadowStore, state_from_dict
 
 
+MANIFEST_FIELDS = ('experiment_id', 'status', 'parent_strategy_id', 'parent_version',
+                   'parent_code_hash', 'universe_id', 'universe_hash', 'account_scopes',
+                   'initial_cash', 'currency', 'risk_policy', 'execution_policy',
+                   'llm_policy', 'calendar_version', 'data_hashes', 'evaluation_protocol',
+                   'start_session')
+MANIFEST_REQUIRED = ('experiment_id', 'parent_strategy_id', 'parent_version',
+                     'parent_code_hash', 'universe_id', 'universe_hash', 'account_scopes',
+                     'initial_cash', 'risk_policy', 'execution_policy', 'llm_policy',
+                     'calendar_version')
+
+
 def manifest_from_dict(d: dict) -> Manifest:
+    """从 manifest.json 构造 Manifest。
+
+    顶层键严格校验：拼错的键（如 llm_polcy）原先要么被静默忽略、要么抛裸 KeyError，
+    都会让本该生效的安全门无声失效。嵌套策略字典的未知键由 `Manifest.validate()` 兜。
+    """
+    unknown = sorted(set(d) - set(MANIFEST_FIELDS))
+    if unknown:
+        raise ValueError(f'MANIFEST_UNKNOWN_FIELDS:{unknown}'
+                         f'（允许：{sorted(MANIFEST_FIELDS)}）')
+    missing = sorted(set(MANIFEST_REQUIRED) - set(d))
+    if missing:
+        raise ValueError(f'MANIFEST_MISSING_FIELDS:{missing}')
     return Manifest(
         experiment_id=d['experiment_id'], status=d.get('status', 'DRAFT'),
         parent_strategy_id=d['parent_strategy_id'], parent_version=d['parent_version'],
