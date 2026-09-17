@@ -155,6 +155,13 @@ class Manifest:
         return replace(self, status='FROZEN', start_session=start_session)
 
     def manifest_hash(self) -> str:
+        """冻结身份的哈希。**只含不可变字段** —— `status` 是运行状态（暂停/恢复/关闭），
+        单独校验与记录，不参与身份：否则暂停一次就会让实验看起来"被改过"。
+
+        `start_session` 必须在内：起始日决定实验从哪一天开始积累，改了它实验身份却没变，
+        等于同一把尺子换了刻度。`initial_cash` 也在内 —— 它不会给已有账户充值，但**新账户
+        初始化**与所有以 manifest 为分母的绩效计算都依赖它。
+        """
         return digest({
             'experiment_id': self.experiment_id, 'parent_strategy_id': self.parent_strategy_id,
             'parent_version': self.parent_version, 'parent_code_hash': self.parent_code_hash,
@@ -164,6 +171,7 @@ class Manifest:
             'execution_policy': self.execution_policy, 'llm_policy': self.llm_policy,
             'calendar_version': self.calendar_version, 'data_hashes': self.data_hashes,
             'evaluation_protocol': self.evaluation_protocol,
+            'start_session': self.start_session,
         })
 
 

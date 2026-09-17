@@ -77,6 +77,29 @@ def _manifest_to_public(m: Manifest) -> dict:
     return d
 
 
+def verify_manifest_frozen(store, m) -> None:
+    """运行时校验：盘上的 manifest 必须与冻结时逐字段一致。
+
+    **冻结不是仪式**：改一个风险参数或起始日，实验身份没变、账本里的哈希也没变，但跑出来
+    的数字已经不是同一把尺子了。所有运行入口都必须在**调用模型与写账本之前**过这一关；
+    找不到冻结记录同样拒绝 —— 默认放行等于没有冻结。
+
+    只校验不可变字段（`manifest_hash` 的输入）；`status` 是运行状态，单独判 PAUSED/CLOSED。
+    """
+    stored = store.frozen_manifest_hash()
+    if stored is None:
+        raise ValueError(f'EXPERIMENT_NOT_FROZEN:{m.experiment_id}（先 freeze 再运行）')
+    incoming = m.manifest_hash()
+    if stored != incoming:
+        raise ValueError(
+            f'MANIFEST_CHANGED_SINCE_FREEZE:{m.experiment_id}:'
+            f'stored={stored[:16]}:incoming={incoming[:16]}'
+            '（参数变更必须新建 experiment_id，不能顶着同一身份改尺子）')
+    status = (store.get_experiment() or {}).get('status')
+    if status in ('PAUSED', 'CLOSED'):
+        raise ValueError(f'EXPERIMENT_{status}:{m.experiment_id}')
+
+
 def cmd_validate(args):
     m = manifest_from_dict(json.loads(Path(args.manifest).read_text()))
     errors = m.validate()
@@ -88,10 +111,13 @@ def cmd_freeze(args):
     m = manifest_from_dict(json.loads(Path(args.manifest).read_text()))
     frozen = m.freeze(args.start_session)
     out_dir = Path(args.output) / frozen.experiment_id
+    store = ShadowStore(out_dir / 'ledger.sqlite3', frozen.experiment_id)
+    # 先校验后落盘：原实现先覆盖 manifest.json 再校验，于是「拒绝重复 freeze」时
+    # 盘上的冻结文件已经被改掉了 —— 拒绝反而造成了破坏。
+    store.save_experiment(frozen)
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / 'manifest.json').write_text(
         json.dumps(_manifest_to_public(frozen), ensure_ascii=False, indent=2) + '\n')
-    ShadowStore(out_dir / 'ledger.sqlite3', frozen.experiment_id).save_experiment(frozen)
     print(json.dumps({'experiment_id': frozen.experiment_id, 'status': frozen.status,
                       'manifest_hash': frozen.manifest_hash()}, ensure_ascii=False))
     return 0
@@ -99,6 +125,8 @@ def cmd_freeze(args):
 
 def cmd_run_session(args):
     m = manifest_from_dict(json.loads(Path(args.manifest).read_text()))
+    store = ShadowStore(Path(args.output) / m.experiment_id / 'ledger.sqlite3', m.experiment_id)
+    verify_manifest_frozen(store, m)
     store = ShadowStore(Path(args.output) / m.experiment_id / 'ledger.sqlite3', m.experiment_id)
     data = json.loads(Path(args.schedule).read_text())
     sess = next(s for s in data['sessions'] if s['session'] == args.session)
@@ -455,6 +483,7 @@ def cmd_prepare_entry_reviews(args):
 
     m = manifest_from_dict(json.loads(Path(args.manifest).read_text()))
     store = ShadowStore(Path(args.output) / m.experiment_id / 'ledger.sqlite3', m.experiment_id)
+    verify_manifest_frozen(store, m)
     prices, actions, quality_path, etf_raw = _market_data(getattr(args, 'etf_raw', None))
     quality = pd.read_csv(quality_path)
     _, blocked = _build_shared_audits(prices, actions)
@@ -516,6 +545,7 @@ def cmd_review_entries(args):
     """
     m = manifest_from_dict(json.loads(Path(args.manifest).read_text()))
     store = ShadowStore(Path(args.output) / m.experiment_id / 'ledger.sqlite3', m.experiment_id)
+    verify_manifest_frozen(store, m)
     if m.llm_policy.get('overlay') != 'entry_veto':
         print(json.dumps({'reviewed': 0, 'note': 'overlay 非 entry_veto，无需评审'},
                          ensure_ascii=False))
@@ -677,6 +707,7 @@ def cmd_settle_session(args):
     from .verify_parity import _shadow_actions
     m = manifest_from_dict(json.loads(Path(args.manifest).read_text()))
     store = ShadowStore(Path(args.output) / m.experiment_id / 'ledger.sqlite3', m.experiment_id)
+    verify_manifest_frozen(store, m)
     prices, actions, _, _ = _market_data(getattr(args, 'etf_raw', None))
     session = args.session
     now = now_iso()
@@ -764,6 +795,7 @@ def cmd_run_daily(args):
     import pandas as pd
     m = manifest_from_dict(json.loads(Path(args.manifest).read_text()))
     store = ShadowStore(Path(args.output) / m.experiment_id / 'ledger.sqlite3', m.experiment_id)
+    verify_manifest_frozen(store, m)
     etf_raw = getattr(args, 'etf_raw', None)
     prices, _, _, etf_path = _market_data(etf_raw)
     cal = _forward_calendar(sorted(pd.DatetimeIndex(prices.session.unique())),
@@ -840,13 +872,14 @@ def cmd_run_forward(args):
     """
     import pandas as pd
     m = manifest_from_dict(json.loads(Path(args.manifest).read_text()))
+    store = ShadowStore(Path(args.output) / m.experiment_id / 'ledger.sqlite3', m.experiment_id)
+    verify_manifest_frozen(store, m)
     if m.llm_policy.get('use_real_model'):
         # 设计 §9：run-forward 是历史夹具/重放工具，必须禁止真实模型调用 ——
         # 过去的执行日不能用今天生成的模型结果补填前瞻记录。正式运行走三命令。
         raise ValueError(
             'RUN_FORWARD_FORBIDS_REAL_MODEL:正式运行请用 prepare-entry-reviews / '
             'review-entries / settle-session')
-    store = ShadowStore(Path(args.output) / m.experiment_id / 'ledger.sqlite3', m.experiment_id)
     from scripts.medium_term.p2_selection_check import (ACTIONS, ETF_RAW, QUALITY, load_panels,
                                                         market_frame, trading_calendar)
     from scripts.medium_term.risk_rule_experiment import _build_shared_audits

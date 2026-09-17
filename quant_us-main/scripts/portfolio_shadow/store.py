@@ -15,7 +15,8 @@ from pathlib import Path
 from scripts.live_trading.decision_ledger.event_store import (
     canonical, digest, insert_event, make_event, migrate)
 
-from .schema import ATTEMPT_STATUSES, ATTEMPT_TERMINAL, SHADOW_TERMINALS
+from .schema import (ATTEMPT_STATUSES, ATTEMPT_TERMINAL, MANIFEST_STATUSES,
+                     SHADOW_TERMINALS)
 
 
 def _parse_iso(value):
@@ -57,7 +58,9 @@ def _shift_iso(value, seconds: int) -> str:
 #       PREPARED/CALL_STARTED/COMPLETED/FAILED/TIMED_OUT/UNKNOWN。
 #   8 → 尝试状态词汇对齐：shadow_job_runs.status 由模型侧词汇改为状态机取值
 #       （'OK' → 'COMPLETED'），body 增 model_status 保留原始词汇；put_job_run 增两道守卫。
-SHADOW_SCHEMA_VERSION = 8
+#   9 → 冻结身份补 start_session（manifest_hash 的输入变了，旧账本记录的哈希一律不匹配）；
+#       save_experiment 拒绝同 id 不同配置；运行时新增 verify_manifest_frozen 校验。
+SHADOW_SCHEMA_VERSION = 9
 
 _SHADOW_DDL = '''
 CREATE TABLE IF NOT EXISTS shadow_schema(version INTEGER PRIMARY KEY);
@@ -163,17 +166,56 @@ class ShadowStore:
 
     # ---- experiments ----
     def save_experiment(self, manifest) -> None:
-        body = json.dumps(manifest.__dict__ if hasattr(manifest, '__dict__') else manifest,
-                          ensure_ascii=False, sort_keys=True)
+        """登记实验。**同 id 同配置幂等；同 id 不同配置拒绝**。
+
+        原实现用 `INSERT OR REPLACE`，于是「重新 freeze」能悄悄把原哈希覆盖掉 ——
+        参数变更必须新建实验（新 experiment_id），不能顶着同一个身份改尺子。
+        """
+        incoming = manifest.manifest_hash()
         with self.transaction() as con:
+            row = con.execute('SELECT manifest_hash FROM shadow_experiments '
+                              'WHERE experiment_id=?', (self.experiment_id,)).fetchone()
+            if row is not None and row[0] != incoming:
+                raise ValueError(
+                    f'EXPERIMENT_ALREADY_FROZEN:{self.experiment_id}:'
+                    f'stored={row[0][:16]}:incoming={incoming[:16]}'
+                    '（参数变更必须新建 experiment_id，不能改已有实验）')
+            body = json.dumps(_asdict(manifest), ensure_ascii=False, sort_keys=True)
             con.execute('INSERT OR REPLACE INTO shadow_experiments VALUES (?,?,?,?)',
-                        (self.experiment_id, manifest.status, manifest.manifest_hash(), body))
+                        (self.experiment_id, manifest.status, incoming, body))
 
     def get_experiment(self) -> dict | None:
         with self.transaction(immediate=False) as con:
             row = con.execute('SELECT body FROM shadow_experiments WHERE experiment_id=?',
                               (self.experiment_id,)).fetchone()
             return json.loads(row[0]) if row else None
+
+    def frozen_manifest_hash(self) -> str | None:
+        """账本里记录的冻结哈希；未冻结返回 None。"""
+        with self.transaction(immediate=False) as con:
+            row = con.execute('SELECT manifest_hash FROM shadow_experiments '
+                              'WHERE experiment_id=?', (self.experiment_id,)).fetchone()
+            return row[0] if row else None
+
+    def set_experiment_status(self, status: str, note: str = '') -> None:
+        """运行状态变更（暂停/恢复/关闭）。**单独记录、不参与冻结身份** ——
+
+        `manifest_hash` 只含不可变字段，否则暂停一次就会让实验看起来「被改过」。
+        """
+        if status not in MANIFEST_STATUSES:
+            raise ValueError(f'UNKNOWN_EXPERIMENT_STATUS:{status}')
+        with self.transaction() as con:
+            row = con.execute('SELECT body FROM shadow_experiments WHERE experiment_id=?',
+                              (self.experiment_id,)).fetchone()
+            if row is None:
+                raise ValueError(f'EXPERIMENT_NOT_FROZEN:{self.experiment_id}')
+            body = {**json.loads(row[0]), 'status': status}
+            con.execute('UPDATE shadow_experiments SET status=?, body=? WHERE experiment_id=?',
+                        (status, json.dumps(body, ensure_ascii=False, sort_keys=True),
+                         self.experiment_id))
+            _insert_event(con, self.experiment_scope, 'shadow:experiment_status',
+                          (status, note),
+                          {'experiment_id': self.experiment_id, 'status': status, 'note': note})
 
     # ---- opportunities ----
     def put_opportunity(self, opp) -> None:

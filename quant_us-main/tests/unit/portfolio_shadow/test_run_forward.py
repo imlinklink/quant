@@ -398,12 +398,27 @@ class CommandSeparationTests(unittest.TestCase):
         path.write_text(json.dumps(d, ensure_ascii=False), encoding='utf-8')
         return path
 
+    def _freeze(self, **llm):
+        """冻结实验并返回**冻结后**的 manifest 路径。
+
+        运行时校验用的是冻结产物（`start_session` 已写入哈希），草稿路径会因缺
+        `start_session` 而被判为「改过」。
+        """
+        import json as _json
+        draft = self._manifest_file(**llm)
+        from scripts.portfolio_shadow.cli import cmd_freeze
+        from types import SimpleNamespace
+        cmd_freeze(SimpleNamespace(manifest=str(draft), start_session='2026-01-02',
+                                   output=str(self.out)))
+        m = manifest_from_dict(_json.loads(draft.read_text()))
+        return str(self.out / m.experiment_id / 'manifest.json')
+
     def test_run_forward_refuses_real_model(self):
         """过去的执行日不能用今天生成的模型结果补填前瞻记录。"""
         from types import SimpleNamespace
         from scripts.portfolio_shadow.cli import cmd_run_forward
-        args = SimpleNamespace(manifest=str(self._manifest_file(use_real_model=True,
-                                                                knowledge_cutoff='unknown')),
+        args = SimpleNamespace(manifest=self._freeze(use_real_model=True,
+                                                     knowledge_cutoff='unknown'),
                                output=str(self.out), to_session='2026-01-06', evidence=None)
         with self.assertRaises(ValueError) as ctx:
             cmd_run_forward(args)
@@ -412,13 +427,7 @@ class CommandSeparationTests(unittest.TestCase):
     def test_review_entries_refuses_real_model_when_manifest_disallows_it(self):
         from types import SimpleNamespace
         from scripts.portfolio_shadow.cli import cmd_review_entries
-        import json as _json
-        manifest_path = self._manifest_file()
-        m = manifest_from_dict(_json.loads(manifest_path.read_text())).freeze('2026-01-02')
-        store_dir = self.out / m.experiment_id
-        store_dir.mkdir(parents=True, exist_ok=True)
-        ShadowStore(store_dir / 'ledger.sqlite3', m.experiment_id).save_experiment(m)
-        args = SimpleNamespace(manifest=str(manifest_path), output=str(self.out),
+        args = SimpleNamespace(manifest=self._freeze(), output=str(self.out),
                                execution_session='2026-01-06', model='real')
         with self.assertRaises(ValueError) as ctx:
             cmd_review_entries(args)
@@ -428,15 +437,11 @@ class CommandSeparationTests(unittest.TestCase):
         """动作只能在已冻结的证据包上做：没有包就必须先去 prepare，不能临时现造。"""
         from types import SimpleNamespace
         from scripts.portfolio_shadow.cli import cmd_review_entries
-        import json as _json
-        manifest_path = self._manifest_file()
-        m = manifest_from_dict(_json.loads(manifest_path.read_text())).freeze('2026-01-02')
-        store_dir = self.out / m.experiment_id
-        store_dir.mkdir(parents=True, exist_ok=True)
-        store = ShadowStore(store_dir / 'ledger.sqlite3', m.experiment_id)
-        store.save_experiment(m)
+        manifest_path = self._freeze()
+        m = manifest_from_dict(json.loads(Path(manifest_path).read_text()))
+        store = ShadowStore(self.out / m.experiment_id / 'ledger.sqlite3', m.experiment_id)
         store.put_opportunity(opp())
-        args = SimpleNamespace(manifest=str(manifest_path), output=str(self.out),
+        args = SimpleNamespace(manifest=manifest_path, output=str(self.out),
                                execution_session='2026-01-06', model='fixture')
         with self.assertRaises(ValueError) as ctx:
             cmd_review_entries(args)
