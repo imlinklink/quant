@@ -12,8 +12,9 @@ from pathlib import Path
 from scripts.live_trading.decision_ledger.event_store import stable_id
 
 from .candidate_adapter import adapt_schedule, intents_for_session
-from .evidence import (build_entry_packet, entry_decision_cutoff, entry_response_deadline,
-                       events_from_records, policy_for_mode)
+from .evidence import (build_entry_packet, entry_collection_time, entry_market_cutoff,
+                       entry_response_deadline, events_from_records, now_iso,
+                       policy_for_mode, validate_evidence_cutoff)
 from .llm_overlay import (FakeModel, OverlayDecision, RealModel, decide_overlay,
                           model_call_expected)
 from .paper_engine import new_account_state, step
@@ -285,9 +286,11 @@ def _reuse_or_decide(store, scope, opp, packet, attempt_id, deadline, model_fact
     return d
 
 
-def entry_packet_for(opp, quote, records, cutoff, *, evidence_mode='strict',
+def entry_packet_for(opp, quote, records, as_of, *, evidence_mode='strict',
                      knowledge_cutoff=None):
     """构建某机会的 entry-veto 证据包（含证据等级 meta）。
+
+    `as_of` 是**证据截止**（实际采集时刻），同时用于证据可见性过滤与包内 as_of 字段。
 
     `run_entry_overlay` 与需要复算 `attempt_id` 的调用方（含测试）必须走同一条路径 ——
     两边各造一次包，一旦有差异 `attempt_id` 就会错位，崩溃窗口守卫会静默失效。
@@ -297,35 +300,43 @@ def entry_packet_for(opp, quote, records, cutoff, *, evidence_mode='strict',
         meta = {'evidence_mode': evidence_mode, 'source_packet_hash': None,
                 'included_event_count': 0, 'exclusion_count': 0, 'exclusion_reasons': {}}
     else:
-        events, _, meta = events_from_records(records, opp.security_id, cutoff,
+        events, _, meta = events_from_records(records, opp.security_id, as_of,
                                               policy=policy_for_mode(evidence_mode))
         if meta.get('evidence_mode') not in (None, evidence_mode):
             # evidence_store 由策略反推的等级与 manifest 声明的不一致 = 两处定义漂移
             raise ValueError(f'EVIDENCE_MODE_DRIFT:{meta["evidence_mode"]}!={evidence_mode}')
-    return build_entry_packet(opp, quote, events, {}, cutoff,
+    return build_entry_packet(opp, quote, events, {}, as_of,
                               model_knowledge_cutoff=knowledge_cutoff, evidence=meta)
 
 
-def freeze_entry_reviews(opportunities, quotes, records, cutoff, *, evidence_mode='strict',
-                         knowledge_cutoff=None):
+def freeze_entry_reviews(store, opportunities, *, quotes, records, market_cutoff, deadline,
+                         evidence_mode='strict', knowledge_cutoff=None, collected_at=None):
     """账户无关阶段：一个机会一个冻结证据包，并做数据质量分流。
 
     返回 (reviews, blocked)，两者元素均为 (opportunity, packet)。
 
-    BLOCK 是**机会级**判定（关键行情/股票身份/规则计划缺失或无效），按设计必须同时禁止
-    R 与 L 的新风险，所以它必须在账户资格检查**之前**完成，不能只在某一侧剔除。
+    证据截止（as_of）= **实际采集时刻**（设计 §3.2），必须落在 [信号日收盘, 决策截止]
+    之间；包**首次写入即冻结**，重跑原样复用，绝不用今天的信息改写当时的决策依据。
+
+    BLOCK 是**机会级**判定（关键行情/股票身份/规则计划缺失或无效），按设计必须同时
+    禁止 R 与 L 的新风险，所以它必须在账户资格检查**之前**完成。
     """
+    as_of = validate_evidence_cutoff(collected_at or now_iso(),
+                                     market_cutoff=market_cutoff, deadline=deadline)
     reviews, blocked = [], []
     for opp in opportunities:
-        packet = entry_packet_for(opp, quotes.get(opp.security_id, {}), records, cutoff,
-                                  evidence_mode=evidence_mode,
-                                  knowledge_cutoff=knowledge_cutoff)
+        packet = store.packet_for_opportunity(opp.opportunity_id())
+        if packet is None:
+            packet = entry_packet_for(opp, quotes.get(opp.security_id, {}), records, as_of,
+                                      evidence_mode=evidence_mode,
+                                      knowledge_cutoff=knowledge_cutoff)
+            store.put_packet(opp.opportunity_id(), packet)
         (blocked if packet['data_quality']['level'] == 'BLOCK' else reviews).append(
             (opp, packet))
     return reviews, blocked
 
 
-def record_data_blocked(store, scopes, opp, packet, *, session, as_of):
+def record_data_blocked(store, scopes, opp, packet, *, session):
     """记录机会级 BLOCK：终态 DATA_BLOCKED + 每个账户一条禁止新风险的账目。
 
     按设计 §5.3/§6，DATA_BLOCKED 对 R 与 L **同时**生效 —— 它不是某一侧的模型动作，
@@ -336,10 +347,10 @@ def record_data_blocked(store, scopes, opp, packet, *, session, as_of):
     for scope in scopes:
         store.put_application(Application(
             scope=scope, opportunity_id=opp.opportunity_id(), action='DATA_BLOCKED',
-            reason_code=reason, decision_id='', as_of=as_of, applied=True))
+            reason_code=reason, decision_id='', as_of=packet['as_of'], applied=True))
 
 
-def apply_entry_reviews(store, scope, reviews, *, cutoff, deadline, real_model,
+def apply_entry_reviews(store, scope, reviews, *, deadline, real_model,
                         force_recall=False):
     """账户相关阶段：对已冻结的证据包做三态评审。
 
@@ -359,7 +370,7 @@ def apply_entry_reviews(store, scope, reviews, *, cutoff, deadline, real_model,
             force_recall)
         store.put_application(Application(
             scope=scope, opportunity_id=opp.opportunity_id(), action=d.action,
-            reason_code=d.reason_code, decision_id='', as_of=cutoff, applied=True,
+            reason_code=d.reason_code, decision_id='', as_of=packet['as_of'], applied=True,
             model_cost=d.model_cost, raw_action=d.raw_action,
             late_response_observed=d.late_response_observed,
             cost_uncertain=d.cost_uncertain, attempt_id=d.attempt_id))
@@ -436,18 +447,21 @@ def cmd_run_forward(args):
                      if nxt < len(gen.calendar) else sess_str)
 
         # 账户无关阶段：冻结证据包 + 数据质量分流。
-        # BLOCK 是机会级判定，必须同时禁止 R 与 L 的新风险，故在账户循环之前处理。
-        cutoff = entry_decision_cutoff(session)
+        # 行情/规则输入的截止 = 信号日收盘；证据的 as_of = 实际采集时刻（两者不同，
+        # 见 evidence.entry_market_cutoff 的说明）。BLOCK 是机会级判定，必须同时
+        # 禁止 R 与 L 的新风险，故在账户循环之前处理。
+        market_cutoff = entry_market_cutoff(session)
+        deadline = entry_response_deadline(exec_next)
         reviews, blocked = freeze_entry_reviews(
-            fresh,
+            store, fresh,
             quotes={o.security_id: {'price': close_micro[(session, o.security_id)],
-                                    'observed_at': cutoff} for o in fresh},
-            records=records, cutoff=cutoff,
+                                    'observed_at': market_cutoff} for o in fresh},
+            records=records, market_cutoff=market_cutoff, deadline=deadline,
             evidence_mode=m.llm_policy.get('evidence_mode', 'strict'),
-            knowledge_cutoff=m.llm_policy.get('knowledge_cutoff'))
+            knowledge_cutoff=m.llm_policy.get('knowledge_cutoff'),
+            collected_at=entry_collection_time(market_cutoff, deadline))
         for opp, packet in blocked:
-            record_data_blocked(store, m.account_scopes, opp, packet, session=sess_str,
-                                as_of=cutoff)
+            record_data_blocked(store, m.account_scopes, opp, packet, session=sess_str)
             for scope in m.account_scopes:
                 drop_from_schedule(scheduled[scope], exec_next, {opp.opportunity_id()})
 
@@ -458,8 +472,7 @@ def cmd_run_forward(args):
             cost, uncertain = 0, []
             if overlay == 'entry_veto' and scope.endswith(':L'):
                 kept, cost, uncertain = apply_entry_reviews(
-                    store, scope, reviews, cutoff=cutoff,
-                    deadline=entry_response_deadline(exec_next), real_model=real_model)
+                    store, scope, reviews, deadline=deadline, real_model=real_model)
                 # 只从**本批**机会的队列里摘掉被否决的，别动其它执行日的队列
                 drop_from_schedule(scheduled[scope], exec_next,
                                    {o.opportunity_id() for o, _ in reviews}

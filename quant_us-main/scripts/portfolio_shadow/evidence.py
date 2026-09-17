@@ -32,14 +32,57 @@ def policy_for_mode(mode: str) -> dict | None:
 MAX_SUMMARY_CHARS = 2000
 
 
-def entry_decision_cutoff(session) -> str:
-    """决策信息截止时刻 = 信号日 t 收盘。晚于此刻可见的信息不得进入证据包。"""
+def entry_market_cutoff(session) -> str:
+    """**行情与规则输入**的截止 = 信号日 T 收盘。
+
+    注意它**不是**证据的 as_of（见 `validate_evidence_cutoff`）：设计 §3.1 要求收盘后
+    冻结 T 及以前的行情与规则输入，§3.2 要求证据取「截至实际采集时刻」已观察到的部分。
+    把两者混为一谈会把**收盘后发布的事件**（正是财报最常发布的时段）系统性排除。
+    """
     return market_close(session).isoformat()
 
 
 def entry_response_deadline(exec_session) -> str:
     """模型回复截止 = 执行日开盘前 10 分钟（最晚仍可执行的时刻，非决策时刻）。"""
     return market_time(exec_session, 9, 20).isoformat()
+
+
+def validate_evidence_cutoff(collected_at, *, market_cutoff, deadline) -> str:
+    """证据 as_of = **实际采集时刻**，必须落在 [信号日收盘, 决策截止] 之间。
+
+    早于收盘说明行情/规则输入还没冻结完，晚于截止说明采集已经迟到 —— 两者都是调度
+    错误，不夹紧、直接拒绝，避免把「其实晚到了」伪装成「当时就看到了」。
+    """
+    collected = _parse_iso(collected_at)
+    market_dt = _parse_iso(market_cutoff)
+    deadline_dt = _parse_iso(deadline)
+    if collected is None:
+        raise ValueError(f'EVIDENCE_CUTOFF_INVALID:{collected_at}')
+    if market_dt is not None and collected < market_dt:
+        raise ValueError(f'EVIDENCE_COLLECTED_BEFORE_CLOSE:{collected_at}<{market_cutoff}')
+    if deadline_dt is not None and collected > deadline_dt:
+        raise ValueError(f'EVIDENCE_COLLECTED_AFTER_DEADLINE:{collected_at}>{deadline}')
+    return collected.isoformat()
+
+
+def now_iso() -> str:
+    """决策端可信时钟（设计 §7：时间来自调用端，不信任模型自报）。"""
+    return datetime.now(timezone.utc).isoformat()
+
+
+def entry_collection_time(market_cutoff, deadline, *, now=None) -> str:
+    """证据采集时刻。
+
+    实时运行取当前时刻（落在 [收盘, 截止] 内）；历史回放时当前时刻已过截止，取**截止**
+    —— 即假设备齐了当时截止前可得的全部信息。不做夹紧：若当前时刻早于收盘（调度顺序
+    错误），交给 `validate_evidence_cutoff` 直接拒绝，而不是悄悄改成一个看起来合法的值。
+    该值会冻结进包的 `as_of`，评审时可见。
+    """
+    now_dt = _parse_iso(now or now_iso())
+    deadline_dt = _parse_iso(deadline)
+    if now_dt is not None and deadline_dt is not None and now_dt <= deadline_dt:
+        return now_dt.isoformat()
+    return deadline_dt.isoformat()
 
 
 def _parse_iso(v):

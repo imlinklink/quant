@@ -26,7 +26,9 @@ from .schema import SHADOW_TERMINALS
 #       model_knowledge_cutoff。这两项进 packet_id ⇒ 进 attempt_id ⇒ 进 Application payload。
 #   4 → Opportunity 增 parent_strategy_id/signal_generated_at/decision_deadline/
 #       rule_reason_codes/market_snapshot_id（设计 §4），进 shadow:opportunity 事件 payload。
-SHADOW_SCHEMA_VERSION = 4
+#   5 → 证据截止语义分离：包内 as_of 由「信号日收盘」改为「实际采集时刻」（设计 §3.2），
+#       值变 ⇒ packet_id 变 ⇒ attempt_id 变 ⇒ Application 与 shadow:packet 事件 payload 变。
+SHADOW_SCHEMA_VERSION = 5
 
 _SHADOW_DDL = '''
 CREATE TABLE IF NOT EXISTS shadow_schema(version INTEGER PRIMARY KEY);
@@ -73,6 +75,12 @@ CREATE TABLE IF NOT EXISTS shadow_daily_nav (
     sequence INTEGER NOT NULL,
     body TEXT NOT NULL,
     PRIMARY KEY (experiment_id, scope, session, revision));
+CREATE TABLE IF NOT EXISTS shadow_packets (
+    experiment_id TEXT NOT NULL,
+    opportunity_id TEXT NOT NULL,
+    packet_id TEXT NOT NULL,
+    body TEXT NOT NULL,
+    PRIMARY KEY (experiment_id, opportunity_id));
 CREATE TABLE IF NOT EXISTS shadow_job_runs (
     experiment_id TEXT NOT NULL,
     job_key TEXT NOT NULL,
@@ -214,6 +222,33 @@ class ShadowStore:
             row = con.execute('SELECT body FROM shadow_applications WHERE experiment_id=? '
                               'AND scope=? AND opportunity_id=?',
                               (self.experiment_id, scope, opportunity_id)).fetchone()
+            return json.loads(row[0]) if row else None
+
+    # ---- frozen evidence packets ----
+    def put_packet(self, opportunity_id: str, packet: dict) -> None:
+        """首次写入即冻结：同一机会只有一个冻结证据包（设计 §3）。
+
+        重跑必须原样复用已冻结的包 —— 里面的 `as_of` 是实际采集时刻，重算会得到不同
+        的值，等于用今天的信息改写当时的决策依据。完整包（不止 packet_hash）落库，
+        满足设计 §7「不能只保存 packet_hash 及最终 action」。
+        """
+        with self.transaction() as con:
+            row = con.execute('SELECT 1 FROM shadow_packets WHERE experiment_id=? '
+                              'AND opportunity_id=?',
+                              (self.experiment_id, opportunity_id)).fetchone()
+            if row:
+                return
+            con.execute('INSERT OR REPLACE INTO shadow_packets VALUES (?,?,?,?)',
+                        (self.experiment_id, opportunity_id, packet['packet_id'],
+                         json.dumps(packet, ensure_ascii=False, sort_keys=True)))
+            _insert_event(con, self.experiment_scope, 'shadow:packet', packet['packet_id'],
+                          packet)
+
+    def packet_for_opportunity(self, opportunity_id: str) -> dict | None:
+        with self.transaction(immediate=False) as con:
+            row = con.execute('SELECT body FROM shadow_packets WHERE experiment_id=? '
+                              'AND opportunity_id=?',
+                              (self.experiment_id, opportunity_id)).fetchone()
             return json.loads(row[0]) if row else None
 
     # ---- model attempts（崩溃窗口防护）----

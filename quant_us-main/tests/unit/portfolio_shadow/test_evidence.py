@@ -7,8 +7,10 @@ from scripts.evidence.evidence_store import normalize_evidence
 
 from scripts.live_trading.decision_ledger.event_store import digest
 from scripts.portfolio_shadow.evidence import (MAX_SUMMARY_CHARS, build_entry_packet,
-                                               entry_decision_cutoff, entry_response_deadline,
-                                               events_from_records, policy_for_mode)
+                                               entry_collection_time, entry_market_cutoff,
+                                               entry_response_deadline,
+                                               events_from_records, policy_for_mode,
+                                               validate_evidence_cutoff)
 from scripts.portfolio_shadow.schema import EVIDENCE_MODES, Opportunity, to_micro
 
 
@@ -96,8 +98,8 @@ class EntryDeadlineTests(unittest.TestCase):
 
     def test_decision_cutoff_is_session_close(self):
         # 1 月 = EST(UTC-5) → 16:00 ET = 21:00Z；7 月 = EDT(UTC-4) → 20:00Z
-        self.assertTrue(entry_decision_cutoff('2026-01-05').startswith('2026-01-05T21:00'))
-        self.assertTrue(entry_decision_cutoff('2026-07-06').startswith('2026-07-06T20:00'))
+        self.assertTrue(entry_market_cutoff('2026-01-05').startswith('2026-01-05T21:00'))
+        self.assertTrue(entry_market_cutoff('2026-07-06').startswith('2026-07-06T20:00'))
 
     def test_response_deadline_is_pre_open_of_exec_session(self):
         # 09:20 ET → EST 14:20Z / EDT 13:20Z
@@ -180,3 +182,39 @@ class EvidenceModeTests(unittest.TestCase):
         q = build_entry_packet(opp(), QUOTE, strict_events, {}, cutoff, evidence=strict_meta)
         self.assertEqual(q['events'], [])
         self.assertEqual(q['data_quality']['level'], 'LLM_INSUFFICIENT')
+
+
+class EvidenceCutoffTests(unittest.TestCase):
+    """设计 §3：行情/规则输入的截止（收盘）与证据的 as_of（采集时刻）是两个时刻。
+
+    把两者混为一谈会把盘后发布的事件（财报最常发布的时段）系统性排除。
+    """
+
+    def test_market_cutoff_is_session_close(self):
+        self.assertTrue(entry_market_cutoff('2026-01-05').startswith('2026-01-05T21:00'))
+
+    def test_collection_time_is_bounded_by_close_and_deadline(self):
+        market = entry_market_cutoff('2026-01-05')
+        deadline = entry_response_deadline('2026-01-06')
+        # 实时：现在就在窗口内
+        live = entry_collection_time(market, deadline, now='2026-01-05T23:00:00+00:00')
+        self.assertEqual(live, '2026-01-05T23:00:00+00:00')
+        # 历史回放：现在已过截止 → 取截止
+        replay = entry_collection_time(market, deadline, now='2026-09-17T00:00:00+00:00')
+        self.assertEqual(replay, deadline)
+
+    def test_cutoff_must_be_within_the_window(self):
+        market = entry_market_cutoff('2026-01-05')
+        deadline = entry_response_deadline('2026-01-06')
+        self.assertEqual(
+            validate_evidence_cutoff('2026-01-05T23:00:00+00:00',
+                                     market_cutoff=market, deadline=deadline),
+            '2026-01-05T23:00:00+00:00')
+        with self.assertRaises(ValueError) as ctx:      # 早于收盘：行情还没冻结完
+            validate_evidence_cutoff('2026-01-05T20:00:00+00:00',
+                                     market_cutoff=market, deadline=deadline)
+        self.assertIn('EVIDENCE_COLLECTED_BEFORE_CLOSE', str(ctx.exception))
+        with self.assertRaises(ValueError) as ctx:      # 晚于截止：采集已经迟到
+            validate_evidence_cutoff('2026-01-06T14:30:00+00:00',
+                                     market_cutoff=market, deadline=deadline)
+        self.assertIn('EVIDENCE_COLLECTED_AFTER_DEADLINE', str(ctx.exception))

@@ -254,8 +254,8 @@ class IncrementalCandidateGenerator:
                 if any(exec_sess <= pd.Timestamp(d).normalize() <= exit_sess for d in bdays):
                     del self.pending[cid]
                     continue
-            from .evidence import entry_decision_cutoff, entry_response_deadline
-            cutoff = entry_decision_cutoff(session)
+            from .evidence import entry_market_cutoff, entry_response_deadline
+            cutoff = entry_market_cutoff(session)
             ready.append(Opportunity(
                 experiment_id=self.experiment_id, security_id=cand['security_id'],
                 source_candidate_id=cid, parent_version=self.parent_version,

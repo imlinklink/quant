@@ -15,7 +15,7 @@ from scripts.portfolio_shadow.candidate_adapter import intents_for_session
 from scripts.portfolio_shadow.cli import (apply_entry_reviews, drop_from_schedule,
                                           entry_packet_for, freeze_entry_reviews,
                                           manifest_from_dict, record_data_blocked)
-from scripts.portfolio_shadow.evidence import (build_entry_packet, entry_decision_cutoff,
+from scripts.portfolio_shadow.evidence import (build_entry_packet, entry_market_cutoff,
                                                entry_response_deadline, events_from_records)
 from scripts.portfolio_shadow.llm_overlay import FakeModel, SCHEMA_VERSION
 from scripts.portfolio_shadow.paper_engine import new_account_state, step
@@ -48,13 +48,14 @@ def opp(sid='SEC-A', planned='2026-01-06'):
                        input_hash='h', terminal='READY')
 
 
-def evidence_records(sid='SEC-A'):
+def evidence_records(sid='SEC-A', *, published='2026-01-04T12:00:00Z',
+                     observed='2026-01-04T13:00:00Z'):
     """符合 evidence_store schema 的一条已核实证据（含正文列）。"""
     row = {'security_id': sid, 'symbol_as_published': sid, 'kind': 'filing',
            'source_id': 'src1', 'source_record_id': 'rec1',
            'source_url_or_archive_path': 'file://x',
-           'event_at': '2026-01-04T12:00:00Z', 'published_at': '2026-01-04T12:00:00Z',
-           'observed_at': '2026-01-04T13:00:00Z', 'ingested_at': '2026-01-04T14:00:00Z',
+           'event_at': published, 'published_at': published,
+           'observed_at': observed, 'ingested_at': observed,
            'version_id': 'v1', 'supersedes_id': None, 'content_hash': 'a' * 64,
            'summary_hash': None, 'quality_status': 'verified',
            'availability_proof': 'archive', 'license_tag': 'research-use-only',
@@ -73,19 +74,21 @@ class OverlayForwardTests(unittest.TestCase):
         self.quotes = {'SEC-A': {'price': to_micro(100), 'observed_at': '2026-01-04T21:00:00Z'}}
 
     def _run(self, model, records=None, notes=None, quotes=None, force_recall=False,
-             scopes=None):
+             scopes=None, collected_at=None):
         """走生产同一条两阶段路径：先冻结证据包+质量分流，再对非 BLOCK 的做评审。"""
         notes = notes or [opp()]
         quotes = self.quotes if quotes is None else quotes
-        cutoff = entry_decision_cutoff(SIGNAL)
-        reviews, blocked = freeze_entry_reviews(notes, quotes, records, cutoff,
-                                                evidence_mode='strict')
+        market_cutoff = entry_market_cutoff(SIGNAL)
+        deadline = entry_response_deadline(EXEC)
+        reviews, blocked = freeze_entry_reviews(
+            self.store, notes, quotes=quotes, records=records,
+            market_cutoff=market_cutoff, deadline=deadline, evidence_mode='strict',
+            collected_at=collected_at or market_cutoff)
         for o, packet in blocked:
             record_data_blocked(self.store, scopes or (self.scope,), o, packet,
-                                session='2026-01-05', as_of=cutoff)
+                                session='2026-01-05')
         return apply_entry_reviews(
-            self.store, self.scope, reviews, cutoff=cutoff,
-            deadline=entry_response_deadline(EXEC), real_model=model,
+            self.store, self.scope, reviews, deadline=deadline, real_model=model,
             force_recall=force_recall)
 
     def test_no_evidence_abstains_free_and_keeps_intent(self):
@@ -113,12 +116,27 @@ class OverlayForwardTests(unittest.TestCase):
         self.assertEqual(
             self.store.opportunity_terminals()[opp().opportunity_id()], 'DATA_BLOCKED')
 
-    def test_decision_carries_signal_day_cutoff_not_exec_day(self):
-        self._run(Mock())
+    def test_evidence_as_of_is_collection_time_not_session_close(self):
+        """设计 §3.2：证据 as_of = 实际采集时刻，不是信号日收盘。"""
+        collected = '2026-01-05T23:00:00+00:00'  # 收盘(21:00Z)之后、开盘前截止之前
+        self._run(Mock(), collected_at=collected)
         app = self.store.application(self.scope, opp().opportunity_id())
-        self.assertEqual(app['as_of'], entry_decision_cutoff(SIGNAL))
-        self.assertNotEqual(app['as_of'], entry_decision_cutoff(EXEC))
+        self.assertEqual(app['as_of'], collected)
+        self.assertGreater(app['as_of'], entry_market_cutoff(SIGNAL))
         self.assertLess(app['as_of'], entry_response_deadline(EXEC))
+
+    def test_post_close_event_is_visible_to_the_decision(self):
+        """盘后发布的事件必须能进包 —— 那正是财报最常发布的时段。
+
+        回归：把证据 as_of 当成信号日收盘，会把 published_at 晚于收盘的事件系统性
+        排除在决策之外。
+        """
+        records = evidence_records(published='2026-01-05T21:30:00Z',
+                                   observed='2026-01-05T22:00:00Z')
+        self._run(Mock(), records=records, collected_at='2026-01-05T23:00:00+00:00')
+        packet = self.store.packet_for_opportunity(opp().opportunity_id())
+        self.assertEqual(len(packet['events']), 1)
+        self.assertEqual(packet['events'][0]['summary'], '公司下调全年指引')
 
     def test_veto_with_evidence_drops_from_l(self):
         packet_probe = {}
@@ -135,9 +153,9 @@ class OverlayForwardTests(unittest.TestCase):
         # FakeModel 的 evidence_ids 需引用包内 id：先取一次包
         from scripts.portfolio_shadow.evidence import build_entry_packet
         from scripts.portfolio_shadow.evidence import events_from_records
-        events = events_from_records(records, 'SEC-A', entry_decision_cutoff(SIGNAL))[0]
+        events = events_from_records(records, 'SEC-A', entry_market_cutoff(SIGNAL))[0]
         pkt = build_entry_packet(opp(), self.quotes['SEC-A'], events, {},
-                                 entry_decision_cutoff(SIGNAL))
+                                 entry_market_cutoff(SIGNAL))
         model.evidence_ids = [pkt['events'][0]['evidence_id']]
         kept, cost, _ = self._run(stub, records=records)
         self.assertEqual(kept, [])              # VETO ⇒ L 不建仓
@@ -190,17 +208,19 @@ class CrashWindowTests(unittest.TestCase):
     def _attempt_id(self):
         # 走生产同一条路径造包：两边各造一次包会让 attempt_id 错位，守卫静默失效
         packet = entry_packet_for(opp(), self.quotes['SEC-A'], evidence_records(),
-                                  entry_decision_cutoff(SIGNAL))
+                                  entry_market_cutoff(SIGNAL))
         return stable_id('llm_attempt', self.scope, self.oid, packet['packet_id'])
 
     def _run(self, model, force_recall=False):
-        cutoff = entry_decision_cutoff(SIGNAL)
-        reviews, blocked = freeze_entry_reviews([opp()], self.quotes, evidence_records(),
-                                                cutoff, evidence_mode='strict')
+        market_cutoff = entry_market_cutoff(SIGNAL)
+        deadline = entry_response_deadline(EXEC)
+        reviews, blocked = freeze_entry_reviews(
+            self.store, [opp()], quotes=self.quotes, records=evidence_records(),
+            market_cutoff=market_cutoff, deadline=deadline, evidence_mode='strict',
+            collected_at=market_cutoff)
         self.assertEqual(blocked, [])
         return apply_entry_reviews(
-            self.store, self.scope, reviews, cutoff=cutoff,
-            deadline=entry_response_deadline(EXEC), real_model=model,
+            self.store, self.scope, reviews, deadline=deadline, real_model=model,
             force_recall=force_recall)
 
     def test_pending_attempt_is_never_recalled_and_cost_is_flagged(self):
@@ -244,11 +264,14 @@ class CrashWindowTests(unittest.TestCase):
 
     def test_pending_is_only_written_when_a_call_will_happen(self):
         # 无证据 ⇒ 质量门短路，不应留下任何 PENDING 记录
-        cutoff = entry_decision_cutoff(SIGNAL)
-        reviews, _ = freeze_entry_reviews([opp()], self.quotes, None, cutoff,
-                                          evidence_mode='strict')
-        apply_entry_reviews(self.store, self.scope, reviews, cutoff=cutoff,
-                            deadline=entry_response_deadline(EXEC), real_model=Mock())
+        market_cutoff = entry_market_cutoff(SIGNAL)
+        deadline = entry_response_deadline(EXEC)
+        reviews, _ = freeze_entry_reviews(
+            self.store, [opp()], quotes=self.quotes, records=None,
+            market_cutoff=market_cutoff, deadline=deadline, evidence_mode='strict',
+            collected_at=market_cutoff)
+        apply_entry_reviews(self.store, self.scope, reviews, deadline=deadline,
+                            real_model=Mock())
         self.assertIsNone(self.store.job_run(self.attempt_id))
 
 
@@ -352,3 +375,37 @@ class ManifestLoadingTests(unittest.TestCase):
             manifest_from_dict(d)
         self.assertIn('MANIFEST_MISSING_FIELDS', str(ctx.exception))
         self.assertIn('calendar_version', str(ctx.exception))
+
+
+class FrozenPacketTests(unittest.TestCase):
+    """同一机会只有一个冻结证据包（设计 §3）：重跑不得用今天的信息改写当时的决策依据。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.store = ShadowStore(Path(self.tmp) / 'ledger.sqlite3', 'exp1')
+        self.store.save_experiment(manifest())
+        self.quotes = {'SEC-A': {'price': to_micro(100), 'observed_at': '2026-01-04T21:00:00Z'}}
+
+    def _freeze(self, collected):
+        market = entry_market_cutoff(SIGNAL)
+        deadline = entry_response_deadline(EXEC)
+        reviews, _ = freeze_entry_reviews(
+            self.store, [opp()], quotes=self.quotes, records=evidence_records(),
+            market_cutoff=market, deadline=deadline, evidence_mode='strict',
+            collected_at=collected)
+        return reviews[0][1]
+
+    def test_packet_is_frozen_on_first_write(self):
+        first = self._freeze('2026-01-05T22:00:00+00:00')
+        second = self._freeze('2026-01-05T23:30:00+00:00')  # 重跑，采集时刻不同
+        self.assertEqual(first['packet_id'], second['packet_id'])
+        self.assertEqual(second['as_of'], '2026-01-05T22:00:00+00:00')  # 仍是首次冻结的值
+
+    def test_store_keeps_the_whole_packet_not_just_a_hash(self):
+        """设计 §7：不能只保存 packet_hash 及最终 action。"""
+        frozen = self._freeze('2026-01-05T22:00:00+00:00')
+        stored = self.store.packet_for_opportunity(opp().opportunity_id())
+        self.assertEqual(stored, frozen)
+        for key in ('events', 'rule_plan', 'identity', 'market_context', 'provenance',
+                    'data_quality'):
+            self.assertIn(key, stored)
