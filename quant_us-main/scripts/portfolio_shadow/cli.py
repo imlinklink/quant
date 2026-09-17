@@ -1,4 +1,15 @@
-"""R/L 双影子账户 CLI：validate / freeze / run-session / replay / report。
+"""R/L 双影子账户 CLI。
+
+正式运行（设计 §9，决策与结算分离）：
+    prepare-entry-reviews --session T      生产并冻结真实机会与证据包
+    review-entries --execution-session T1  领取到期机会、调用模型、冻结动作
+    settle-session --session T1            消费已冻结动作与当日行情，推进 R/L 并出报告
+
+三者分开是为了让「看到当天结果后补作决策」在**结构上**不可能：settle-session 没有
+模型，review-entries 也不读执行日的结果。
+
+辅助命令：validate / freeze / import-evidence / replay / report。
+`run-session` 与 `run-forward` 是历史夹具/重放工具，**禁止真实模型调用**（设计 §9）。
 
 manifest.json 金额用美元（initial_cash 用美元）；schedule.json 为逐 session 的
 bars/公司行动/机会排程。金额在进入引擎前转 int 微美元。
@@ -291,10 +302,20 @@ def _mark_applied(store, scope, res, intents, session) -> None:
     """结算后标记该账户动作已实际应用（设计 §7：动作冻结 ≠ 成交）。
 
     被引擎拒掉的那些（missed 事件）不算 applied —— 冻结了但没成交，正是要区分开的两件事。
+
+    R 侧没有模型决策，但账户动作仍要留痕（设计 §6 的账户级动作 `INTENT_CREATED`），
+    所以这里在没有 Application 时补写一条，而不是要求调用方先造一个。
     """
     missed = {e.get('opportunity_id') for e in res.events if e.get('type') == 'missed'}
     for o in intents:
-        if o.opportunity_id() not in missed:
+        if o.opportunity_id() in missed:
+            continue
+        if store.application(scope, o.opportunity_id()) is None:
+            store.put_application(Application(
+                scope=scope, opportunity_id=o.opportunity_id(), action='INTENT_CREATED',
+                reason_code='PARENT_STRATEGY', decision_id='', as_of=session,
+                decision_frozen=True, execution_applied=True))
+        else:
             store.mark_execution_applied(scope, o.opportunity_id(), session)
 
 
@@ -348,6 +369,190 @@ def apply_entry_reviews(store, scope, reviews, *, deadline, real_model, model_id
     return kept, known_cost, uncertain
 
 
+def _market_data():
+    """加载中型策略行情/行动/质量/ETF 日历（prepare 与 settle 共用）。"""
+    import pandas as pd
+    from scripts.medium_term.p2_selection_check import ACTIONS, ETF_RAW, QUALITY, load_panels
+    prices, _ = load_panels()
+    prices['session'] = pd.to_datetime(prices.session).dt.normalize()
+    prices['security_id'] = prices.security_id.astype(str)
+    actions = pd.read_csv(ACTIONS)
+    actions['security_id'] = actions.security_id.astype(str)
+    return prices, actions, QUALITY, ETF_RAW
+
+
+def _opportunity_from_dict(d: dict):
+    """`store.opportunities()` 返回的是 `_asdict` 过的 dict，还原成 Opportunity。"""
+    from .schema import Opportunity
+    payload = dict(d)
+    payload['rule_reason_codes'] = tuple(payload.get('rule_reason_codes') or ())
+    return Opportunity(**payload)
+
+
+def _next_session(cal, session):
+    """日历里的下一个交易日（设计 §3.1：T+1 由日历得到，不要求已有 T+1 行情）。"""
+    import pandas as pd
+    idx = int(cal.searchsorted(pd.Timestamp(session))) + 1
+    return str(pd.Timestamp(cal[idx]).date()) if idx < len(cal) else None
+
+
+def _sessions_upto(cal, start, end):
+    import pandas as pd
+    return [s for s in cal if start <= str(pd.Timestamp(s).date()) <= end]
+
+
+def cmd_prepare_entry_reviews(args):
+    """`prepare-entry-reviews --session T`：生产并冻结真实机会和证据（设计 §9）。
+
+    只消费截至 T 的输入：**不要求已有 T+1 的行情**（设计 §3.1）。机会 T+1 执行、
+    证据在收盘后采集（§3.2），动作冻结留给 `review-entries`。
+    """
+    import pandas as pd
+    from scripts.medium_term.p2_selection_check import market_frame, trading_calendar
+    from scripts.medium_term.risk_rule_experiment import _build_shared_audits
+    from .candidate_adapter import IncrementalCandidateGenerator
+
+    m = manifest_from_dict(json.loads(Path(args.manifest).read_text()))
+    store = ShadowStore(Path(args.output) / m.experiment_id / 'ledger.sqlite3', m.experiment_id)
+    prices, actions, quality_path, etf_raw = _market_data()
+    quality = pd.read_csv(quality_path)
+    _, blocked = _build_shared_audits(prices, actions)
+    cal = trading_calendar(etf_raw)
+    gen = IncrementalCandidateGenerator(
+        prices, market_frame(etf_raw), quality, actions, blocked, cal,
+        experiment_id=m.experiment_id, parent_version=m.parent_version,
+        parent_strategy_id=m.parent_strategy_id,
+        exit_policy_id=m.execution_policy['exit_policy_id'],
+        top_n=m.risk_policy.get('top_n', 5),
+        max_wait_sessions=m.execution_policy.get('max_wait_sessions', 20),
+        require_matured=False)
+
+    target = args.session
+    start = m.start_session or str(pd.Timestamp(cal[0]).date())
+    # 增量生成器需要从更早的月末选股重放才能重建 pending；put_opportunity 首次写入即冻结，重放安全
+    fresh = []
+    for session in _sessions_upto(cal, start, target):
+        got = gen.opportunities_for(session)
+        for o in got:
+            store.put_opportunity(o)
+        if str(pd.Timestamp(session).date()) == target:
+            fresh = got
+
+    market_cutoff = entry_market_cutoff(target)
+    exec_session = _next_session(cal, target)
+    deadline = entry_response_deadline(exec_session or target)
+    close_micro = {(pd.Timestamp(r.session), str(r.security_id)): to_micro(r.raw_close)
+                   for r in prices.itertuples(index=False)}
+    reviews, blocked_opps = freeze_entry_reviews(
+        store, fresh,
+        quotes={o.security_id: {'price': close_micro[(pd.Timestamp(target), o.security_id)],
+                                'observed_at': market_cutoff} for o in fresh},
+        source=_evidence_source(m, getattr(args, 'evidence', None)),
+        market_cutoff=market_cutoff, deadline=deadline,
+        evidence_mode=m.llm_policy.get('evidence_mode', 'strict'),
+        knowledge_cutoff=m.llm_policy.get('knowledge_cutoff'),
+        collected_at=entry_collection_time(market_cutoff, deadline))
+    for opp, packet in blocked_opps:
+        record_data_blocked(store, m.account_scopes, opp, packet, session=target)
+    print(json.dumps({'session': target, 'execution_session': exec_session,
+                      'opportunities': len(fresh), 'reviews': len(reviews),
+                      'data_blocked': len(blocked_opps)}, ensure_ascii=False))
+    return 0
+
+
+def cmd_review_entries(args):
+    """`review-entries --execution-session T1 --model real`：领取到期机会并冻结动作（§9）。
+
+    这是唯一会调用模型的命令。动作在此冻结；`settle-session` 只消费已冻结的动作，
+    结构上无法"看到当天结果后补作决策"。
+    """
+    m = manifest_from_dict(json.loads(Path(args.manifest).read_text()))
+    store = ShadowStore(Path(args.output) / m.experiment_id / 'ledger.sqlite3', m.experiment_id)
+    if m.llm_policy.get('overlay') != 'entry_veto':
+        print(json.dumps({'reviewed': 0, 'note': 'overlay 非 entry_veto，无需评审'},
+                         ensure_ascii=False))
+        return 0
+    use_real = args.model == 'real'
+    if use_real and not m.llm_policy.get('use_real_model'):
+        raise ValueError('MANIFEST_DOES_NOT_ALLOW_REAL_MODEL:'
+                         'manifest.llm_policy.use_real_model 未开启')
+    real_model = _make_real_model(m) if use_real else None
+
+    deadline = entry_response_deadline(args.execution_session)
+    scope = next(s for s in m.account_scopes if s.endswith(':L'))
+    reviewer = make_reviewer(store, scope, real_model,
+                             model_id=(m.llm_policy.get('model_id') or
+                                       ('real' if use_real else 'fixture')))
+    due = [_opportunity_from_dict(o) for o in store.opportunities()
+           if o.get('planned_execution_session') == args.execution_session]
+    reviewed, in_flight = 0, 0
+    for opp in due:
+        packet = store.packet_for_opportunity(opp.opportunity_id())
+        if packet is None:
+            raise ValueError(f'PACKET_NOT_PREPARED:{opp.opportunity_id()}'
+                             '（先跑 prepare-entry-reviews）')
+        outcome = reviewer.review(opp, packet, deadline)
+        reviewed += 1
+        in_flight += 0 if outcome.frozen else 1
+    print(json.dumps({'execution_session': args.execution_session, 'due': len(due),
+                      'reviewed': reviewed, 'in_flight': in_flight,
+                      'model': 'real' if use_real else 'fixture'}, ensure_ascii=False))
+    return 0
+
+
+def cmd_settle_session(args):
+    """`settle-session --session T1`：消费已冻结动作与当日行情，推进 R/L 并出报告（§9）。
+
+    这里**没有模型**：只用此前冻结的机会与动作，叠加当天行情机械模拟开盘成交与日内
+    止损（设计 §3.4）。
+    """
+    import pandas as pd
+    from .verify_parity import _shadow_actions
+    m = manifest_from_dict(json.loads(Path(args.manifest).read_text()))
+    store = ShadowStore(Path(args.output) / m.experiment_id / 'ledger.sqlite3', m.experiment_id)
+    prices, actions, _, _ = _market_data()
+    session = args.session
+    bars = {sid: {'open': to_micro(r.raw_open), 'high': to_micro(r.raw_high),
+                  'low': to_micro(r.raw_low), 'close': to_micro(r.raw_close)}
+            for sid, r in prices[prices.session.eq(pd.Timestamp(session))]
+            .set_index('security_id').iterrows()}
+    acts = [a for a in _shadow_actions(actions) if a.get('ex_date') == session]
+    due = [_opportunity_from_dict(o) for o in store.opportunities()
+           if o.get('planned_execution_session') == session]
+    executed = 0
+    for scope in m.account_scopes:
+        row = store.latest_state(scope)
+        saved = row[1] if row else None
+        state = state_from_dict(saved) if saved else new_account_state(scope, m.initial_cash)
+        intents, cost, uncertain = [], 0, []
+        for opp in due:
+            app = store.application(scope, opp.opportunity_id())
+            if app is None:
+                if scope.endswith(':L') and m.llm_policy.get('overlay') == 'entry_veto':
+                    # 未评审：不放行（设计 §3.3 未按期冻结最终动作时按确定规则处理）
+                    continue
+                intents.append(opp)          # R 侧无模型决策，直接执行父策略
+                continue
+            if app['action'] in ('DATA_BLOCKED', 'VETO'):
+                continue
+            intents.append(opp)
+            if scope.endswith(':L'):
+                cost += app.get('model_cost', 0)
+                if app.get('cost_uncertain') and app.get('attempt_id'):
+                    uncertain.append(app['attempt_id'])
+        res = step(state, session=session, bars=bars, corporate_actions=acts,
+                   intents=intents, manifest=m, model_cost=cost,
+                   model_cost_uncertain=tuple(uncertain))
+        if res.nav is None:
+            continue
+        store.save_state(scope, res.state, res.nav, res.events)
+        _mark_applied(store, scope, res, intents, session)
+        executed += len(intents)
+    print(json.dumps({'session': session, 'due': len(due), 'intents_applied': executed},
+                     ensure_ascii=False))
+    return 0
+
+
 def cmd_run_forward(args):
     """逐日增量信号生成 + 前向运行 R/L 账户（真实候选 + 可选真实 LLM）。
 
@@ -359,6 +564,12 @@ def cmd_run_forward(args):
     """
     import pandas as pd
     m = manifest_from_dict(json.loads(Path(args.manifest).read_text()))
+    if m.llm_policy.get('use_real_model'):
+        # 设计 §9：run-forward 是历史夹具/重放工具，必须禁止真实模型调用 ——
+        # 过去的执行日不能用今天生成的模型结果补填前瞻记录。正式运行走三命令。
+        raise ValueError(
+            'RUN_FORWARD_FORBIDS_REAL_MODEL:正式运行请用 prepare-entry-reviews / '
+            'review-entries / settle-session')
     store = ShadowStore(Path(args.output) / m.experiment_id / 'ledger.sqlite3', m.experiment_id)
     from scripts.medium_term.p2_selection_check import (ACTIONS, ETF_RAW, QUALITY, load_panels,
                                                         market_frame, trading_calendar)
@@ -487,7 +698,10 @@ def main(argv=None):
     for name, fn in (('validate', cmd_validate), ('freeze', cmd_freeze),
                      ('run-session', cmd_run_session), ('run-forward', cmd_run_forward),
                      ('replay', cmd_replay), ('report', cmd_report),
-                     ('import-evidence', cmd_import_evidence)):
+                     ('import-evidence', cmd_import_evidence),
+                     ('prepare-entry-reviews', cmd_prepare_entry_reviews),
+                     ('review-entries', cmd_review_entries),
+                     ('settle-session', cmd_settle_session)):
         p = sub.add_parser(name)
         if name == 'import-evidence':
             p.add_argument('--source', required=True, help='真实事件 JSONL')
@@ -501,6 +715,14 @@ def main(argv=None):
         if name == 'run-session':
             p.add_argument('--session', required=True)
             p.add_argument('--schedule', required=True)
+        if name == 'prepare-entry-reviews':
+            p.add_argument('--session', required=True)
+            p.add_argument('--evidence', help='已导入的规范证据存储')
+        if name == 'review-entries':
+            p.add_argument('--execution-session', required=True)
+            p.add_argument('--model', choices=('real', 'fixture'), default='fixture')
+        if name == 'settle-session':
+            p.add_argument('--session', required=True)
         if name == 'run-forward':
             p.add_argument('--to-session', required=True)
             p.add_argument('--evidence',

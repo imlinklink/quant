@@ -366,3 +366,119 @@ class FrozenPacketTests(unittest.TestCase):
         for key in ('events', 'rule_plan', 'identity', 'market_context', 'provenance',
                     'data_quality'):
             self.assertIn(key, stored)
+
+
+class CommandSeparationTests(unittest.TestCase):
+    """设计 §9：决策与结算分离。actions 必须在执行日之前冻结，settle 不得调用模型。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.out = Path(self.tmp) / 'out'
+
+    def _manifest_file(self, **llm_overrides):
+        llm = {'overlay': 'entry_veto', 'evidence_mode': 'strict',
+               'evidence_window_days': 30, 'evidence_max_events': 50}
+        llm.update(llm_overrides)
+        d = {'experiment_id': 'exp1', 'parent_strategy_id': 'B3', 'parent_version': '1',
+             'parent_code_hash': 'abc', 'universe_id': 'u', 'universe_hash': 'uh',
+             'account_scopes': ['SHADOW:exp1:R', 'SHADOW:exp1:L'], 'initial_cash': 100000,
+             'risk_policy': {'single_position_risk_bp': 100, 'max_weight_bp': 2000,
+                             'max_positions': 5},
+             'execution_policy': {'entry_rule': 'b3', 'exit_policy_id': 'H60', 'horizon': 60},
+             'llm_policy': llm, 'calendar_version': 'v1',
+             'evaluation_protocol': {'main_metric': 'L_minus_R_return',
+                                     'enrollment_window': '3-6 months',
+                                     'review_date': '2026-12-31',
+                                     'cost_allocation': 'L_pays_model_cost'}}
+        path = Path(self.tmp) / 'manifest.json'
+        path.write_text(json.dumps(d, ensure_ascii=False), encoding='utf-8')
+        return path
+
+    def test_run_forward_refuses_real_model(self):
+        """过去的执行日不能用今天生成的模型结果补填前瞻记录。"""
+        from types import SimpleNamespace
+        from scripts.portfolio_shadow.cli import cmd_run_forward
+        args = SimpleNamespace(manifest=str(self._manifest_file(use_real_model=True,
+                                                                knowledge_cutoff='unknown')),
+                               output=str(self.out), to_session='2026-01-06', evidence=None)
+        with self.assertRaises(ValueError) as ctx:
+            cmd_run_forward(args)
+        self.assertIn('RUN_FORWARD_FORBIDS_REAL_MODEL', str(ctx.exception))
+
+    def test_review_entries_refuses_real_model_when_manifest_disallows_it(self):
+        from types import SimpleNamespace
+        from scripts.portfolio_shadow.cli import cmd_review_entries
+        import json as _json
+        manifest_path = self._manifest_file()
+        m = manifest_from_dict(_json.loads(manifest_path.read_text())).freeze('2026-01-02')
+        store_dir = self.out / m.experiment_id
+        store_dir.mkdir(parents=True, exist_ok=True)
+        ShadowStore(store_dir / 'ledger.sqlite3', m.experiment_id).save_experiment(m)
+        args = SimpleNamespace(manifest=str(manifest_path), output=str(self.out),
+                               execution_session='2026-01-06', model='real')
+        with self.assertRaises(ValueError) as ctx:
+            cmd_review_entries(args)
+        self.assertIn('MANIFEST_DOES_NOT_ALLOW_REAL_MODEL', str(ctx.exception))
+
+    def test_review_entries_requires_a_prepared_packet(self):
+        """动作只能在已冻结的证据包上做：没有包就必须先去 prepare，不能临时现造。"""
+        from types import SimpleNamespace
+        from scripts.portfolio_shadow.cli import cmd_review_entries
+        import json as _json
+        manifest_path = self._manifest_file()
+        m = manifest_from_dict(_json.loads(manifest_path.read_text())).freeze('2026-01-02')
+        store_dir = self.out / m.experiment_id
+        store_dir.mkdir(parents=True, exist_ok=True)
+        store = ShadowStore(store_dir / 'ledger.sqlite3', m.experiment_id)
+        store.save_experiment(m)
+        store.put_opportunity(opp())
+        args = SimpleNamespace(manifest=str(manifest_path), output=str(self.out),
+                               execution_session='2026-01-06', model='fixture')
+        with self.assertRaises(ValueError) as ctx:
+            cmd_review_entries(args)
+        self.assertIn('PACKET_NOT_PREPARED', str(ctx.exception))
+
+
+class MarkAppliedTests(unittest.TestCase):
+    """动作冻结 ≠ 成交（设计 §7）：结算时才标记 applied，且被引擎拒掉的不算。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.store = ShadowStore(Path(self.tmp) / 'ledger.sqlite3', 'exp1')
+        self.store.save_experiment(manifest())
+
+    def _res(self, events=()):
+        from types import SimpleNamespace
+        return SimpleNamespace(events=list(events))
+
+    def test_creates_intent_created_when_the_scope_has_no_application(self):
+        """回归：R 侧没有模型决策，但账户动作仍要留痕（设计 §6 的 INTENT_CREATED）。"""
+        from scripts.portfolio_shadow.cli import _mark_applied
+        _mark_applied(self.store, 'SHADOW:exp1:R', self._res(), [opp()], '2026-01-06')
+        a = self.store.application('SHADOW:exp1:R', opp().opportunity_id())
+        self.assertEqual(a['action'], 'INTENT_CREATED')
+        self.assertTrue(a['decision_frozen'])
+        self.assertTrue(a['execution_applied'])
+
+    def test_existing_frozen_action_is_marked_applied(self):
+        from scripts.portfolio_shadow.cli import _mark_applied
+        oid = opp().opportunity_id()
+        self.store.put_application(Application(
+            scope='SHADOW:exp1:L', opportunity_id=oid, action='ABSTAIN',
+            reason_code='INSUFFICIENT_EVIDENCE', decision_id='d1', as_of='x',
+            decision_frozen=True, execution_applied=False))
+        _mark_applied(self.store, 'SHADOW:exp1:L', self._res(), [opp()], '2026-01-06')
+        self.assertTrue(self.store.application('SHADOW:exp1:L', oid)['execution_applied'])
+
+    def test_missed_intent_is_not_marked_applied(self):
+        """冻结了但被引擎拒掉 —— 正是要和「成交」区分开的那种情况。"""
+        from scripts.portfolio_shadow.cli import _mark_applied
+        oid = opp().opportunity_id()
+        self.store.put_application(Application(
+            scope='SHADOW:exp1:L', opportunity_id=oid, action='ABSTAIN',
+            reason_code='INSUFFICIENT_EVIDENCE', decision_id='d1', as_of='x',
+            decision_frozen=True, execution_applied=False))
+        res = self._res([{'type': 'missed', 'opportunity_id': oid,
+                          'reason': 'MAX_POSITIONS'}])
+        _mark_applied(self.store, 'SHADOW:exp1:L', res, [opp()], '2026-01-06')
+        self.assertFalse(self.store.application('SHADOW:exp1:L', oid)['execution_applied'])
