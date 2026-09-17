@@ -32,7 +32,8 @@ POLICY_KEYS = {
     'risk_policy': ('single_position_risk_bp', 'max_weight_bp', 'max_positions', 'top_n',
                     'drawdown_ladder'),
     'execution_policy': ('entry_rule', 'exit_policy_id', 'horizon', 'max_wait_sessions'),
-    'llm_policy': ('overlay', 'use_real_model', 'knowledge_cutoff', 'evidence_mode'),
+    'llm_policy': ('overlay', 'use_real_model', 'knowledge_cutoff', 'evidence_mode',
+                   'evidence_window_days', 'evidence_max_events'),
     'evaluation_protocol': ('main_metric', 'enrollment_window', 'review_date',
                             'cost_allocation'),
 }
@@ -115,6 +116,12 @@ class Manifest:
             if mode not in EVIDENCE_MODES:
                 errors.append(f'llm_policy.evidence_mode 非法或缺省：{mode!r}'
                               f'（entry_veto 必填，允许：{list(EVIDENCE_MODES)}）')
+            # 事件窗口与容量固定在 manifest（设计 §5.2）：不冻结就能在看不到更多证据时
+            # 悄悄放宽窗口，把「扩大了取样」伪装成「发现了风险」。
+            for key in ('evidence_window_days', 'evidence_max_events'):
+                value = self.llm_policy.get(key)
+                if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                    errors.append(f'llm_policy.{key} 缺失或非法：{value!r}（entry_veto 必填正整数）')
         if not self.calendar_version:
             errors.append('calendar_version 缺失')
         # 未知键：拼错的键会被 `dict.get` 静默忽略，让安全门无声失效

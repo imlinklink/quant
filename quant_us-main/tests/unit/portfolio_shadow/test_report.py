@@ -161,7 +161,8 @@ class KnowledgeCutoffFreezeTests(unittest.TestCase):
     """真实模型必须显式声明训练数据截止，否则不许 freeze —— 这是对 L−R 的一阶威胁。"""
 
     def test_real_model_requires_declared_knowledge_cutoff(self):
-        m = manifest(llm_policy={'overlay': 'entry_veto', 'evidence_mode': 'strict', 'use_real_model': True})
+        m = manifest(llm_policy={'overlay': 'entry_veto', 'evidence_mode': 'strict',
+                                 'use_real_model': True, 'evidence_window_days': 30, 'evidence_max_events': 50})
         errors = m.validate()
         self.assertTrue(any('knowledge_cutoff' in e for e in errors), errors)
         with self.assertRaises(ValueError):
@@ -169,7 +170,8 @@ class KnowledgeCutoffFreezeTests(unittest.TestCase):
 
     def test_explicit_unknown_is_accepted_so_it_stays_visible(self):
         m = manifest(llm_policy={'overlay': 'entry_veto', 'evidence_mode': 'strict',
-                                 'use_real_model': True, 'knowledge_cutoff': 'unknown'})
+                                 'use_real_model': True, 'knowledge_cutoff': 'unknown',
+                                 'evidence_window_days': 30, 'evidence_max_events': 50})
         self.assertEqual(m.validate(), [])
 
     def test_fixture_model_needs_no_cutoff(self):
@@ -184,7 +186,8 @@ class ReportDisclosureTests(unittest.TestCase):
         self.store = ShadowStore(Path(self.tmp) / 'ledger.sqlite3', 'exp1')
         self.m = manifest(llm_policy={'overlay': 'entry_veto', 'evidence_mode': 'strict',
                                       'use_real_model': True,
-                                      'knowledge_cutoff': '2025-06-01T00:00:00+00:00'}
+                                      'knowledge_cutoff': '2025-06-01T00:00:00+00:00',
+                                      'evidence_window_days': 30, 'evidence_max_events': 50}
                           ).freeze('2026-01-02')
         self.store.save_experiment(self.m)
 
@@ -261,7 +264,9 @@ class EvidenceModeFreezeTests(unittest.TestCase):
 
     def test_report_renders_the_declared_evidence_mode(self):
         m = manifest(llm_policy={'overlay': 'entry_veto',
-                                 'evidence_mode': 'diagnostic'}).freeze('2026-01-02')
+                                 'evidence_mode': 'diagnostic',
+                                 'evidence_window_days': 30,
+                                 'evidence_max_events': 50}).freeze('2026-01-02')
         tmp = tempfile.mkdtemp()
         store = ShadowStore(Path(tmp) / 'ledger.sqlite3', 'exp1')
         store.save_experiment(m)

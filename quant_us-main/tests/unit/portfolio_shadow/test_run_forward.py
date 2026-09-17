@@ -7,16 +7,19 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock
 
+import json
+
 import pandas as pd
 
-from scripts.evidence.evidence_store import normalize_evidence
 from scripts.live_trading.decision_ledger.event_store import stable_id
 from scripts.portfolio_shadow.candidate_adapter import intents_for_session
 from scripts.portfolio_shadow.cli import (apply_entry_reviews, drop_from_schedule,
                                           entry_packet_for, freeze_entry_reviews,
                                           manifest_from_dict, record_data_blocked)
-from scripts.portfolio_shadow.evidence import (build_entry_packet, entry_market_cutoff,
-                                               entry_response_deadline, events_from_records)
+from scripts.portfolio_shadow.evidence import (entry_market_cutoff,
+                                               entry_response_deadline)
+from scripts.portfolio_shadow.evidence_source import (JsonlEvidenceSource,
+                                                     import_evidence_jsonl)
 from scripts.portfolio_shadow.llm_overlay import FakeModel, SCHEMA_VERSION
 from scripts.portfolio_shadow.paper_engine import new_account_state, step
 from scripts.portfolio_shadow.schema import Application, Manifest, Opportunity, to_micro
@@ -33,7 +36,8 @@ def manifest():
         account_scopes=('SHADOW:exp1:R', 'SHADOW:exp1:L'), initial_cash=to_micro(100000),
         risk_policy={'single_position_risk_bp': 100, 'max_weight_bp': 2000, 'max_positions': 5},
         execution_policy={'entry_rule': 'b3', 'exit_policy_id': 'H60', 'horizon': 3},
-        llm_policy={'overlay': 'entry_veto', 'evidence_mode': 'strict'}, calendar_version='v1',
+        llm_policy={'overlay': 'entry_veto', 'evidence_mode': 'strict',
+                                 'evidence_window_days': 30, 'evidence_max_events': 50}, calendar_version='v1',
         evaluation_protocol={'main_metric': 'L_minus_R_return', 'enrollment_window': '3-6 months',
                              'review_date': '2026-12-31', 'cost_allocation': 'L_pays_model_cost'}
     ).freeze('2026-01-02')
@@ -48,21 +52,25 @@ def opp(sid='SEC-A', planned='2026-01-06'):
                        input_hash='h', terminal='READY')
 
 
-def evidence_records(sid='SEC-A', *, published='2026-01-04T12:00:00Z',
-                     observed='2026-01-04T13:00:00Z'):
-    """符合 evidence_store schema 的一条已核实证据（含正文列）。"""
-    row = {'security_id': sid, 'symbol_as_published': sid, 'kind': 'filing',
-           'source_id': 'src1', 'source_record_id': 'rec1',
-           'source_url_or_archive_path': 'file://x',
-           'event_at': published, 'published_at': published,
-           'observed_at': observed, 'ingested_at': observed,
-           'version_id': 'v1', 'supersedes_id': None, 'content_hash': 'a' * 64,
-           'summary_hash': None, 'quality_status': 'verified',
-           'availability_proof': 'archive', 'license_tag': 'research-use-only',
-           'summary': '公司下调全年指引'}
-    frame = normalize_evidence(pd.DataFrame([row]))
-    frame['summary'] = ['公司下调全年指引']  # normalize 剥掉正文，这里按行回挂
-    return frame
+def event_row(sid='SEC-A', *, published='2026-01-04T12:00:00Z', **extra):
+    """一条真实事件（设计 §5.1 的导入格式）。"""
+    return {'security_id': sid, 'event_type': 'filing', 'summary': '公司下调全年指引',
+            'excerpt': '指引下调原文摘录', 'source_url': 'file://x', 'source_type': 'filing',
+            'published_at': published, 'quality_status': 'verified', **extra}
+
+
+def make_source(tmp, rows=None, *, ingested_at='2026-01-04T13:00:00+00:00',
+                window_days=30, max_events=50):
+    """走**真实导入路径**：JSONL → import_evidence_jsonl → JsonlEvidenceSource。
+
+    `observed_at` 由导入那一步写死（= ingested_at），不由 JSONL 追溯指定。
+    """
+    src = Path(tmp) / 'events.jsonl'
+    src.write_text('\n'.join(json.dumps(r, ensure_ascii=False) for r in (rows or [event_row()])),
+                   encoding='utf-8')
+    store = Path(tmp) / 'evidence.csv'
+    import_evidence_jsonl(src, store, ingested_at=ingested_at)
+    return JsonlEvidenceSource(store, window_days=window_days, max_events=max_events)
 
 
 class OverlayForwardTests(unittest.TestCase):
@@ -73,7 +81,7 @@ class OverlayForwardTests(unittest.TestCase):
         self.scope = 'SHADOW:exp1:L'
         self.quotes = {'SEC-A': {'price': to_micro(100), 'observed_at': '2026-01-04T21:00:00Z'}}
 
-    def _run(self, model, records=None, notes=None, quotes=None, force_recall=False,
+    def _run(self, model, source=None, notes=None, quotes=None, force_recall=False,
              scopes=None, collected_at=None):
         """走生产同一条两阶段路径：先冻结证据包+质量分流，再对非 BLOCK 的做评审。"""
         notes = notes or [opp()]
@@ -81,7 +89,7 @@ class OverlayForwardTests(unittest.TestCase):
         market_cutoff = entry_market_cutoff(SIGNAL)
         deadline = entry_response_deadline(EXEC)
         reviews, blocked = freeze_entry_reviews(
-            self.store, notes, quotes=quotes, records=records,
+            self.store, notes, quotes=quotes, source=source,
             market_cutoff=market_cutoff, deadline=deadline, evidence_mode='strict',
             collected_at=collected_at or market_cutoff)
         for o, packet in blocked:
@@ -131,9 +139,9 @@ class OverlayForwardTests(unittest.TestCase):
         回归：把证据 as_of 当成信号日收盘，会把 published_at 晚于收盘的事件系统性
         排除在决策之外。
         """
-        records = evidence_records(published='2026-01-05T21:30:00Z',
-                                   observed='2026-01-05T22:00:00Z')
-        self._run(Mock(), records=records, collected_at='2026-01-05T23:00:00+00:00')
+        source = make_source(self.tmp, [event_row(published='2026-01-05T21:30:00Z')],
+                             ingested_at='2026-01-05T22:00:00+00:00')
+        self._run(Mock(), source=source, collected_at='2026-01-05T23:00:00+00:00')
         packet = self.store.packet_for_opportunity(opp().opportunity_id())
         self.assertEqual(len(packet['events']), 1)
         self.assertEqual(packet['events'][0]['summary'], '公司下调全年指引')
@@ -149,39 +157,36 @@ class OverlayForwardTests(unittest.TestCase):
 
         stub = Mock()
         stub.call.side_effect = _passthrough
-        records = evidence_records()
-        # FakeModel 的 evidence_ids 需引用包内 id：先取一次包
-        from scripts.portfolio_shadow.evidence import build_entry_packet
-        from scripts.portfolio_shadow.evidence import events_from_records
-        events = events_from_records(records, 'SEC-A', entry_market_cutoff(SIGNAL))[0]
-        pkt = build_entry_packet(opp(), self.quotes['SEC-A'], events, {},
-                                 entry_market_cutoff(SIGNAL))
-        model.evidence_ids = [pkt['events'][0]['evidence_id']]
-        kept, cost, _ = self._run(stub, records=records)
+        source = make_source(self.tmp)
+        fetch = source.load_events('SEC-A', entry_market_cutoff(SIGNAL))
+        model.evidence_ids = [fetch.events[0]['evidence_id']]
+        kept, cost, _ = self._run(stub, source=source)
         self.assertEqual(kept, [])              # VETO ⇒ L 不建仓
         self.assertEqual(cost, 250)
         app = self.store.application(self.scope, opp().opportunity_id())
         self.assertEqual(app['action'], 'VETO')
         self.assertEqual(app['reason_code'], 'MATERIAL_COMPANY_EVENT_RISK')
         # 包内确实带上了可读正文，VETO 才有依据
-        self.assertEqual(pkt['events'][0]['summary'], '公司下调全年指引')
+        frozen = self.store.packet_for_opportunity(opp().opportunity_id())
+        self.assertEqual(frozen['events'][0]['summary'], '公司下调全年指引')
+        self.assertEqual(frozen['events'][0]['excerpt'], '指引下调原文摘录')
 
     def test_rerun_reuses_recorded_decision_without_second_call(self):
         model = FakeModel(action='PASS', cost_micro=500)
         stub = Mock()
         stub.call.side_effect = lambda packet, deadline: model.call(packet, deadline)
-        self._run(stub, records=evidence_records())
+        self._run(stub, source=make_source(self.tmp))
         first = stub.call.call_count
         self.assertEqual(first, 1)
         # 重跑同一 session：必须复用已落库决定，不得重复付费
-        self._run(stub, records=evidence_records())
+        self._run(stub, source=make_source(self.tmp))
         self.assertEqual(stub.call.call_count, first)
 
     def test_unknown_cost_is_surfaced_not_swallowed(self):
         model = FakeModel(action='PASS', cost_micro=None, cost_uncertain=True)
         stub = Mock()
         stub.call.side_effect = lambda packet, deadline: model.call(packet, deadline)
-        kept, cost, uncertain = self._run(stub, records=evidence_records())
+        kept, cost, uncertain = self._run(stub, source=make_source(self.tmp))
         self.assertEqual(cost, 0)               # 尚未计入，不是免费
         self.assertEqual(len(uncertain), 1)
         app = self.store.application(self.scope, opp().opportunity_id())
@@ -207,7 +212,8 @@ class CrashWindowTests(unittest.TestCase):
 
     def _attempt_id(self):
         # 走生产同一条路径造包：两边各造一次包会让 attempt_id 错位，守卫静默失效
-        packet = entry_packet_for(opp(), self.quotes['SEC-A'], evidence_records(),
+        fetch = make_source(self.tmp).load_events('SEC-A', entry_market_cutoff(SIGNAL))
+        packet = entry_packet_for(opp(), self.quotes['SEC-A'], fetch,
                                   entry_market_cutoff(SIGNAL))
         return stable_id('llm_attempt', self.scope, self.oid, packet['packet_id'])
 
@@ -215,7 +221,7 @@ class CrashWindowTests(unittest.TestCase):
         market_cutoff = entry_market_cutoff(SIGNAL)
         deadline = entry_response_deadline(EXEC)
         reviews, blocked = freeze_entry_reviews(
-            self.store, [opp()], quotes=self.quotes, records=evidence_records(),
+            self.store, [opp()], quotes=self.quotes, source=make_source(self.tmp),
             market_cutoff=market_cutoff, deadline=deadline, evidence_mode='strict',
             collected_at=market_cutoff)
         self.assertEqual(blocked, [])
@@ -267,7 +273,7 @@ class CrashWindowTests(unittest.TestCase):
         market_cutoff = entry_market_cutoff(SIGNAL)
         deadline = entry_response_deadline(EXEC)
         reviews, _ = freeze_entry_reviews(
-            self.store, [opp()], quotes=self.quotes, records=None,
+            self.store, [opp()], quotes=self.quotes, source=None,
             market_cutoff=market_cutoff, deadline=deadline, evidence_mode='strict',
             collected_at=market_cutoff)
         apply_entry_reviews(self.store, self.scope, reviews, deadline=deadline,
@@ -390,7 +396,7 @@ class FrozenPacketTests(unittest.TestCase):
         market = entry_market_cutoff(SIGNAL)
         deadline = entry_response_deadline(EXEC)
         reviews, _ = freeze_entry_reviews(
-            self.store, [opp()], quotes=self.quotes, records=evidence_records(),
+            self.store, [opp()], quotes=self.quotes, source=make_source(self.tmp),
             market_cutoff=market, deadline=deadline, evidence_mode='strict',
             collected_at=collected)
         return reviews[0][1]

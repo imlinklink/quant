@@ -201,27 +201,19 @@ def cmd_report(args):
     return 0
 
 
-TEXT_COLUMNS = ('summary', 'summary_text', 'text', 'headline', 'title')
+def _evidence_source(m, path):
+    """按 manifest 固定的窗口/容量策略构造证据来源（设计 §5.2：二者固定在 manifest）。
 
-
-def _load_evidence(path):
-    """加载证据记录（CSV/JSONL）并规整为 evidence_store schema；未提供返回 None。
-
-    `normalize_evidence` 只保留 `summary_hash`，会把正文剥掉；而入场否决必须让模型看到
-    正文才能判断，所以这里把正文列按行回挂（normalize 逐行 map，不改变行序）。
+    `path` 是**已导入**的规范证据存储（由 `evidence_source.import_evidence_jsonl` 产出），
+    不是原始来源文件 —— 入库时刻必须在导入那一步写死，读取时才取当前时刻会让证据随重跑
+    而"变得可得"。
     """
     if not path:
         return None
-    import pandas as pd
-    from scripts.evidence.evidence_store import normalize_evidence
-    p = Path(path)
-    frame = (pd.read_json(p, lines=True) if p.suffix in ('.jsonl', '.ndjson')
-             else pd.read_csv(p))
-    normalized = normalize_evidence(frame)
-    for column in TEXT_COLUMNS:
-        if column in frame.columns:
-            normalized[column] = list(frame[column])
-    return normalized
+    from .evidence_source import JsonlEvidenceSource
+    return JsonlEvidenceSource(
+        path, window_days=int(m.llm_policy['evidence_window_days']),
+        max_events=int(m.llm_policy['evidence_max_events']))
 
 
 def _make_real_model(m):
@@ -286,30 +278,29 @@ def _reuse_or_decide(store, scope, opp, packet, attempt_id, deadline, model_fact
     return d
 
 
-def entry_packet_for(opp, quote, records, as_of, *, evidence_mode='strict',
+def entry_packet_for(opp, quote, fetch, as_of, *, evidence_mode='strict',
                      knowledge_cutoff=None):
-    """构建某机会的 entry-veto 证据包（含证据等级 meta）。
+    """构建某机会的 entry-veto 证据包（设计 §5.1）。
 
-    `as_of` 是**证据截止**（实际采集时刻），同时用于证据可见性过滤与包内 as_of 字段。
+    `fetch` 是 `EvidenceFetchResult`（或 None 表示未接入证据源）。`as_of` 是**证据采集
+    时刻**，同时用于证据可见性过滤与包内 as_of 字段。
 
-    `run_entry_overlay` 与需要复算 `attempt_id` 的调用方（含测试）必须走同一条路径 ——
-    两边各造一次包，一旦有差异 `attempt_id` 就会错位，崩溃窗口守卫会静默失效。
+    需要复算 `attempt_id` 的调用方（含测试）必须走同一条路径 —— 两边各造一次包，一旦有
+    差异 `attempt_id` 就会错位，崩溃窗口守卫会静默失效。
     """
-    if records is None:
-        events = []
-        meta = {'evidence_mode': evidence_mode, 'source_packet_hash': None,
-                'included_event_count': 0, 'exclusion_count': 0, 'exclusion_reasons': {}}
+    if fetch is None:
+        events, meta, status = [], {'evidence_mode': evidence_mode}, 'NOT_CONFIGURED'
     else:
-        events, _, meta = events_from_records(records, opp.security_id, as_of,
-                                              policy=policy_for_mode(evidence_mode))
+        events, meta, status = list(fetch.events), dict(fetch.meta), fetch.status
         if meta.get('evidence_mode') not in (None, evidence_mode):
             # evidence_store 由策略反推的等级与 manifest 声明的不一致 = 两处定义漂移
             raise ValueError(f'EVIDENCE_MODE_DRIFT:{meta["evidence_mode"]}!={evidence_mode}')
     return build_entry_packet(opp, quote, events, {}, as_of,
-                              model_knowledge_cutoff=knowledge_cutoff, evidence=meta)
+                              model_knowledge_cutoff=knowledge_cutoff, evidence=meta,
+                              fetch_status=status)
 
 
-def freeze_entry_reviews(store, opportunities, *, quotes, records, market_cutoff, deadline,
+def freeze_entry_reviews(store, opportunities, *, quotes, source, market_cutoff, deadline,
                          evidence_mode='strict', knowledge_cutoff=None, collected_at=None):
     """账户无关阶段：一个机会一个冻结证据包，并做数据质量分流。
 
@@ -327,7 +318,10 @@ def freeze_entry_reviews(store, opportunities, *, quotes, records, market_cutoff
     for opp in opportunities:
         packet = store.packet_for_opportunity(opp.opportunity_id())
         if packet is None:
-            packet = entry_packet_for(opp, quotes.get(opp.security_id, {}), records, as_of,
+            fetch = (None if source is None
+                     else source.load_events(opp.security_id, as_of,
+                                             evidence_mode=evidence_mode))
+            packet = entry_packet_for(opp, quotes.get(opp.security_id, {}), fetch, as_of,
                                       evidence_mode=evidence_mode,
                                       knowledge_cutoff=knowledge_cutoff)
             store.put_packet(opp.opportunity_id(), packet)
@@ -420,7 +414,7 @@ def cmd_run_forward(args):
     overlay = m.llm_policy.get('overlay', 'fixed_pass')
     real_model = (_make_real_model(m)
                   if overlay == 'entry_veto' and m.llm_policy.get('use_real_model') else None)
-    records = _load_evidence(getattr(args, 'evidence', None))
+    source = _evidence_source(m, getattr(args, 'evidence', None))
 
     start = m.start_session or str(pd.Timestamp(cal[0]).date())
     end = args.to_session
@@ -456,7 +450,7 @@ def cmd_run_forward(args):
             store, fresh,
             quotes={o.security_id: {'price': close_micro[(session, o.security_id)],
                                     'observed_at': market_cutoff} for o in fresh},
-            records=records, market_cutoff=market_cutoff, deadline=deadline,
+            source=source, market_cutoff=market_cutoff, deadline=deadline,
             evidence_mode=m.llm_policy.get('evidence_mode', 'strict'),
             knowledge_cutoff=m.llm_policy.get('knowledge_cutoff'),
             collected_at=entry_collection_time(market_cutoff, deadline))
@@ -501,13 +495,33 @@ def cmd_run_forward(args):
     return 0
 
 
+def cmd_import_evidence(args):
+    """把真实事件 JSONL 导入为规范证据存储（设计 §5.2）。
+
+    **入库时刻在这一步写死**：`observed_at` = 系统实际入库时间，不由来源文件追溯指定。
+    之后每次 `load_events` 读到的都是同一个值 —— 否则重跑会让证据随重跑而「变得可得」。
+    """
+    from .evidence_source import import_evidence_jsonl
+    print(json.dumps(import_evidence_jsonl(args.source, args.output,
+                                           ingested_at=args.ingested_at),
+                     ensure_ascii=False))
+    return 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog='portfolio_shadow')
     sub = parser.add_subparsers(dest='cmd', required=True)
     for name, fn in (('validate', cmd_validate), ('freeze', cmd_freeze),
                      ('run-session', cmd_run_session), ('run-forward', cmd_run_forward),
-                     ('replay', cmd_replay), ('report', cmd_report)):
+                     ('replay', cmd_replay), ('report', cmd_report),
+                     ('import-evidence', cmd_import_evidence)):
         p = sub.add_parser(name)
+        if name == 'import-evidence':
+            p.add_argument('--source', required=True, help='真实事件 JSONL')
+            p.add_argument('--ingested-at', help='入库时刻（默认当前，测试用）')
+            p.add_argument('--output', required=True, help='规范证据存储输出路径')
+            p.set_defaults(fn=fn)
+            continue
         p.add_argument('--manifest', required=True)
         if name == 'freeze':
             p.add_argument('--start-session', required=True)
@@ -516,7 +530,8 @@ def main(argv=None):
             p.add_argument('--schedule', required=True)
         if name == 'run-forward':
             p.add_argument('--to-session', required=True)
-            p.add_argument('--evidence', help='证据记录文件（CSV/JSONL，evidence_store schema）')
+            p.add_argument('--evidence',
+                           help='已导入的规范证据存储（由 import-evidence 产出）')
         p.add_argument('--output', required=True)
         p.set_defaults(fn=fn)
     args = parser.parse_args(argv)

@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import math
 from datetime import datetime, timezone
 
 from scripts.evidence.evidence_store import market_close, market_time
@@ -96,6 +97,19 @@ def _parse_iso(v):
         return None
 
 
+def _clean(value):
+    """pandas 缺失值 → None。
+
+    `float('nan')` 是 **truthy** 的，所以 `str(raw.get(k) or '')` 会把缺失字段变成字符串
+    `'nan'` 混进证据；NaN 本身又让 JSON 落库直接失败（且进 prompt 只会是噪声）。
+    """
+    if value is None:
+        return None
+    if isinstance(value, float) and math.isnan(value):
+        return None
+    return value
+
+
 def _norm_events(events, as_of_dt, *, require_observed_at: bool = True):
     """校验事件双时间，返回 (可用事件列表, 被丢弃计数)。
 
@@ -106,8 +120,8 @@ def _norm_events(events, as_of_dt, *, require_observed_at: bool = True):
     """
     usable, dropped = [], 0
     for e in events or []:
-        published = _parse_iso(e.get('published_at'))
-        observed = _parse_iso(e.get('observed_at'))
+        published = _parse_iso(_clean(e.get('published_at')))
+        observed = _parse_iso(_clean(e.get('observed_at')))
         if published is None or (require_observed_at and observed is None):
             dropped += 1
             continue
@@ -127,9 +141,9 @@ def _norm_events(events, as_of_dt, *, require_observed_at: bool = True):
             'source_url': e.get('source_url', ''),
             'kind': e.get('kind', 'rule'),
             'event_type': e.get('event_type') or e.get('kind', 'rule'),
-            'published_at': e.get('published_at'),
-            'observed_at': e.get('observed_at'),
-            'cluster_id': e.get('cluster_id', ''),
+            'published_at': _clean(e.get('published_at')),
+            'observed_at': _clean(e.get('observed_at')),
+            'cluster_id': str(_clean(e.get('cluster_id')) or ''),
             # 可读正文：模型必须能看到证据内容才能判断，只留哈希等于让它瞎猜。
             # summary = 可直接阅读的事实摘要；excerpt = 支持该摘要的短原文摘录。
             'title': str(e.get('title') or '')[:MAX_SUMMARY_CHARS],
@@ -159,7 +173,8 @@ def events_from_records(records, security_id, decision_cutoff, *, policy=None, r
                                       source_version=source_version,
                                       price_version=price_version,
                                       policy=policy, resolver=resolver)
-    by_id = {str(r.get('evidence_id')): r for r in records.to_dict('records')}
+    by_id = {str(r.get('evidence_id')): {k: _clean(v) for k, v in r.items()}
+             for r in records.to_dict('records')}
     events = []
     for e in packet['events']:
         raw = by_id.get(str(e['evidence_id']), {})
@@ -170,20 +185,20 @@ def events_from_records(records, security_id, decision_cutoff, *, policy=None, r
                 break
         events.append({
             'evidence_id': e['evidence_id'],
-            'security_id': str(security_id),
-            'source': e.get('source_id'),
+            'security_id': str(_clean(security_id) or ''),
+            'source': _clean(e.get('source_id')),
             # 来源可核对：设计 §5.1 要求摘要必须有支持它的原文与链接
             'source_url': str(raw.get('source_url_or_archive_path') or ''),
-            'kind': e.get('kind'),
-            'event_type': str(raw.get('kind') or e.get('kind') or ''),
-            'published_at': e.get('published_at'),
-            'observed_at': e.get('observed_at'),
+            'kind': _clean(e.get('kind')),
+            'event_type': str(raw.get('kind') or _clean(e.get('kind')) or ''),
+            'published_at': _clean(e.get('published_at')),
+            'observed_at': _clean(e.get('observed_at')),
             'cluster_id': str(raw.get('source_record_id') or ''),
             'title': str(raw.get('title') or '')[:MAX_SUMMARY_CHARS],
             'summary': summary[:MAX_SUMMARY_CHARS],
             'excerpt': str(raw.get('excerpt') or summary)[:MAX_SUMMARY_CHARS],
             'summary_truncated': len(summary) > MAX_SUMMARY_CHARS,
-            'content_hash': e.get('content_hash'),
+            'content_hash': _clean(e.get('content_hash')),
         })
     reasons = {}
     for item in exclusions:

@@ -28,7 +28,10 @@ from .schema import SHADOW_TERMINALS
 #       rule_reason_codes/market_snapshot_id（设计 §4），进 shadow:opportunity 事件 payload。
 #   5 → 证据截止语义分离：包内 as_of 由「信号日收盘」改为「实际采集时刻」（设计 §3.2），
 #       值变 ⇒ packet_id 变 ⇒ attempt_id 变 ⇒ Application 与 shadow:packet 事件 payload 变。
-SHADOW_SCHEMA_VERSION = 5
+#   6 → 证据源接入：事件字段做缺失值清洗（NaN → None，原先会变成字面量 'nan'）、
+#       data_quality.fetch_status 取值扩展（OK/EMPTY/FAILED/NOT_CONFIGURED）、
+#       evidence.meta 增窗口/容量截断统计。
+SHADOW_SCHEMA_VERSION = 6
 
 _SHADOW_DDL = '''
 CREATE TABLE IF NOT EXISTS shadow_schema(version INTEGER PRIMARY KEY);
