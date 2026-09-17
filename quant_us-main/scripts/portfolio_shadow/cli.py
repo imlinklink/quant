@@ -499,6 +499,7 @@ def cmd_review_entries(args):
                          'manifest.llm_policy.use_real_model 未开启')
     real_model = (_make_real_model(m, allow_historical=debug)
                   if (use_real or debug) else None)
+    fixture_action = getattr(args, 'fixture_action', 'PASS')
 
     deadline = entry_response_deadline(args.execution_session)
     scope = next(s for s in m.account_scopes if s.endswith(':L'))
@@ -506,6 +507,10 @@ def cmd_review_entries(args):
         store, scope, real_model,
         model_id=(m.llm_policy.get('model_id')
                   or ('real' if use_real else ('historical_debug' if debug else 'fixture'))),
+        model_factory=((lambda: FakeModel(
+            action=fixture_action, cost_micro=0, evidence_from_packet=True,
+            reason_code=('MATERIAL_COMPANY_EVENT_RISK' if fixture_action == 'VETO' else '')))
+            if (not use_real and not debug) else None),
         debug=debug)
     due = [_opportunity_from_dict(o) for o in store.opportunities()
            if o.get('planned_execution_session') == args.execution_session]
@@ -553,6 +558,87 @@ def cmd_review_entries(args):
     return 0
 
 
+def _ensure_reviewed(store, scope, opp, deadline, now):
+    """L 侧到期机会必须有已冻结动作；没有时按截止是否已过分别处理（设计 §3.3）。
+
+    - 截止已过 → **明确冻结 ABSTAIN 并留下原因**（采用父策略，与 ABSTAIN 语义一致）；
+    - 截止未到或状态无法确认 → **阻塞结算**。
+
+    静默跳过是不行的：那会把一次调度失败/调用崩溃，在账户结果上表现成一次**没有记录的
+    否决**，而 R 仍按规则买入 —— 两账户的差异就此失去归因。
+    """
+    app = store.application(scope, opp.opportunity_id())
+    if app is not None:
+        return app
+    if str(now) <= str(deadline):
+        raise ValueError(f'SETTLEMENT_BLOCKED_DECISION_PENDING:{opp.opportunity_id()}:'
+                         f'deadline={deadline}:now={now}')
+    store.put_application(Application(
+        scope=scope, opportunity_id=opp.opportunity_id(), action='ABSTAIN',
+        reason_code='DECISION_DEADLINE_MISSED', decision_id='', as_of=deadline,
+        decision_frozen=True, execution_applied=False))
+    return store.application(scope, opp.opportunity_id())
+
+
+def _settle_terminals(store, scopes, due, session) -> int:
+    """收口机会终态：EXECUTED = 至少一个账户真的成交；否则 MISSED_EXECUTION。
+
+    某账户被 VETO 与否是**账户级**细节（记在 applications 里），不改变共享漏斗终态 ——
+    同一个机会被 L 否决但 R 成交，它依然是 EXECUTED。
+    """
+    done = set()
+    for scope in scopes:
+        done |= store.executed_opportunities(scope, session)
+    for opp in due:
+        oid = opp.opportunity_id()
+        store.set_opportunity_terminal(
+            oid, 'EXECUTED' if oid in done else 'MISSED_EXECUTION', session,
+            note='' if oid in done else 'NO_ACCOUNT_EXECUTED')
+    return len(due)
+
+
+def _settle_cost(resolved: dict) -> tuple:
+    """该 session 该账户的模型成本与待补记尝试。
+
+    **与是否成交无关**：设计 §8 要求 L 承担所有模型调用成本，包含失败和弃权。
+    原先这段写在「非 VETO 才继续」之后，于是否决越多、漏算越多 —— 抽成独立函数并直接
+    对已解析的动作集合计算，杜绝再次被某个 `continue` 绕过。
+    """
+    cost, uncertain = 0, []
+    for app in resolved.values():
+        if not app:
+            continue
+        cost += app.get('model_cost', 0)
+        if app.get('cost_uncertain') and app.get('attempt_id'):
+            uncertain.append(app['attempt_id'])
+    return cost, uncertain
+
+
+def _settle_intents(due, resolved) -> list:
+    """进入引擎的机会：终态为 DATA_BLOCKED / VETO 的不执行。"""
+    return [opp for opp in due
+            if (resolved.get(opp.opportunity_id()) or {}).get('action')
+            not in ('DATA_BLOCKED', 'VETO')]
+
+
+def _settle_marks(store, scope, res, intents, session) -> list:
+    """要落的「动作已应用」标记；被引擎拒掉（missed）的不算成交。"""
+    missed = {e.get('opportunity_id') for e in res.events if e.get('type') == 'missed'}
+    marks = []
+    for o in intents:
+        if o.opportunity_id() in missed:
+            continue
+        create = None
+        if store.application(scope, o.opportunity_id()) is None:
+            # R 侧无模型决策，但账户动作仍要留痕（设计 §6 的 INTENT_CREATED）
+            create = Application(
+                scope=scope, opportunity_id=o.opportunity_id(), action='INTENT_CREATED',
+                reason_code='PARENT_STRATEGY', decision_id='', as_of=session,
+                decision_frozen=True, execution_applied=True)
+        marks.append({'opportunity_id': o.opportunity_id(), 'create': create})
+    return marks
+
+
 def cmd_settle_session(args):
     """`settle-session --session T1`：消费已冻结动作与当日行情，推进 R/L 并出报告（§9）。
 
@@ -565,6 +651,8 @@ def cmd_settle_session(args):
     store = ShadowStore(Path(args.output) / m.experiment_id / 'ledger.sqlite3', m.experiment_id)
     prices, actions, _, _ = _market_data()
     session = args.session
+    now = now_iso()
+    deadline = entry_response_deadline(session)
     bars = {sid: {'open': to_micro(r.raw_open), 'high': to_micro(r.raw_high),
                   'low': to_micro(r.raw_low), 'close': to_micro(r.raw_close)}
             for sid, r in prices[prices.session.eq(pd.Timestamp(session))]
@@ -577,30 +665,36 @@ def cmd_settle_session(args):
         row = store.latest_state(scope)
         saved = row[1] if row else None
         state = state_from_dict(saved) if saved else new_account_state(scope, m.initial_cash)
-        intents, cost, uncertain = [], 0, []
-        for opp in due:
-            app = store.application(scope, opp.opportunity_id())
-            if app is None:
-                if scope.endswith(':L') and m.llm_policy.get('overlay') == 'entry_veto':
-                    # 未评审：不放行（设计 §3.3 未按期冻结最终动作时按确定规则处理）
-                    continue
-                intents.append(opp)          # R 侧无模型决策，直接执行父策略
-                continue
-            if app['action'] in ('DATA_BLOCKED', 'VETO'):
-                continue
-            intents.append(opp)
-            if scope.endswith(':L'):
-                cost += app.get('model_cost', 0)
-                if app.get('cost_uncertain') and app.get('attempt_id'):
-                    uncertain.append(app['attempt_id'])
+        is_l = scope.endswith(':L') and m.llm_policy.get('overlay') == 'entry_veto'
+        # 1) 先解析每个到期机会的最终动作：L 侧缺动作时按截止冻结 ABSTAIN 或阻塞结算
+        resolved = {
+            opp.opportunity_id(): (
+                _ensure_reviewed(store, scope, opp, deadline, now) if is_l
+                else store.application(scope, opp.opportunity_id()))
+            for opp in due}
+        # 2) 成本与是否成交无关，独立计算
+        cost, uncertain = _settle_cost(resolved) if is_l else (0, [])
+        # 3) 计划进入引擎的机会
+        intents = _settle_intents(due, resolved)
         res = step(state, session=session, bars=bars, corporate_actions=acts,
                    intents=intents, manifest=m, model_cost=cost,
                    model_cost_uncertain=tuple(uncertain))
         if res.nav is None:
+            # 已处理过：账户不重复推进，但**补做归因**（上次可能崩在状态与标记之间）。
+            # 用**已落库的成交事件**判断谁真的成交了，而不是拿内存里的 intents 猜。
+            done = store.executed_opportunities(scope, session)
+            executed += len(done)
+            if done:
+                store.save_state(scope, res.state, None, [], session=session,
+                                 applied_marks=[{'opportunity_id': oid, 'create': None}
+                                                for oid in sorted(done)])
             continue
-        store.save_state(scope, res.state, res.nav, res.events)
-        _mark_applied(store, scope, res, intents, session)
+        # 状态、事件与归因标记**同事务**提交，不留「已成交但未标记」的窗口
+        store.save_state(scope, res.state, res.nav, res.events, session=session,
+                         applied_marks=_settle_marks(store, scope, res, intents, session))
         executed += len(intents)
+    # 机会终态在结算时收口（run-forward 有，settle 原先漏了）
+    _settle_terminals(store, m.account_scopes, due, session)
     print(json.dumps({'session': session, 'due': len(due), 'intents_applied': executed},
                      ensure_ascii=False))
     return 0
@@ -739,9 +833,9 @@ def cmd_import_evidence(args):
     之后每次 `load_events` 读到的都是同一个值 —— 否则重跑会让证据随重跑而「变得可得」。
     """
     from .evidence_source import import_evidence_jsonl
-    print(json.dumps(import_evidence_jsonl(args.source, args.output,
-                                           ingested_at=args.ingested_at),
-                     ensure_ascii=False))
+    print(json.dumps(import_evidence_jsonl(
+        args.source, args.output, ingested_at=args.ingested_at,
+        observed_at_policy=args.observed_at_policy), ensure_ascii=False))
     return 0
 
 
@@ -759,6 +853,9 @@ def main(argv=None):
         if name == 'import-evidence':
             p.add_argument('--source', required=True, help='真实事件 JSONL')
             p.add_argument('--ingested-at', help='入库时刻（默认当前，测试用）')
+            p.add_argument('--observed-at-policy', choices=('ingest', 'unknown'),
+                           default='ingest',
+                           help='unknown = 留空（第三方历史档案，无观测记录）')
             p.add_argument('--output', required=True, help='规范证据存储输出路径')
             p.set_defaults(fn=fn)
             continue
@@ -775,6 +872,9 @@ def main(argv=None):
             p.add_argument('--execution-session', required=True)
             p.add_argument('--model', choices=('real', 'fixture', 'historical_debug'),
                            default='fixture')
+            p.add_argument('--fixture-action', choices=('PASS', 'VETO', 'ABSTAIN'),
+                           default='PASS',
+                           help='fixture 模型的动作（设计 §11 的确定性 VETO 验收用）')
         if name == 'settle-session':
             p.add_argument('--session', required=True)
         if name == 'report':

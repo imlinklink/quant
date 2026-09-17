@@ -155,8 +155,12 @@ class FakeModel:
     """确定性测试模型：可注入 PASS/VETO/ABSTAIN 与成本，无网络。"""
 
     def __init__(self, action='PASS', reason_code='', evidence_ids=None, *, cost_micro=100,
-                 status='OK', completed_at='2026-01-02T00:00:00+00:00', cost_uncertain=False):
+                 status='OK', completed_at='2026-01-02T00:00:00+00:00', cost_uncertain=False,
+                 evidence_from_packet=False):
         self.action = action
+        # VETO 必须引用包内证据，否则会被验证器降级成 INVALID_OUTPUT。确定性的 VETO
+        # fixture（设计 §11 验收案例）需要这个开关 —— 它只能看到调用时传入的那个包。
+        self.evidence_from_packet = evidence_from_packet
         self.reason_code = reason_code
         self.evidence_ids = evidence_ids or []
         self.cost_micro = cost_micro
@@ -165,12 +169,15 @@ class FakeModel:
         self.cost_uncertain = cost_uncertain
 
     def call(self, packet: dict, deadline: str) -> dict:
+        evidence_ids = list(self.evidence_ids)
+        if self.evidence_from_packet:
+            evidence_ids = [e['evidence_id'] for e in packet.get('events', [])][:1]
         output = {'schema_version': SCHEMA_VERSION,
                   'opportunity_id': packet.get('opportunity_id'),
                   'packet_id': packet.get('packet_id'),
                   'action': self.action,
                   'reason_code': self.reason_code,
-                  'evidence_ids': list(self.evidence_ids),
+                  'evidence_ids': evidence_ids,
                   'explanation': ''}
         return {'status': self.status, 'output': output, 'completed_at': self.completed_at,
                 'cost_micro': self.cost_micro, 'cost_uncertain': self.cost_uncertain}

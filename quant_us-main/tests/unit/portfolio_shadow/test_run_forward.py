@@ -14,7 +14,9 @@ import pandas as pd
 
 from scripts.live_trading.decision_ledger.event_store import stable_id
 from scripts.portfolio_shadow.candidate_adapter import intents_for_session
-from scripts.portfolio_shadow.cli import (apply_entry_reviews, drop_from_schedule,
+from scripts.portfolio_shadow.cli import (_ensure_reviewed, _settle_cost,
+                                          _settle_intents, _settle_marks,
+                                          apply_entry_reviews, drop_from_schedule,
                                           entry_packet_for, freeze_entry_reviews,
                                           manifest_from_dict, record_data_blocked)
 from scripts.portfolio_shadow.evidence import (entry_market_cutoff,
@@ -482,3 +484,143 @@ class MarkAppliedTests(unittest.TestCase):
                           'reason': 'MAX_POSITIONS'}])
         _mark_applied(self.store, 'SHADOW:exp1:L', res, [opp()], '2026-01-06')
         self.assertFalse(self.store.application('SHADOW:exp1:L', oid)['execution_applied'])
+
+
+class SettleAccountingTests(unittest.TestCase):
+    """用户 review 的三项验收阻塞：VETO 成本漏记、未评审静默跳过、归因与成交不原子。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.store = ShadowStore(Path(self.tmp) / 'ledger.sqlite3', 'exp1')
+        self.m = manifest().freeze('2026-01-02')
+        self.store.save_experiment(self.m)
+        self.L = 'SHADOW:exp1:L'
+        self.R = 'SHADOW:exp1:R'
+        self.deadline = entry_response_deadline('2026-01-06')
+
+    def _opp(self, sid='SEC-A'):
+        o = opp(sid, '2026-01-06')
+        self.store.put_opportunity(o)
+        return o
+
+    def _app(self, scope, oid, action, **kw):
+        self.store.put_application(Application(
+            scope=scope, opportunity_id=oid, action=action,
+            reason_code=kw.get('reason', 'R'), decision_id=kw.get('decision_id', ''),
+            as_of='2026-01-05T23:00:00Z', decision_frozen=True, execution_applied=False,
+            model_cost=kw.get('model_cost', 0),
+            cost_uncertain=kw.get('cost_uncertain', False),
+            attempt_id=kw.get('attempt_id', '')))
+
+    # ---- 问题 2：模型成本必须独立于是否交易入账 ----
+
+    def test_veto_cost_is_accounted(self):
+        o = self._opp()
+        oid = o.opportunity_id()
+        self._app(self.L, oid, 'VETO', model_cost=123, decision_id='d1')
+        resolved = {oid: self.store.application(self.L, oid)}
+        cost, _ = _settle_cost(resolved)
+        self.assertEqual(cost, 123)                    # 否决了，但调用过的钱要记
+        self.assertEqual(_settle_intents([o], resolved), [])   # 同时不执行
+
+    def test_veto_uncertain_cost_is_surfaced(self):
+        o = self._opp()
+        oid = o.opportunity_id()
+        self._app(self.L, oid, 'VETO', cost_uncertain=True, attempt_id='d1')
+        cost, uncertain = _settle_cost({oid: self.store.application(self.L, oid)})
+        self.assertEqual(cost, 0)
+        self.assertEqual(uncertain, ['d1'])
+
+    def test_data_blocked_carries_no_cost_and_does_not_trade(self):
+        o = self._opp()
+        oid = o.opportunity_id()
+        self._app(self.L, oid, 'DATA_BLOCKED')
+        resolved = {oid: self.store.application(self.L, oid)}
+        self.assertEqual(_settle_cost(resolved), (0, []))
+        self.assertEqual(_settle_intents([o], resolved), [])
+
+    # ---- 问题 3：未评审时按截止分别处理，不静默改变策略 ----
+
+    def test_past_deadline_without_action_freezes_abstain_explicitly(self):
+        o = self._opp()
+        app = _ensure_reviewed(self.store, self.L, o, self.deadline,
+                               '2026-01-06T15:00:00+00:00')
+        self.assertEqual(app['action'], 'ABSTAIN')
+        self.assertEqual(app['reason_code'], 'DECISION_DEADLINE_MISSED')
+        self.assertTrue(app['decision_frozen'])
+        self.assertFalse(app['execution_applied'])
+        # 不是静默跳过：账目上留下了这条
+        self.assertIsNotNone(self.store.application(self.L, o.opportunity_id()))
+
+    def test_before_deadline_without_action_blocks_settlement(self):
+        o = self._opp()
+        with self.assertRaises(ValueError) as ctx:
+            _ensure_reviewed(self.store, self.L, o, self.deadline,
+                             '2026-01-06T13:00:00+00:00')
+        self.assertIn('SETTLEMENT_BLOCKED_DECISION_PENDING', str(ctx.exception))
+        self.assertIsNone(self.store.application(self.L, o.opportunity_id()))
+
+    def test_existing_frozen_action_is_returned_unchanged(self):
+        o = self._opp()
+        oid = o.opportunity_id()
+        self._app(self.L, oid, 'VETO')
+        app = _ensure_reviewed(self.store, self.L, o, self.deadline,
+                               '2026-01-07T00:00:00+00:00')
+        self.assertEqual(app['action'], 'VETO')
+
+    # ---- 问题 4：归因与成交同事务 ----
+
+    def _run(self):
+        state = new_account_state(self.L, self.m.initial_cash)
+        return step(state, session='2026-01-06', bars={}, corporate_actions=[],
+                    intents=[], manifest=self.m)
+
+    def test_marks_are_committed_with_the_state(self):
+        o = self._opp()
+        oid = o.opportunity_id()
+        self._app(self.L, oid, 'ABSTAIN')
+        res = self._run()
+        self.store.save_state(self.L, res.state, res.nav, res.events, session='2026-01-06',
+                              applied_marks=[{'opportunity_id': oid, 'create': None}])
+        self.assertTrue(self.store.application(self.L, oid)['execution_applied'])
+
+    def test_crash_between_state_and_marks_is_healed_on_rerun(self):
+        """模拟「状态已提交、标记未写」的崩溃：重跑的幂等分支要把标记补上。
+
+        分开两次提交会留下**永久的决策—成交归因缺口**：账户已成交而标记未写时崩溃，
+        重跑时 step 返回 no-op 直接跳过，缺口再也补不上。
+        """
+        o = self._opp()
+        oid = o.opportunity_id()
+        self._app(self.L, oid, 'ABSTAIN')
+        res = self._run()
+        self.store.save_state(self.L, res.state, res.nav, res.events, session='2026-01-06')
+        self.assertFalse(self.store.application(self.L, oid)['execution_applied'])
+        again = step(res.state, session='2026-01-06', bars={}, corporate_actions=[],
+                     intents=[], manifest=self.m)
+        self.assertIsNone(again.nav)                    # 账户不再推进
+        self.store.save_state(self.L, again.state, None, [], session='2026-01-06',
+                              applied_marks=[{'opportunity_id': oid, 'create': None}])
+        self.assertTrue(self.store.application(self.L, oid)['execution_applied'])  # 补齐
+
+    def test_executed_opportunities_reads_persisted_fills(self):
+        """恢复要用**已落库的成交**判断谁真的成交了，而不是拿内存里的 intents 猜。"""
+        o = self._opp()
+        res = self._run()
+        self.store.save_state(self.L, res.state, res.nav, res.events, session='2026-01-06')
+        self.assertEqual(self.store.executed_opportunities(self.L, '2026-01-06'), set())
+
+    def test_settle_marks_skip_missed_intents(self):
+        from types import SimpleNamespace
+        o = self._opp()
+        oid = o.opportunity_id()
+        self._app(self.L, oid, 'ABSTAIN')
+        res = SimpleNamespace(events=[{'type': 'missed', 'opportunity_id': oid}])
+        self.assertEqual(_settle_marks(self.store, self.L, res, [o], '2026-01-06'), [])
+
+    def test_settle_marks_create_intent_created_for_unrecorded_scope(self):
+        from types import SimpleNamespace
+        o = self._opp()
+        marks = _settle_marks(self.store, self.R, SimpleNamespace(events=[]), [o],
+                              '2026-01-06')
+        self.assertEqual(marks[0]['create'].action, 'INTENT_CREATED')

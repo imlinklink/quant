@@ -9,12 +9,33 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import contextmanager
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from scripts.live_trading.decision_ledger.event_store import (
     canonical, digest, insert_event, make_event, migrate)
 
 from .schema import ATTEMPT_STATUSES, ATTEMPT_TERMINAL, SHADOW_TERMINALS
+
+
+def _parse_iso(value):
+    """ISO 时间串 → datetime；解析失败返回 None。
+
+    不要用字符串直接比大小：带微秒与不带微秒的 ISO 串在分隔符处（`.` vs `+`）排序会错。
+    """
+    if value is None:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+    except (ValueError, TypeError):
+        return None
+
+
+def _shift_iso(value, seconds: int) -> str:
+    parsed = _parse_iso(value)
+    if parsed is None:
+        raise ValueError(f'TIMESTAMP_INVALID:{value}')
+    return (parsed + timedelta(seconds=seconds)).isoformat()
 
 # 账本结构版本。任何会改变**已落库事件 payload 或 state_hash 输入**的改动都必须递增，
 # 否则旧账本会在续写时报「同 event_id 异内容」或用新哈希误判状态冲突。
@@ -246,6 +267,16 @@ class ShadowStore:
                               (self.experiment_id, scope, opportunity_id)).fetchone()
             return json.loads(row[0]) if row else None
 
+    def executed_opportunities(self, scope: str, session: str) -> set:
+        """该 session 已**落库**的入场成交对应的 opportunity_id。
+
+        崩溃恢复时用它补齐归因，而不是拿内存里的 intents 猜 —— 内存状态在崩溃那一刻就没了。
+        """
+        return {e.get('opportunity_id') for e in self.events(scope)
+                if e.get('type') == 'fill' and e.get('session') == session
+                and e.get('side') == 'BUY' and e.get('reason') == 'ENTRY'
+                and e.get('opportunity_id')}
+
     def mark_execution_applied(self, scope: str, opportunity_id: str, session: str) -> None:
         """标记该账户动作已在执行日结算（设计 §7：动作冻结 ≠ 成交）。
 
@@ -338,20 +369,25 @@ class ShadowStore:
             return {'status': row[0], 'fencing_token': row[1],
                     **(json.loads(row[2]) or {})}
 
-    def claim_attempt(self, job_key: str, *, lease_until: str, body: dict | None = None,
-                      attempt: int = 1) -> str:
+    def claim_attempt(self, job_key: str, *, now: str, lease_seconds: int,
+                      body: dict | None = None, attempt: int = 1) -> str:
         """原子领取一次模型尝试（设计 §7）。整个检查+写入在同一事务内完成。
 
         返回：
         - `'claimed'`        ：首次领取（本机会从未调用过）→ 调用方可以发起网络请求；
-        - `'already_started'`：租约未过期，另一个 worker 正在调用 → 不得重复调用；
-        - `'abandoned'`      ：上一次领取的租约已过期且无结果（进程在发送后崩溃）→
-          **不盲目重发**，按设计 §7 判为 UNKNOWN 并以 ABSTAIN 冻结；
+        - `'already_started'`：**租约尚未到期**，另一个 worker 正在调用 → 不得重复调用；
+        - `'abandoned'`      ：租约已到期且无结果（进程在发送后崩溃）→ **不盲目重发**，
+          按设计 §7 判为 UNKNOWN 并以 ABSTAIN 冻结；
         - `'finalized'`      ：已进入终态 → 直接读取结果，绝不再次调用。
 
-        `fencing_token` 存租约到期时刻。三种「已存在」情形必须分开返回：把过期租约也当成
-        `claimed` 会把崩溃后的重启变成一次静默重发。
+        `fencing_token` 存**租约到期时刻**（`now + lease_seconds`）。判据是
+        `到期时刻 > now`，**不是**与 `now + 新租期` 比较 —— 后者等价于拿「本次开始
+        时刻」和「now」比，会在租约远未到期时把正常调用误判成崩溃遗留。
+        三种「已存在」情形必须分开返回：把过期租约也当成 `claimed` 会把崩溃后的重启
+        变成一次静默重发。
         """
+        lease_until = _shift_iso(now, lease_seconds)
+        now_dt = _parse_iso(now)
         with self.transaction() as con:            # BEGIN IMMEDIATE：写者串行化
             row = con.execute('SELECT status, fencing_token FROM shadow_job_runs '
                               'WHERE experiment_id=? AND job_key=? AND attempt=?',
@@ -372,19 +408,23 @@ class ShadowStore:
                                  self.experiment_id, job_key, attempt))
                     return 'claimed'
                 return 'finalized'
-            if lease and str(lease) >= str(lease_until):
-                # 存储的租约 = 该次开始时刻 + 租期；新的 lease_until = now + 租期。
-                # `>= now + 租期` ⇔ `开始时刻 >= now` ⇔ 仍在飞行中。用 `>` 会让
-                # 「同一时刻的第二次领取」被误判为崩溃遗留。
+            lease_dt = _parse_iso(lease)
+            if lease_dt is not None and now_dt is not None and lease_dt > now_dt:
                 return 'already_started'           # 租约仍有效：别的 worker 在调用
             return 'abandoned'                     # 租约过期且无结果：崩溃遗留
 
     # ---- account state / nav ----
-    def save_state(self, scope: str, state, nav: dict, events: list | None = None) -> None:
+    def save_state(self, scope: str, state, nav: dict, events: list | None = None, *,
+                   applied_marks=None, session: str | None = None) -> None:
         """提交一步状态。事务内校验 sequence（设计 §8 expected_sequence）：
         - seq == latest → 幂等重提交（同哈希返回，异哈希冲突）；
         - seq == latest+1 → 正常提交；
         - 否则（倒退 / 跳号）→ 拒绝。防止两进程同时推进同一 session 或乱序覆盖。
+
+        `applied_marks` 与状态**同事务**提交（设计 §7：动作冻结 ≠ 成交，但冻结与成交的
+        对应关系不能断）。分两次提交会留下永久的决策—成交归因缺口：账户已成交而标记未写
+        时崩溃，重跑时 `step` 返回 no-op 直接跳过，那个缺口再也补不上。幂等重提交分支也
+        会补做标记 —— 上次正好崩在这一步的话，重跑就是修复。
         """
         seq = state.sequence
         body = json.dumps(_asdict(state), ensure_ascii=False, sort_keys=True)
@@ -401,7 +441,9 @@ class ShadowStore:
                                        (self.experiment_id, scope, seq)).fetchone()
                 if existing and existing[0] != state.state_hash():
                     raise ValueError(f'SAME_SEQUENCE_DIFFERENT_STATE:{scope}:seq={seq}')
-                return  # 幂等重提交，不重复落事件/净值
+                # 幂等重提交：不重复落事件/净值，但**要补做标记**（上次可能崩在两步之间）
+                _apply_marks(con, self.experiment_id, scope, applied_marks, session)
+                return
             if seq != latest + 1:
                 raise ValueError(f'SEQUENCE_GAP:{scope}:seq={seq}!=latest+1={latest + 1}')
             for i, e in enumerate(events or []):
@@ -416,6 +458,8 @@ class ShadowStore:
                          nav['equity'], nav['cash_available'], nav['gross_exposure'],
                          nav['fees'], nav['valuation_status'], seq,
                          json.dumps(nav, ensure_ascii=False, sort_keys=True)))
+            # 与状态同一事务：不留「已成交但未标记」的窗口
+            _apply_marks(con, self.experiment_id, scope, applied_marks, session)
 
     def latest_state(self, scope: str) -> tuple[int, dict] | None:
         with self.transaction(immediate=False) as con:
@@ -461,6 +505,36 @@ class ShadowStore:
                     p = ev['payload']
                     payloads.append(p)
             return sorted(payloads, key=lambda p: (p.get('_sequence', 0), p.get('_index', 0)))
+
+
+def _apply_marks(con, experiment_id: str, scope: str, marks, session) -> None:
+    """在**调用方的事务内**应用「动作已应用到执行」标记（幂等）。
+
+    mark 形如 {'opportunity_id': str, 'create': Application | None}：
+    已有 Application 则标记 execution_applied；没有且给了 create 则补写一条
+    （R 侧无模型决策，按设计 §6 补 INTENT_CREATED），列与 body 一起更新。
+    """
+    for mark in marks or ():
+        oid = mark['opportunity_id']
+        row = con.execute('SELECT body FROM shadow_applications WHERE experiment_id=? '
+                          'AND scope=? AND opportunity_id=?',
+                          (experiment_id, scope, oid)).fetchone()
+        create = mark.get('create')
+        if row is None and create is None:
+            continue
+        if row is None:
+            con.execute('INSERT OR REPLACE INTO shadow_applications VALUES (?,?,?,?,?,?,?)',
+                        (experiment_id, scope, oid, create.action, create.decision_id, 1,
+                         json.dumps(_asdict(create), ensure_ascii=False, sort_keys=True)))
+        else:
+            body = {**json.loads(row[0]), 'execution_applied': True}
+            con.execute('UPDATE shadow_applications SET execution_applied=1, body=? '
+                        'WHERE experiment_id=? AND scope=? AND opportunity_id=?',
+                        (json.dumps(body, ensure_ascii=False, sort_keys=True),
+                         experiment_id, scope, oid))
+        _insert_event(con, scope, 'shadow:execution_applied', (oid, session),
+                      {'experiment_id': experiment_id, 'scope': scope,
+                       'opportunity_id': oid, 'session': session})
 
 
 def _asdict(obj) -> dict:

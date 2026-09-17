@@ -64,6 +64,7 @@ def _ingest_stamp(value=None) -> str:
 
 
 def import_evidence_jsonl(source, destination, *, ingested_at=None,
+                          observed_at_policy: str = 'ingest',
                           default_license_tag: str = 'research-use-only') -> dict:
     """把真实事件 JSONL 导入为规范证据存储，**入库时刻在此写死**。
 
@@ -73,6 +74,12 @@ def import_evidence_jsonl(source, destination, *, ingested_at=None,
         claimed_observed_at(可选，仅作元数据保留)
 
     输出：evidence_store schema 的 CSV.GZ，附加 EXTRA_COLUMNS。
+
+    `observed_at_policy`：
+    - `'ingest'`（默认，设计 §5.2 的规定）：`observed_at` = 本次入库时刻；
+    - `'unknown'`：**留空**。用于导入第三方历史档案 —— 我们确实没有它的观测记录，
+      如实留空胜过伪造一个时间戳。这类记录只在诊断模式下可用（严格模式要求
+      `observed_at`，正是为了逼出「我们当时是否真的看得到」这个问题）。
     """
     rows = [r for r in (_read_jsonl(Path(source)))]
     if not rows:
@@ -86,6 +93,8 @@ def import_evidence_jsonl(source, destination, *, ingested_at=None,
         if not published:
             raise ValueError(f'EVIDENCE_PUBLISHED_AT_MISSING:{row.get("security_id")}')
         summary = str(row.get('summary') or row.get('excerpt') or '')
+        if observed_at_policy not in ('ingest', 'unknown'):
+            raise ValueError(f'UNKNOWN_OBSERVED_AT_POLICY:{observed_at_policy}')
         records.append({
             'security_id': str(row['security_id']),
             'symbol_as_published': row.get('symbol_as_published') or '',
@@ -96,8 +105,8 @@ def import_evidence_jsonl(source, destination, *, ingested_at=None,
             'source_url_or_archive_path': str(row.get('source_url') or ''),
             'event_at': published,
             'published_at': published,
-            # ↓ 关键：入库时间，不是文件自述
-            'observed_at': stamp,
+            # ↓ 关键：入库时间，不是文件自述；'unknown' 时如实留空
+            'observed_at': stamp if observed_at_policy == 'ingest' else None,
             'ingested_at': stamp,
             'version_id': str(row.get('version_id') or 'v1'),
             'supersedes_id': row.get('supersedes_id'),
@@ -118,8 +127,9 @@ def import_evidence_jsonl(source, destination, *, ingested_at=None,
     out = Path(destination)
     out.parent.mkdir(parents=True, exist_ok=True)
     normalized.to_csv(out, index=False)
-    return {'destination': str(out), 'rows': len(normalized), 'observed_at': stamp,
-            'source': str(source)}
+    return {'destination': str(out), 'rows': len(normalized),
+            'observed_at': stamp if observed_at_policy == 'ingest' else None,
+            'observed_at_policy': observed_at_policy, 'source': str(source)}
 
 
 def _read_jsonl(path: Path) -> list[dict]:

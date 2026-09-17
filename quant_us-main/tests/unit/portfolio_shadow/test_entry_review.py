@@ -69,6 +69,23 @@ class ClaimTests(unittest.TestCase):
         self.assertEqual(r.claim_attempt(did), 'claimed')
         self.assertEqual(r.claim_attempt(did), 'already_started')  # 租约仍有效
 
+    def test_lease_stays_valid_while_it_has_not_expired(self):
+        """回归：判据是「租约到期时刻 > now」，不是「> now + 新租期」。
+
+        后者等价于拿本次开始时刻与 now 比，会让**租约远未到期**的正常调用被判为崩溃遗留
+        （实测：首次领取后仅过 1 秒就返回 abandoned，而租约是 300 秒）。后果是提前冻结
+        ABSTAIN，并与仍在飞行的那个 worker 的有效结果冲突。
+        """
+        r1 = self._reviewer(at=T0)
+        did = r1.prepare_review(opp(), self.pkt)
+        self.assertEqual(r1.claim_attempt(did), 'claimed')
+        for elapsed in (1, 60, 299):
+            later = self._reviewer(at=T0 + timedelta(seconds=elapsed))
+            self.assertEqual(later.claim_attempt(did), 'already_started',
+                             f'{elapsed}s 后租约（300s）应仍有效')
+        expired = self._reviewer(at=T0 + timedelta(seconds=301))
+        self.assertEqual(expired.claim_attempt(did), 'abandoned')
+
     def test_expired_lease_is_abandoned_not_reclaimed(self):
         """租约过期 ≠ 可以重发：那是崩溃遗留，必须判 UNKNOWN 而不是静默重来。"""
         r1 = self._reviewer(at=T0)
@@ -252,3 +269,28 @@ class RealModelHistoricalGateTests(unittest.TestCase):
 
     def test_allow_historical_lets_the_debug_path_through(self):
         self.assertNotEqual(self._result(True)['status'], 'HISTORICAL_AS_OF')
+
+
+class FixtureVetoTests(unittest.TestCase):
+    """设计 §11 验收案例「确定性 VETO fixture：R买入、L不买入」。"""
+
+    def test_fixture_veto_cites_packet_evidence(self):
+        """VETO 不引用包内证据会被验证器降级成 ABSTAIN —— fixture 也必须走同一条规则。"""
+        from scripts.portfolio_shadow.llm_overlay import validate_model_output
+        p = packet()
+        model = FakeModel(action='VETO', reason_code='MATERIAL_COMPANY_EVENT_RISK',
+                          evidence_from_packet=True, cost_micro=0)
+        result = model.call(p, DEADLINE)
+        self.assertEqual(result['output']['evidence_ids'],
+                         [p['events'][0]['evidence_id']])
+        ok, errors = validate_model_output(result['output'], p)
+        self.assertTrue(ok, errors)
+
+    def test_veto_without_evidence_is_downgraded(self):
+        p = packet()
+        model = FakeModel(action='VETO', reason_code='MATERIAL_COMPANY_EVENT_RISK',
+                          evidence_ids=[], cost_micro=0)
+        from scripts.portfolio_shadow.llm_overlay import validate_model_output
+        ok, errors = validate_model_output(model.call(p, DEADLINE)['output'], p)
+        self.assertFalse(ok)
+        self.assertIn('VETO_NO_EVIDENCE', errors)

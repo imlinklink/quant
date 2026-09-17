@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from scripts.live_trading.decision_ledger.event_store import stable_id
 
@@ -109,9 +109,9 @@ class EntryReviewer:
         return decision_id
 
     def claim_attempt(self, decision_id, *, body=None) -> str:
-        """原子领取（设计 §7）。返回 claimed / already_started / finalized。"""
-        lease_until = (_now(self.now) + timedelta(seconds=self.lease_seconds)).isoformat()
-        return self.store.claim_attempt(decision_id, lease_until=lease_until, body=body)
+        """原子领取（设计 §7）。返回 claimed / already_started / abandoned / finalized。"""
+        return self.store.claim_attempt(decision_id, now=_now(self.now).isoformat(),
+                                        lease_seconds=self.lease_seconds, body=body)
 
     def call_model(self, packet, deadline, decision_id) -> ModelAttemptResult:
         """发起一次（且仅一次）模型调用。**必须在领取事务结束之后调用。**"""
