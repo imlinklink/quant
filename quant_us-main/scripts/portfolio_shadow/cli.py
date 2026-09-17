@@ -389,16 +389,21 @@ def apply_entry_reviews(store, scope, reviews, *, deadline, real_model, model_id
     return kept, known_cost, uncertain
 
 
-def _market_data():
-    """加载中型策略行情/行动/质量/ETF 日历（prepare 与 settle 共用）。"""
+def _market_data(etf_raw=None):
+    """加载中型策略行情/行动/质量/ETF 日历（prepare 与 settle 共用）。
+
+    `etf_raw` 可指向一份**活的** ETF 快照（交易日历与市场门都来自它）。默认仍是冻结的
+    回测产物 —— 前向运行需要当日日历时必须显式给出新快照，不能就地改审计产物。
+    """
     import pandas as pd
-    from scripts.medium_term.p2_selection_check import ACTIONS, ETF_RAW, QUALITY, load_panels
+    from scripts.medium_term.p2_selection_check import ACTIONS, QUALITY, load_panels
+    from scripts.medium_term.p2_selection_check import ETF_RAW as DEFAULT_ETF_RAW
     prices, _ = load_panels()
     prices['session'] = pd.to_datetime(prices.session).dt.normalize()
     prices['security_id'] = prices.security_id.astype(str)
     actions = pd.read_csv(ACTIONS)
     actions['security_id'] = actions.security_id.astype(str)
-    return prices, actions, QUALITY, ETF_RAW
+    return prices, actions, QUALITY, (etf_raw or DEFAULT_ETF_RAW)
 
 
 def _opportunity_from_dict(d: dict):
@@ -407,6 +412,22 @@ def _opportunity_from_dict(d: dict):
     payload = dict(d)
     payload['rule_reason_codes'] = tuple(payload.get('rule_reason_codes') or ())
     return Opportunity(**payload)
+
+
+def _forward_calendar(price_cal, session):
+    """前向运行用的交易日历 = 价格序列 ∪ NYSE 规则历。
+
+    **价格序列推不出「明天」**：它只包含已有行情的日子。设计 §3.1 说「T+1 由日历得到，
+    不要求已取得 T+1 开盘价」——所以前向确定 T+1 必须靠交易日规则历。规则历覆盖未来，
+    实际日线覆盖临时休市（`trading_calendar` 模块自己注明了这个分工）。
+    """
+    import pandas as pd
+    from scripts.data.trading_calendar import sessions as rule_sessions
+    centre = pd.Timestamp(session).normalize()
+    rule = pd.DatetimeIndex(
+        rule_sessions(centre - pd.Timedelta(days=10),
+                      centre + pd.Timedelta(days=15))['session_date']).normalize()
+    return pd.DatetimeIndex(sorted(set(pd.DatetimeIndex(price_cal).normalize()) | set(rule)))
 
 
 def _next_session(cal, session):
@@ -434,7 +455,7 @@ def cmd_prepare_entry_reviews(args):
 
     m = manifest_from_dict(json.loads(Path(args.manifest).read_text()))
     store = ShadowStore(Path(args.output) / m.experiment_id / 'ledger.sqlite3', m.experiment_id)
-    prices, actions, quality_path, etf_raw = _market_data()
+    prices, actions, quality_path, etf_raw = _market_data(getattr(args, 'etf_raw', None))
     quality = pd.read_csv(quality_path)
     _, blocked = _build_shared_audits(prices, actions)
     cal = trading_calendar(etf_raw)
@@ -449,17 +470,22 @@ def cmd_prepare_entry_reviews(args):
 
     target = args.session
     start = m.start_session or str(pd.Timestamp(cal[0]).date())
-    # 增量生成器需要从更早的月末选股重放才能重建 pending；put_opportunity 首次写入即冻结，重放安全
-    fresh = []
+    # 增量生成器需要从更早的月末选股重放才能重建 pending 状态；但**只落库 T 自己的机会** ——
+    # 本命令的契约是「准备 T 的评审」。把重放沿途的候选一并写进机会表，会让它们以 READY
+    # 出现在漏斗里，看起来像「已准备但没评审」，实际是「从未准备」。沿途跳过的数量如实报出。
+    fresh, skipped = [], 0
     for session in _sessions_upto(cal, start, target):
         got = gen.opportunities_for(session)
-        for o in got:
-            store.put_opportunity(o)
         if str(pd.Timestamp(session).date()) == target:
             fresh = got
+        else:
+            skipped += len(got)
+    for o in fresh:
+        store.put_opportunity(o)
 
     market_cutoff = entry_market_cutoff(target)
-    exec_session = _next_session(cal, target)
+    # 用前向日历（规则历 ∪ 实际日线）确定 T+1 —— 价格序列只知道过去
+    exec_session = _next_session(_forward_calendar(cal, target), target)
     deadline = entry_response_deadline(exec_session or target)
     close_micro = {(pd.Timestamp(r.session), str(r.security_id)): to_micro(r.raw_close)
                    for r in prices.itertuples(index=False)}
@@ -476,7 +502,9 @@ def cmd_prepare_entry_reviews(args):
         record_data_blocked(store, m.account_scopes, opp, packet, session=target)
     print(json.dumps({'session': target, 'execution_session': exec_session,
                       'opportunities': len(fresh), 'reviews': len(reviews),
-                      'data_blocked': len(blocked_opps)}, ensure_ascii=False))
+                      'data_blocked': len(blocked_opps),
+                      # >0 说明本实验从更早的日期起就没有逐日准备（重放沿途的候选未落库）
+                      'skipped_earlier_sessions': skipped}, ensure_ascii=False))
     return 0
 
 
@@ -649,7 +677,7 @@ def cmd_settle_session(args):
     from .verify_parity import _shadow_actions
     m = manifest_from_dict(json.loads(Path(args.manifest).read_text()))
     store = ShadowStore(Path(args.output) / m.experiment_id / 'ledger.sqlite3', m.experiment_id)
-    prices, actions, _, _ = _market_data()
+    prices, actions, _, _ = _market_data(getattr(args, 'etf_raw', None))
     session = args.session
     now = now_iso()
     deadline = entry_response_deadline(session)
@@ -877,6 +905,8 @@ def main(argv=None):
                            help='fixture 模型的动作（设计 §11 的确定性 VETO 验收用）')
         if name == 'settle-session':
             p.add_argument('--session', required=True)
+        if name in ('prepare-entry-reviews', 'settle-session'):
+            p.add_argument('--etf-raw', help='活的 ETF 快照（交易日历与市场门来源）')
         if name == 'report':
             p.add_argument('--trace', action='append',
                            help='要展开的 opportunity_id（可重复）')

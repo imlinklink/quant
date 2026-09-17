@@ -14,7 +14,8 @@ import pandas as pd
 
 from scripts.live_trading.decision_ledger.event_store import stable_id
 from scripts.portfolio_shadow.candidate_adapter import intents_for_session
-from scripts.portfolio_shadow.cli import (_ensure_reviewed, _settle_cost,
+from scripts.portfolio_shadow.cli import (_ensure_reviewed, _forward_calendar, _next_session,
+                                          _settle_cost,
                                           _settle_intents, _settle_marks,
                                           apply_entry_reviews, drop_from_schedule,
                                           entry_packet_for, freeze_entry_reviews,
@@ -624,3 +625,23 @@ class SettleAccountingTests(unittest.TestCase):
         marks = _settle_marks(self.store, self.R, SimpleNamespace(events=[]), [o],
                               '2026-01-06')
         self.assertEqual(marks[0]['create'].action, 'INTENT_CREATED')
+
+
+class ForwardCalendarTests(unittest.TestCase):
+    """前向运行必须能确定「明天」——价格序列里只有过去。"""
+
+    def test_price_derived_calendar_cannot_know_tomorrow(self):
+        import pandas as pd
+        cal = pd.DatetimeIndex(pd.to_datetime(['2026-09-15', '2026-09-16']))
+        self.assertIsNone(_next_session(cal, '2026-09-16'))
+
+    def test_forward_calendar_supplies_the_next_session(self):
+        """设计 §3.1：T+1 由日历得到，不要求已取得 T+1 开盘价。"""
+        import pandas as pd
+        cal = pd.DatetimeIndex(pd.to_datetime(['2026-09-15', '2026-09-16']))
+        fwd = _forward_calendar(cal, '2026-09-16')
+        self.assertEqual(_next_session(fwd, '2026-09-16'), '2026-09-17')   # 周四
+        self.assertEqual(_next_session(fwd, '2026-09-18'), '2026-09-21')   # 跳过周末
+        # 实际日线覆盖临时休市：规则历里没有的日子也能由价格序列补进来
+        union = _forward_calendar(pd.DatetimeIndex(pd.to_datetime(['2026-09-17'])), '2026-09-16')
+        self.assertIn(pd.Timestamp('2026-09-17'), union)
