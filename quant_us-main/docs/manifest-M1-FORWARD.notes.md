@@ -31,17 +31,29 @@ python3 -m scripts.portfolio_shadow.cli freeze \
 
 ## 三个需要你拍板的点
 
-### 1. `evidence_mode`：草案填的是 `diagnostic`
+### 1. `evidence_mode`：**已按实测结论改为 `strict`**
 
-- **strict** 要求证据的 `observed_at` 落在窗口内 —— 这要求**每天在窗口里导入当天事件**
-  （`import-evidence` 默认 `--observed-at-policy ingest`，入库时刻即观测时刻）。做得到就选它，
-  它才是「点对点可证明」的等级。
-- **diagnostic** 只要求 `published_at ≤ 截止`。第三方历史档案（如 futu 盈利日历）本来就没有
-  首次观测时间，只能以 `--observed-at-policy unknown` 导入，因此**只能配 diagnostic**。
-- 草案选 diagnostic 是因为**当前唯一可用的证据源是历史档案**。若你打算先搭起每日导入，
-  就该改成 strict —— 那才是想要的目标状态。
+原先填 `diagnostic` 是因为当时唯一可用的证据源是历史档案。**现在有了每日市场日报管线
+（`market_digest.py` + 作业脚本里的 ingest-digest → import-evidence --append），strict 是可达的**
+—— 作业在窗口内导入，`observed_at` 就落在窗口里。实测：
+
+```
+T=09-16（实时窗口）cutoff=09-17T08:02Z → strict 下 status=OK    事件=1
+T=09-15（历史）    cutoff=09-16T13:20Z → strict 下 status=EMPTY 事件=0   ← 那时我们还没拿到它
+```
+
+历史窗口被拒是**正确的**：strict 的意义正是「证明我们当时确实看得到」。
+
+- 若某天作业没在窗口内跑（机器休眠等），那天的证据就会因 `observed_at` 落在截止之后而被拒 ——
+  如实反映，不是故障。
+- `diagnostic` 只要求 `published_at ≤ 截止`，适合只能导入历史档案（`--observed-at-policy unknown`）
+  的场景，代价是放弃了点对点可证明性。
 - 无论选哪个都请记住：**没有每日证据导入时，包是 `LLM_INSUFFICIENT`，模型根本不会被调用**
   （日运行器会打印 `no_opportunities` 与空证据提示）。这不是故障，是如实反映。
+
+⚠️ **已冻结的那份实验是 `diagnostic`**（`M1-FORWARD-20260917`）。按「参数变更必须新建
+`experiment_id`」的规则，改用 strict 需要**重新冻一个新 id**（如 `M1-FORWARD-S-20260917`），
+不能改已有实验。
 
 ### 2. `knowledge_cutoff: "unknown"`
 

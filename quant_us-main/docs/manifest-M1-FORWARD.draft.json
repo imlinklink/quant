@@ -35,7 +35,7 @@
     "overlay": "entry_veto",
     "use_real_model": true,
     "knowledge_cutoff": "unknown",
-    "evidence_mode": "diagnostic",
+    "evidence_mode": "strict",
     "evidence_window_days": 30,
     "evidence_max_events": 50
   },
