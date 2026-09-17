@@ -997,7 +997,8 @@ def cmd_import_evidence(args):
     from .evidence_source import import_evidence_jsonl
     print(json.dumps(import_evidence_jsonl(
         args.source, args.output, ingested_at=args.ingested_at,
-        observed_at_policy=args.observed_at_policy), ensure_ascii=False))
+        observed_at_policy=args.observed_at_policy,
+        append=args.append), ensure_ascii=False))
     return 0
 
 
@@ -1019,6 +1020,8 @@ def main(argv=None):
             p.add_argument('--observed-at-policy', choices=('ingest', 'unknown'),
                            default='ingest',
                            help='unknown = 留空（第三方历史档案，无观测记录）')
+            p.add_argument('--append', action='store_true',
+                           help='与已有存储合并（首次导入为准，重跑不刷新 observed_at）')
             p.add_argument('--output', required=True, help='规范证据存储输出路径')
             p.set_defaults(fn=fn)
             continue

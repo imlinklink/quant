@@ -30,7 +30,9 @@ def policy_for_mode(mode: str) -> dict | None:
 
 # 进入模型 prompt 的正文长度上限。正文同时进 prompt 与落库，必须封顶；
 # `content_hash` 始终对**全文**计算，截断与否另用 summary_truncated 标记，保证可审计。
-MAX_SUMMARY_CHARS = 2000
+# 取值要能装下一份市场日报的执行摘要（单条证券事件远短于此，不受影响）——
+# 日报抽出来有 13–17K 字符，2000 会把「一句话结论/核心驱动/关键风险」之外全砍掉。
+MAX_SUMMARY_CHARS = 6000
 
 
 def entry_market_cutoff(session) -> str:

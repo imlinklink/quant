@@ -21,6 +21,10 @@ BASE="$US/data/portfolio_shadow"
 EVIDENCE="${SHADOW_EVIDENCE:-$BASE/evidence/live.csv}"
 LIVE_ETF="${SHADOW_LIVE_ETF:-$US/data/medium_term/LIVE-ETF-20260917}"
 MODEL="${SHADOW_MODEL:-real}"
+# 每日市场日报（HTML）。市场级证据：以 security_id=MARKET 入库，并入**每个**候选的包。
+DIGEST_DIR="${SHADOW_DIGEST_DIR:-$HOME/Documents/daily-market-suite-v10-1/output}"
+EVIDENCE_DIR="$(dirname "$EVIDENCE")"
+INBOX="$EVIDENCE_DIR/inbox"
 STAMP="$(date -Iseconds)"
 
 cd "$US" || exit 1
@@ -55,6 +59,19 @@ echo "$STAMP refresh-market-data（只追加，不改历史）"
   echo "$STAMP FAIL refresh 失败，本次不跑 —— 宁可停一天，也不在陈旧行情上做决策"
   exit 1
 }
+
+# 日报 → 市场级证据 → 追加进证据存储。`--append` 是「首次导入为准」：同一天重跑不会
+# 把已有记录的 observed_at 刷新成今天。取的是「≤ 今天的最近一份」——日报不一定每个
+# 交易日都有，而最近一份市场综述仍是有用的背景。
+TODAY=$(date +%F)
+echo "$STAMP ingest-digest session=$TODAY dir=$DIGEST_DIR"
+DIGEST_JSONL="$INBOX/$TODAY.jsonl"
+"$PY" -m scripts.portfolio_shadow.market_digest --session "$TODAY" --dir "$DIGEST_DIR" \
+  --output "$DIGEST_JSONL" || echo "$STAMP 注意：日报抽取失败，本次不带市场级证据"
+if [ -f "$DIGEST_JSONL" ]; then
+  "$PY" -m scripts.portfolio_shadow.cli import-evidence --source "$DIGEST_JSONL" \
+    --output "$EVIDENCE" --append || echo "$STAMP 注意：日报入库失败，本次不带市场级证据"
+fi
 
 echo "$STAMP run-daily model=$MODEL"
 ARGS=(--manifest "$MANIFEST" --output "$BASE" --model "$MODEL"
