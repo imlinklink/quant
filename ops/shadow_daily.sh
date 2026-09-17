@@ -17,9 +17,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 US="$ROOT/quant_us-main"
 PY=/usr/bin/python3
 
-EXPERIMENT="${SHADOW_EXPERIMENT:-M1-FORWARD}"
 BASE="$US/data/portfolio_shadow"
-MANIFEST="$BASE/$EXPERIMENT/manifest.json"
 EVIDENCE="${SHADOW_EVIDENCE:-$BASE/evidence/live.csv}"
 LIVE_ETF="${SHADOW_LIVE_ETF:-$US/data/medium_term/LIVE-ETF-20260917}"
 MODEL="${SHADOW_MODEL:-real}"
@@ -27,9 +25,29 @@ STAMP="$(date -Iseconds)"
 
 cd "$US" || exit 1
 
-if [ ! -f "$MANIFEST" ]; then
-  echo "$STAMP SKIP 未冻结实验 ${EXPERIMENT}（缺 ${MANIFEST}）"
-  exit 0
+# 实验 id：显式指定则必须已冻结（配置错就该响亮地失败）；未指定则自动发现 ——
+# 硬编码一个 id 会在 id 变化时**静默 SKIP 到永远**（SKIP 是 exit 0，没有任何提示）。
+if [ -n "${SHADOW_EXPERIMENT:-}" ]; then
+  MANIFEST="$BASE/$SHADOW_EXPERIMENT/manifest.json"
+  if [ ! -f "$MANIFEST" ]; then
+    echo "$STAMP FAIL 指定实验 ${SHADOW_EXPERIMENT} 未冻结（缺 ${MANIFEST}）"
+    exit 1
+  fi
+else
+  FOUND=$(ls -d "$BASE"/*/manifest.json 2>/dev/null || true)
+  COUNT=$(printf '%s' "$FOUND" | grep -c . || true)
+  if [ "$COUNT" -eq 0 ]; then
+    echo "$STAMP SKIP 尚无已冻结实验（${BASE}/*/manifest.json）—— 入组后自动开始"
+    exit 0
+  fi
+  if [ "$COUNT" -ne 1 ]; then
+    echo "$STAMP FAIL 发现 ${COUNT} 个已冻结实验，无法判定跑哪个 —— 请用 SHADOW_EXPERIMENT 指定："
+    printf '  %s\n' $FOUND
+    exit 1
+  fi
+  MANIFEST="$FOUND"
+  EXPERIMENT=$(basename "$(dirname "$MANIFEST")")
+  echo "$STAMP 自动发现实验 ${EXPERIMENT}"
 fi
 
 echo "$STAMP refresh-market-data（只追加，不改历史）"
