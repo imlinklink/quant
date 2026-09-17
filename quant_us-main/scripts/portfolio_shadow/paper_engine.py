@@ -56,6 +56,14 @@ def step(state: AccountState, *, session: str, bars: dict, corporate_actions: li
          intents: list, manifest, fee_bp: int = 10, model_cost: int = 0,
          model_cost_uncertain: tuple = (), model_cost_settlements: dict | None = None) -> StepResult:
     """执行一个交易日。bars={sid:{open,high,low,close}}（微美元/股）；公司行动用微美元。"""
+    # 执行日守卫：整批校验必须先于任何状态变更，避免处理一半才报错；一次报全部违规。
+    # 计划执行日 ≠ 当前 session 属调度/数据错误，绝不按历史开盘价补成交。
+    violations = [(intent.opportunity_id(),
+                   getattr(intent, 'planned_execution_session', None)) for intent in intents
+                  if getattr(intent, 'planned_execution_session', None) != session]
+    if violations:
+        detail = ';'.join(f'{oid}:planned={planned}' for oid, planned in violations)
+        raise ValueError(f'INTENT_SESSION_MISMATCH:{detail}:session={session}')
     if state.last_session is not None and session < state.last_session:
         # 乱序：旧 session 必须拒绝，不得倒退推进账户
         raise ValueError(f'OUT_OF_ORDER_SESSION:{session}<{state.last_session}')

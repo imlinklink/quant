@@ -299,5 +299,116 @@ class ReviewFixTests(unittest.TestCase):
         self.assertEqual(r2.state.valuation_status, 'PROVISIONAL')
 
 
+class IntentSessionGuardTests(unittest.TestCase):
+    """执行日守卫：intent 的计划执行日必须等于当前 session，否则整批拒绝、不按历史价补成交。"""
+
+    def test_mismatched_planned_session_raises_with_locators(self):
+        m = make_manifest(horizon=3)
+        bad = opp('SEC-A', '2026-01-06')  # 计划次日，却在当日执行
+        with self.assertRaises(ValueError) as ctx:
+            step(new_account_state('SHADOW:x:R', to_micro(100000)), session='2026-01-05',
+                 bars=bars1(100, 100.5), corporate_actions=[], intents=[bad], manifest=m)
+        msg = str(ctx.exception)
+        self.assertIn('INTENT_SESSION_MISMATCH', msg)
+        self.assertIn(bad.opportunity_id(), msg)
+        self.assertIn('planned=2026-01-06', msg)
+        self.assertIn('session=2026-01-05', msg)
+
+    def test_whole_batch_validated_before_any_state_change(self):
+        m = make_manifest(horizon=3)
+        state = new_account_state('SHADOW:x:R', to_micro(100000))
+        good = opp('SEC-A', '2026-01-05')
+        bad = opp('SEC-B', '2026-01-06')
+        bars = {'SEC-A': bar(100, 101, 99, 100.5), 'SEC-B': bar(50, 51, 49, 50.5)}
+        with self.assertRaises(ValueError):
+            step(state, session='2026-01-05', bars=bars, corporate_actions=[],
+                 intents=[good, bad], manifest=m)
+        # positions 是 replace() 的浅拷贝共享字典，可观察：合法的第一笔也没被成交
+        self.assertEqual(state.positions, {})
+
+    def test_matching_planned_session_executes(self):
+        m = make_manifest(horizon=3)
+        good = opp('SEC-A', '2026-01-05')
+        res = step(new_account_state('SHADOW:x:R', to_micro(100000)), session='2026-01-05',
+                   bars=bars1(100, 100.5), corporate_actions=[], intents=[good], manifest=m)
+        self.assertIn('SEC-A', res.state.positions)
+
+    def test_all_violations_reported_in_one_error(self):
+        m = make_manifest(horizon=3)
+        bad1, bad2 = opp('SEC-A', '2026-01-06'), opp('SEC-B', '2026-01-07')
+        with self.assertRaises(ValueError) as ctx:
+            step(new_account_state('SHADOW:x:R', to_micro(100000)), session='2026-01-05',
+                 bars=bars1(100, 100.5), corporate_actions=[], intents=[bad1, bad2], manifest=m)
+        msg = str(ctx.exception)
+        self.assertIn(bad1.opportunity_id(), msg)
+        self.assertIn(bad2.opportunity_id(), msg)
+        self.assertIn('planned=2026-01-06', msg)
+        self.assertIn('planned=2026-01-07', msg)
+
+
+class ModelCostUncertaintyTests(unittest.TestCase):
+    """成本不可知：金额记 0 但必须挂账待补记，不是免费；补记幂等且不改原事件。"""
+
+    def _step(self, state, session, **kw):
+        return step(state, session=session, bars=bars1(100, 100.5), corporate_actions=[],
+                    intents=[], manifest=make_manifest(horizon=3), **kw)
+
+    def test_uncertain_cost_books_zero_but_marks_settlement_due(self):
+        res = self._step(new_account_state('SHADOW:x:L', to_micro(100000)), '2026-01-05',
+                         model_cost_uncertain=('a1',))
+        self.assertEqual(res.state.model_cost, 0)  # 尚未计入，不是零成本
+        self.assertEqual(res.state.model_cost_uncertain_count, 1)
+        self.assertEqual(res.state.cost_status, 'PROVISIONAL')
+        self.assertEqual(res.nav['cost_status'], 'PROVISIONAL')
+        self.assertEqual(res.nav['model_cost_uncertain_count'], 1)
+        ev = [e for e in res.events if e['type'] == 'model_cost' and e.get('uncertain')]
+        self.assertEqual(len(ev), 1)
+        self.assertEqual(ev[0]['amount_micro'], 0)
+        self.assertEqual(ev[0]['attempt_id'], 'a1')
+
+    def test_uncertain_attempt_is_not_double_booked(self):
+        r1 = self._step(new_account_state('SHADOW:x:L', to_micro(100000)), '2026-01-05',
+                        model_cost_uncertain=('a1',))
+        r2 = self._step(r1.state, '2026-01-06', model_cost_uncertain=('a1',))
+        self.assertEqual(r2.state.model_cost_uncertain_count, 1)
+        self.assertEqual([e for e in r2.events if e['type'] == 'model_cost'], [])
+
+    def test_settlement_deducts_and_clears(self):
+        r1 = self._step(new_account_state('SHADOW:x:L', to_micro(100000)), '2026-01-05',
+                        model_cost_uncertain=('a1',))
+        r2 = self._step(r1.state, '2026-01-06', model_cost_settlements={'a1': 1234})
+        self.assertEqual(r2.state.model_cost, 1234)
+        self.assertEqual(r2.state.model_cost_uncertain_count, 0)
+        self.assertEqual(r2.state.cost_status, 'OK')
+        self.assertEqual(r2.nav['full_cost_equity'], r2.nav['equity'] - 1234)
+        ev = [e for e in r2.events if e['type'] == 'model_cost_settlement']
+        self.assertEqual(ev[0]['attempt_id'], 'a1')
+        self.assertEqual(ev[0]['amount_micro'], 1234)
+
+    def test_settlement_is_idempotent(self):
+        r1 = self._step(new_account_state('SHADOW:x:L', to_micro(100000)), '2026-01-05',
+                        model_cost_uncertain=('a1',))
+        r2 = self._step(r1.state, '2026-01-06', model_cost_settlements={'a1': 1234})
+        r3 = self._step(r2.state, '2026-01-07', model_cost_settlements={'a1': 1234})
+        self.assertEqual(r3.state.model_cost, 1234)  # 未重复扣减
+        self.assertEqual([e for e in r3.events if e['type'] == 'model_cost_settlement'], [])
+
+    def test_settlement_of_unknown_attempt_is_noop(self):
+        r = self._step(new_account_state('SHADOW:x:L', to_micro(100000)), '2026-01-05',
+                       model_cost_settlements={'never-seen': 999})
+        self.assertEqual(r.state.model_cost, 0)
+        self.assertEqual(r.events, [e for e in r.events if e['type'] != 'model_cost_settlement'])
+
+    def test_replay_reproduces_uncertain_then_settled_cost(self):
+        scope = 'SHADOW:x:L'
+        r1 = self._step(new_account_state(scope, to_micro(100000)), '2026-01-05',
+                        model_cost_uncertain=('a1', 'a2'))
+        r2 = self._step(r1.state, '2026-01-06', model_cost_settlements={'a1': 700})
+        replayed = replay(scope, to_micro(100000), r1.events + r2.events)
+        self.assertEqual(replayed.model_cost, 700)
+        self.assertEqual(replayed.model_cost_unsettled, ('a2',))
+        self.assertEqual(replayed.state_hash(), r2.state.state_hash())
+
+
 if __name__ == '__main__':
     unittest.main()
