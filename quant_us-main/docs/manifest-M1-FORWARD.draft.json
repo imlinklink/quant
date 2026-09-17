@@ -1,13 +1,13 @@
 {
-  "experiment_id": "M1-FORWARD-20260917",
+  "experiment_id": "M1-FORWARD-S-20260917",
   "parent_strategy_id": "B3",
   "parent_version": "1",
   "parent_code_hash": "8243e4e218d466f773f68c05e6145c180da3cc46",
   "universe_id": "survivor13-tech",
   "universe_hash": "4f698a951f2c12c51af4954ad4034167",
   "account_scopes": [
-    "SHADOW:M1-FORWARD-20260917:R",
-    "SHADOW:M1-FORWARD-20260917:L"
+    "SHADOW:M1-FORWARD-S-20260917:R",
+    "SHADOW:M1-FORWARD-S-20260917:L"
   ],
   "initial_cash": 100000,
   "risk_policy": {
@@ -16,10 +16,10 @@
     "max_positions": 5,
     "top_n": 5,
     "drawdown_ladder": {
-      "reduced": 0.10,
+      "reduced": 0.1,
       "paused_entry": 0.15,
       "review_required": 0.18,
-      "limit_breach": 0.20,
+      "limit_breach": 0.2,
       "normal_recover": 0.08,
       "reduced_recover": 0.12,
       "recover_sessions": 5
