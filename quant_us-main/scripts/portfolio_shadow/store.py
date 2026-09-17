@@ -14,7 +14,7 @@ from pathlib import Path
 from scripts.live_trading.decision_ledger.event_store import (
     canonical, digest, insert_event, make_event, migrate)
 
-from .schema import ATTEMPT_TERMINAL, SHADOW_TERMINALS
+from .schema import ATTEMPT_STATUSES, ATTEMPT_TERMINAL, SHADOW_TERMINALS
 
 # 账本结构版本。任何会改变**已落库事件 payload 或 state_hash 输入**的改动都必须递增，
 # 否则旧账本会在续写时报「同 event_id 异内容」或用新哈希误判状态冲突。
@@ -34,7 +34,9 @@ from .schema import ATTEMPT_TERMINAL, SHADOW_TERMINALS
 #   7 → 编排落地（设计 §7）：Application 的 applied 拆成 decision_frozen/execution_applied，
 #       新增 shadow:execution_applied 事件；shadow_job_runs 状态机改为
 #       PREPARED/CALL_STARTED/COMPLETED/FAILED/TIMED_OUT/UNKNOWN。
-SHADOW_SCHEMA_VERSION = 7
+#   8 → 尝试状态词汇对齐：shadow_job_runs.status 由模型侧词汇改为状态机取值
+#       （'OK' → 'COMPLETED'），body 增 model_status 保留原始词汇；put_job_run 增两道守卫。
+SHADOW_SCHEMA_VERSION = 8
 
 _SHADOW_DDL = '''
 CREATE TABLE IF NOT EXISTS shadow_schema(version INTEGER PRIMARY KEY);
@@ -308,7 +310,20 @@ class ShadowStore:
 
     def put_job_run(self, job_key: str, attempt: int, status: str,
                     body: dict | None = None, fencing_token: str | None = None) -> None:
+        """写入尝试状态。两道守卫，都是为了让「已付费的有效结果」不会被冲掉：
+
+        - 状态必须在状态机取值内 —— 传入别的词汇（如模型侧的 'OK'）会让记录看起来
+          从未终结，重跑时被判为崩溃遗留而覆盖；
+        - 已终态的记录不得被改写成非终态。
+        """
+        if status not in ATTEMPT_STATUSES:
+            raise ValueError(f'UNKNOWN_ATTEMPT_STATUS:{status}（允许：{list(ATTEMPT_STATUSES)}）')
         with self.transaction() as con:
+            row = con.execute('SELECT status FROM shadow_job_runs WHERE experiment_id=? '
+                              'AND job_key=? AND attempt=?',
+                              (self.experiment_id, job_key, attempt)).fetchone()
+            if (row and row[0] in ATTEMPT_TERMINAL and status not in ATTEMPT_TERMINAL):
+                raise ValueError(f'ATTEMPT_ALREADY_TERMINAL:{job_key}:{row[0]}->{status}')
             con.execute('INSERT OR REPLACE INTO shadow_job_runs VALUES (?,?,?,?,?,?)',
                         (self.experiment_id, job_key, attempt, status, fencing_token,
                          json.dumps(body or {}, ensure_ascii=False, sort_keys=True)))

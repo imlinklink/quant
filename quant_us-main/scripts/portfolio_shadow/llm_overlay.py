@@ -226,7 +226,7 @@ class RealModel:
     """
 
     def __init__(self, advisor, *, now=None, max_staleness_seconds: float = 6 * 3600,
-                 knowledge_cutoff=None):
+                 knowledge_cutoff=None, allow_historical: bool = False):
         self.advisor = advisor
         self._now = now or (lambda: datetime.now(timezone.utc))
         self.max_staleness_seconds = max_staleness_seconds
@@ -234,18 +234,26 @@ class RealModel:
         # 知道的事，as-of 证据过滤修不好，只能拒绝。None = 未声明（不做该检查，但
         # 这种未声明本身会被 manifest 的 freeze 门挡在正式运行之外）。
         self.knowledge_cutoff = knowledge_cutoff
+        # 仅用于设计 §9 的 `historical_debug` 提示词调试：放开历史 as-of 与知识截止两道门，
+        # 让历史日期也能发起真实调用。**调试调用不写 Application、不进正式 R/L 表现**，
+        # 这个开关不得用于正式运行路径。
+        self.allow_historical = allow_historical
 
     def call(self, packet: dict, deadline: str) -> dict:
         now = self._now()
         deadline_dt = _parse(deadline)
-        if deadline_dt is None or (now - deadline_dt).total_seconds() > self.max_staleness_seconds:
-            return {'status': 'HISTORICAL_AS_OF', 'output': None,
-                    'completed_at': now.isoformat(), 'cost_micro': 0, 'cost_uncertain': False}
-        cutoff = _parse(self.knowledge_cutoff)
-        as_of = _parse(packet.get('as_of'))
-        if cutoff is not None and as_of is not None and as_of < cutoff:
-            return {'status': 'MODEL_KNOWLEDGE_CUTOFF', 'output': None,
-                    'completed_at': now.isoformat(), 'cost_micro': 0, 'cost_uncertain': False}
+        if not self.allow_historical:
+            if (deadline_dt is None
+                    or (now - deadline_dt).total_seconds() > self.max_staleness_seconds):
+                return {'status': 'HISTORICAL_AS_OF', 'output': None,
+                        'completed_at': now.isoformat(), 'cost_micro': 0,
+                        'cost_uncertain': False}
+            cutoff = _parse(self.knowledge_cutoff)
+            as_of = _parse(packet.get('as_of'))
+            if cutoff is not None and as_of is not None and as_of < cutoff:
+                return {'status': 'MODEL_KNOWLEDGE_CUTOFF', 'output': None,
+                        'completed_at': now.isoformat(), 'cost_micro': 0,
+                        'cost_uncertain': False}
         prompt = json.dumps({'decision_type': 'entry_veto',
                              'evidence_packet': packet,
                              'output_schema': ENTRY_VETO_SCHEMA}, ensure_ascii=False)

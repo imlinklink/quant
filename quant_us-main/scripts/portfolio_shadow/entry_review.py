@@ -37,6 +37,18 @@ def _now(clock=None) -> datetime:
     return (clock or (lambda: datetime.now(timezone.utc)))()
 
 
+# 模型结果状态（llm_overlay 词汇）→ 尝试状态机取值（设计 §7 词汇）。
+# 两套词汇必须显式对齐：'OK' 不是终态值，若不映射，一次**成功**的尝试会被当成
+# 从未终结，重跑时按「崩溃遗留」处理 —— 覆盖掉已付费的有效结果。
+_ATTEMPT_STATUS_MAP = {'OK': 'COMPLETED', 'FAILED': 'FAILED', 'TIMED_OUT': 'TIMED_OUT'}
+
+
+def attempt_status_for(model_status) -> str:
+    """把模型结果状态映射成尝试状态。未知的程序侧拒发（HISTORICAL_AS_OF 等）算失败终态，
+    绝不能落在一个非终态值上。"""
+    return _ATTEMPT_STATUS_MAP.get(str(model_status), 'FAILED')
+
+
 def decision_id_for(experiment_id, scope, opportunity_id, packet_id, model_id,
                     prompt_version=PROMPT_VERSION, schema_version=SCHEMA_VERSION) -> str:
     """绑定「同一个问题」的全部要素。任一变化即另一个 decision。"""
@@ -68,7 +80,8 @@ class EntryReviewer:
     """L 侧入场评审的编排者。R 账户不经过这里（执行父策略原计划）。"""
 
     def __init__(self, store, *, scope, model_factory, model_id='', timeout_seconds=None,
-                 now=None, lease_seconds=LEASE_SECONDS, knowledge_cutoff=None):
+                 now=None, lease_seconds=LEASE_SECONDS, knowledge_cutoff=None,
+                 debug: bool = False):
         self.store = store
         self.scope = scope
         self.model_factory = model_factory
@@ -78,6 +91,9 @@ class EntryReviewer:
         # 超时不得超过剩余决策窗口，由调用方传入的 deadline 收窄
         self.timeout_seconds = timeout_seconds or MODEL_TIMEOUT_SECONDS
         self.knowledge_cutoff = knowledge_cutoff
+        # 设计 §9 的 historical_debug：真实调用留痕用于提示词调试，但**不写 Application**，
+        # 因而不会进入正式 R/L 表现 —— 过去的执行日不能用今天生成的模型结果补填。
+        self.debug = debug
 
     # ---- 单个步骤（供测试与需要分步执行的入口使用）----
 
@@ -135,6 +151,8 @@ class EntryReviewer:
         decision_id = decision_id_for(self.store.experiment_id, self.scope,
                                       opp.opportunity_id(), packet['packet_id'],
                                       self.model_id)
+        if self.debug:
+            return self._debug_review(opp, packet, deadline, decision_id)
         frozen_record = self.store.application(self.scope, opp.opportunity_id())
         if frozen_record and frozen_record.get('decision_id'):
             if frozen_record['decision_id'] != decision_id:
@@ -158,19 +176,11 @@ class EntryReviewer:
                                           'reused_terminal')
             # 终态但动作未落库（调用完成后崩溃）：从尝试记录**恢复**，不重调
             attempt = self.store.job_run(decision_id) or {}
-            if attempt.get('action'):
-                d = OverlayDecision(
-                    attempt['action'], attempt.get('reason_code', ''),
-                    attempt.get('model_cost', 0), attempt.get('raw_action', ''),
-                    attempt.get('late_response_observed', False),
-                    attempt.get('cost_uncertain', False), decision_id)
-                note = 'recovered_from_attempt'
-            else:
-                d = OverlayDecision('ABSTAIN', 'ATTEMPT_TERMINAL_WITHOUT_ACTION', 0, '', False,
-                                    True, decision_id)
-                note = 'terminal_without_action'
+            d = _decision_from_attempt(attempt, decision_id)
             self.finalize_action(opp, packet, d, decision_id)
-            return EntryReviewOutcome(decision_id, d, True, note)
+            return EntryReviewOutcome(decision_id, d, True,
+                                      'recovered_from_attempt' if attempt.get('action')
+                                      else 'terminal_without_action')
         if claim == 'already_started':
             # 另一个 worker 租约有效、正在调用：不重复调用，也不替它冻结
             return EntryReviewOutcome(
@@ -207,10 +217,11 @@ class EntryReviewer:
         # 绑定 decision_id：成本未知时要靠它挂账待补记
         d = replace(resolve_overlay(packet, result.model_result, deadline),
                     attempt_id=decision_id)
-        self.store.put_job_run(decision_id, 1, result.status, {
+        self.store.put_job_run(decision_id, 1, attempt_status_for(result.status), {
             'scope': self.scope, 'packet_id': packet['packet_id'],
             'model_id': self.model_id, 'prompt_version': PROMPT_VERSION,
-            'schema_version': SCHEMA_VERSION, 'request_id': result.request_id,
+            'schema_version': SCHEMA_VERSION, 'model_status': result.status,
+            'request_id': result.request_id,
             'started_at': result.started_at, 'received_at': result.received_at,
             'raw_output': result.raw_output,
             'validation_errors': list(result.validation_errors),
@@ -219,6 +230,43 @@ class EntryReviewer:
             **_decision_body(d)})
         self.finalize_action(opp, packet, d, decision_id, result)
         return EntryReviewOutcome(decision_id, d, True, result.status.lower())
+
+    def _debug_review(self, opp, packet, deadline, decision_id) -> EntryReviewOutcome:
+        """设计 §9 的 `historical_debug` 分支：真实调用留痕，但**不冻结动作**。
+
+        「不写 Application」不是省略，而是这个模式的全部意义 —— 调试调用一旦落成账目，
+        过去的执行日就相当于用了今天生成的模型结果补填前瞻记录。
+        """
+        body = {'scope': self.scope, 'opportunity_id': opp.opportunity_id(),
+                'packet_id': packet['packet_id'], 'model_id': self.model_id,
+                'prompt_version': PROMPT_VERSION, 'schema_version': SCHEMA_VERSION,
+                'historical_debug': True}
+        self.prepare_review(opp, packet)
+        claim = self.claim_attempt(decision_id, body=body)
+        if claim == 'already_started':
+            return EntryReviewOutcome(
+                decision_id, OverlayDecision('ABSTAIN', 'ATTEMPT_IN_FLIGHT', 0, '', False,
+                                             True, decision_id), False, 'attempt_in_flight')
+        if claim in ('finalized', 'abandoned'):
+            if claim == 'abandoned':
+                self.store.put_job_run(decision_id, 1, 'UNKNOWN', {
+                    **body, 'detected_at': _now(self.now).isoformat(),
+                    'reason': 'LEASE_EXPIRED_WITHOUT_RESULT'})
+            attempt = self.store.job_run(decision_id) or {}
+            return EntryReviewOutcome(decision_id, _decision_from_attempt(attempt, decision_id),
+                                      False, 'reused_debug_attempt')
+        result = self.call_model(packet, deadline, decision_id)
+        d = replace(resolve_overlay(packet, result.model_result, deadline),
+                    attempt_id=decision_id)
+        self.store.put_job_run(decision_id, 1, attempt_status_for(result.status), {
+            **body, 'model_status': result.status,
+            'request_id': result.request_id, 'started_at': result.started_at,
+            'received_at': result.received_at, 'raw_output': result.raw_output,
+            'validation_errors': list(result.validation_errors),
+            'cost_micro': result.model_result.get('cost_micro'),
+            'cost_uncertain': bool(result.model_result.get('cost_uncertain')),
+            **_decision_body(d)})
+        return EntryReviewOutcome(decision_id, d, False, 'historical_debug')
 
     def load_applications(self, scope=None) -> list:
         """已冻结动作（设计 §7 的 load_applications）。"""
@@ -231,6 +279,18 @@ def _decision_body(d: OverlayDecision) -> dict:
     return {'action': d.action, 'reason_code': d.reason_code, 'model_cost': d.model_cost,
             'cost_uncertain': d.cost_uncertain, 'raw_action': d.raw_action,
             'late_response_observed': d.late_response_observed}
+
+
+def _decision_from_attempt(attempt: dict, decision_id: str) -> OverlayDecision:
+    """从尝试记录还原决定（终态但动作未落库时用）。"""
+    if attempt.get('action'):
+        return OverlayDecision(
+            attempt['action'], attempt.get('reason_code', ''),
+            attempt.get('model_cost', 0), attempt.get('raw_action', ''),
+            attempt.get('late_response_observed', False),
+            attempt.get('cost_uncertain', False), decision_id)
+    return OverlayDecision('ABSTAIN', 'ATTEMPT_TERMINAL_WITHOUT_ACTION', 0, '', False, True,
+                           decision_id)
 
 
 def _from_application(record: dict) -> OverlayDecision:

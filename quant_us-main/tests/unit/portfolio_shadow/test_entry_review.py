@@ -112,7 +112,10 @@ class FreezeTests(unittest.TestCase):
                           evidence_ids=[], cost_micro=123)
         outcome = self._reviewer(model).review(opp(), self.pkt, DEADLINE)
         attempt = self.store.job_run(outcome.decision_id)
-        self.assertEqual(attempt['status'], 'OK')
+        # 尝试状态机取值必须与模型结果词汇显式对齐：'OK' 不是终态值，落库时映射成
+        # COMPLETED；原始词汇另存 model_status（否则重跑会把成功的尝试当崩溃遗留覆盖掉）
+        self.assertEqual(attempt['status'], 'COMPLETED')
+        self.assertEqual(attempt['model_status'], 'OK')
         self.assertIn('REASON_NOT_ALLOWED', attempt['validation_errors'])
         self.assertTrue(attempt['raw_output'])
         self.assertEqual(attempt['model_id'], 'm')
@@ -152,3 +155,100 @@ class FreezeTests(unittest.TestCase):
         self.store.mark_execution_applied(self.scope, opp().opportunity_id(), '2026-01-06')
         self.assertTrue(self.store.application(self.scope, opp().opportunity_id(),
                                                )['execution_applied'])
+
+
+class AttemptStatusVocabularyTests(unittest.TestCase):
+    """两套词汇的对齐是硬要求：错位的代价是「已付费的有效结果被当成从未终结而覆盖」。"""
+
+    def test_model_status_maps_into_the_attempt_state_machine(self):
+        from scripts.portfolio_shadow.entry_review import attempt_status_for
+        from scripts.portfolio_shadow.schema import ATTEMPT_STATUSES, ATTEMPT_TERMINAL
+        for model_status in ('OK', 'FAILED', 'TIMED_OUT', 'HISTORICAL_AS_OF',
+                             'MODEL_KNOWLEDGE_CUTOFF', '', None):
+            mapped = attempt_status_for(model_status)
+            self.assertIn(mapped, ATTEMPT_STATUSES)
+            self.assertIn(mapped, ATTEMPT_TERMINAL, f'{model_status} 落到了非终态')
+
+    def test_store_refuses_an_unknown_attempt_status(self):
+        tmp = tempfile.mkdtemp()
+        store = ShadowStore(Path(tmp) / 'ledger.sqlite3', 'exp1')
+        store.save_experiment(manifest())
+        with self.assertRaises(ValueError) as ctx:
+            store.put_job_run('d1', 1, 'OK')       # 模型侧词汇，不是状态机取值
+        self.assertIn('UNKNOWN_ATTEMPT_STATUS', str(ctx.exception))
+
+    def test_store_refuses_to_reopen_a_terminal_attempt(self):
+        tmp = tempfile.mkdtemp()
+        store = ShadowStore(Path(tmp) / 'ledger.sqlite3', 'exp1')
+        store.save_experiment(manifest())
+        store.put_job_run('d1', 1, 'COMPLETED', {'action': 'VETO'})
+        with self.assertRaises(ValueError) as ctx:
+            store.put_job_run('d1', 1, 'CALL_STARTED')
+        self.assertIn('ATTEMPT_ALREADY_TERMINAL', str(ctx.exception))
+
+
+class HistoricalDebugTests(unittest.TestCase):
+    """设计 §9：历史提示词调试若需调用，另标 historical_debug，**不进入正式 R/L 表现**。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.store = ShadowStore(Path(self.tmp) / 'ledger.sqlite3', 'exp1')
+        self.store.save_experiment(manifest())
+        self.scope = 'SHADOW:exp1:L'
+        self.pkt = packet()
+
+    def _reviewer(self, model):
+        return EntryReviewer(self.store, scope=self.scope, model_id='historical_debug',
+                             model_factory=lambda: model, now=lambda: T0, debug=True)
+
+    def test_debug_call_writes_no_application(self):
+        """一旦落成账目，过去的执行日就相当于用今天生成的结果补填前瞻记录。"""
+        model = FakeModel(action='VETO', reason_code='MATERIAL_COMPANY_EVENT_RISK',
+                          evidence_ids=['ev_1'], cost_micro=42)
+        outcome = self._reviewer(model).review(opp(), self.pkt, DEADLINE)
+        self.assertFalse(outcome.frozen)
+        self.assertEqual(outcome.note, 'historical_debug')
+        self.assertIsNone(self.store.application(self.scope, opp().opportunity_id()))
+
+    def test_debug_attempt_is_marked_and_keeps_the_full_reply(self):
+        # 与 RealModel 一致：成本不可知时返回 cost_micro=None，而不是把某个数标成不确定
+        model = FakeModel(action='PASS', cost_micro=None, cost_uncertain=True)
+        outcome = self._reviewer(model).review(opp(), self.pkt, DEADLINE)
+        attempt = self.store.job_run(outcome.decision_id)
+        self.assertTrue(attempt['historical_debug'])
+        self.assertEqual(attempt['status'], 'COMPLETED')
+        self.assertTrue(attempt['raw_output'])
+        self.assertIsNone(attempt['cost_micro'])       # 成本未知，不是 0
+        self.assertTrue(attempt['cost_uncertain'])
+
+    def test_debug_rerun_reuses_the_recorded_attempt(self):
+        model = FakeModel(action='PASS', cost_micro=1)
+        r = self._reviewer(model)
+        first = r.review(opp(), self.pkt, DEADLINE)
+        second = r.review(opp(), self.pkt, DEADLINE)
+        self.assertEqual(first.decision_id, second.decision_id)
+        self.assertEqual(second.note, 'reused_debug_attempt')   # 不再花钱
+
+
+class RealModelHistoricalGateTests(unittest.TestCase):
+    """`allow_historical` 只服务于 debug 路径，默认必须继续拦住历史调用。"""
+
+    def _result(self, allow):
+        from scripts.portfolio_shadow.llm_overlay import RealModel
+        from unittest.mock import Mock
+        advisor = Mock()
+        advisor.chat.return_value = None
+        advisor.last_metadata = {}
+        model = RealModel(advisor, now=lambda: datetime(2026, 9, 17, tzinfo=timezone.utc),
+                          allow_historical=allow)
+        packet = self.pkt
+        return model.call(packet, '2026-01-06T14:20:00+00:00')
+
+    def setUp(self):
+        self.pkt = packet()
+
+    def test_default_refuses_a_historical_deadline(self):
+        self.assertEqual(self._result(False)['status'], 'HISTORICAL_AS_OF')
+
+    def test_allow_historical_lets_the_debug_path_through(self):
+        self.assertNotEqual(self._result(True)['status'], 'HISTORICAL_AS_OF')

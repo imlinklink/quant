@@ -236,12 +236,21 @@ def _evidence_source(m, path):
         max_events=int(m.llm_policy['evidence_max_events']))
 
 
-def _make_real_model(m):
+def _make_real_model(m, *, allow_historical=False):
+    """构造真实模型客户端。
+
+    设计 §7：模型总超时 60 秒，且**关闭客户端隐藏重试** —— 本层只发一次请求，
+    重试策略由我们的领取/租约机制决定，不能让客户端在背后悄悄重发。
+    `allow_historical` 仅供 `historical_debug`（§9）使用。
+    """
     import yaml
     from mutifactor.llm import LLMAdvisor
     cfg_path = Path(__file__).resolve().parents[2] / 'config.yaml'
-    return RealModel(LLMAdvisor((yaml.safe_load(cfg_path.read_text()) or {}).get('llm', {})),
-                     knowledge_cutoff=m.llm_policy.get('knowledge_cutoff'))
+    advisor = LLMAdvisor((yaml.safe_load(cfg_path.read_text()) or {}).get('llm', {}))
+    advisor.max_retries = 1
+    advisor.timeout = 60
+    return RealModel(advisor, knowledge_cutoff=m.llm_policy.get('knowledge_cutoff'),
+                     allow_historical=allow_historical)
 
 
 def drop_from_schedule(schedule: dict, exec_session: str, dropped: set) -> None:
@@ -343,12 +352,14 @@ def record_data_blocked(store, scopes, opp, packet, *, session):
             decision_frozen=True, execution_applied=False))
 
 
-def make_reviewer(store, scope, real_model, *, model_id='', model_factory=None):
+def make_reviewer(store, scope, real_model, *, model_id='', model_factory=None,
+                  debug=False):
     """构造 L 侧评审编排者。所有入口共用同一条编排路径（设计 §7）。"""
     factory = model_factory or (
         lambda: real_model if real_model is not None else FakeModel(action='PASS',
                                                                    cost_micro=0))
-    return EntryReviewer(store, scope=scope, model_factory=factory, model_id=model_id)
+    return EntryReviewer(store, scope=scope, model_factory=factory, model_id=model_id,
+                         debug=debug)
 
 
 def apply_entry_reviews(store, scope, reviews, *, deadline, real_model, model_id='',
@@ -481,20 +492,24 @@ def cmd_review_entries(args):
         print(json.dumps({'reviewed': 0, 'note': 'overlay 非 entry_veto，无需评审'},
                          ensure_ascii=False))
         return 0
+    debug = args.model == 'historical_debug'
     use_real = args.model == 'real'
     if use_real and not m.llm_policy.get('use_real_model'):
         raise ValueError('MANIFEST_DOES_NOT_ALLOW_REAL_MODEL:'
                          'manifest.llm_policy.use_real_model 未开启')
-    real_model = _make_real_model(m) if use_real else None
+    real_model = (_make_real_model(m, allow_historical=debug)
+                  if (use_real or debug) else None)
 
     deadline = entry_response_deadline(args.execution_session)
     scope = next(s for s in m.account_scopes if s.endswith(':L'))
-    reviewer = make_reviewer(store, scope, real_model,
-                             model_id=(m.llm_policy.get('model_id') or
-                                       ('real' if use_real else 'fixture')))
+    reviewer = make_reviewer(
+        store, scope, real_model,
+        model_id=(m.llm_policy.get('model_id')
+                  or ('real' if use_real else ('historical_debug' if debug else 'fixture'))),
+        debug=debug)
     due = [_opportunity_from_dict(o) for o in store.opportunities()
            if o.get('planned_execution_session') == args.execution_session]
-    reviewed, in_flight = 0, 0
+    reviewed, in_flight, traces = 0, 0, []
     for opp in due:
         packet = store.packet_for_opportunity(opp.opportunity_id())
         if packet is None:
@@ -502,10 +517,39 @@ def cmd_review_entries(args):
                              '（先跑 prepare-entry-reviews）')
         outcome = reviewer.review(opp, packet, deadline)
         reviewed += 1
-        in_flight += 0 if outcome.frozen else 1
-    print(json.dumps({'execution_session': args.execution_session, 'due': len(due),
-                      'reviewed': reviewed, 'in_flight': in_flight,
-                      'model': 'real' if use_real else 'fixture'}, ensure_ascii=False))
+        if not debug:
+            in_flight += 0 if outcome.frozen else 1
+        else:
+            attempt = store.job_run(outcome.decision_id) or {}
+            model_action = ''
+            try:
+                model_action = json.loads(attempt.get('raw_output') or '{}').get('action', '')
+            except ValueError:
+                model_action = ''
+            traces.append({
+                'security_id': opp.security_id,
+                'decision_id': outcome.decision_id,
+                'attempt_status': attempt.get('status'),
+                # 模型自己的动作 vs 本层解析出的动作：调试时要能看到两者的差别
+                'model_action': model_action,
+                'raw_output': attempt.get('raw_output'),
+                'validation_errors': attempt.get('validation_errors'),
+                'resolved_action': outcome.decision.action,
+                'resolved_reason': outcome.decision.reason_code,
+                'late_response_observed': outcome.decision.late_response_observed,
+                # 未知成本必须显示为 null 而不是 0 —— 0 会被读成「免费调用」
+                'model_cost_usd': (None if outcome.decision.cost_uncertain
+                                   else outcome.decision.model_cost / 1e6),
+                'cost_uncertain': outcome.decision.cost_uncertain})
+    summary = {'execution_session': args.execution_session, 'due': len(due),
+               'reviewed': reviewed, 'in_flight': in_flight,
+               'model': args.model}
+    if debug:
+        # 设计 §9：调试调用只留痕，不写 Application；如实打印请求证据与回复
+        summary['historical_debug'] = True
+        summary['applications_written'] = 0
+        summary['traces'] = traces
+    print(json.dumps(summary, ensure_ascii=False, indent=2 if debug else None))
     return 0
 
 
@@ -729,7 +773,8 @@ def main(argv=None):
             p.add_argument('--evidence', help='已导入的规范证据存储')
         if name == 'review-entries':
             p.add_argument('--execution-session', required=True)
-            p.add_argument('--model', choices=('real', 'fixture'), default='fixture')
+            p.add_argument('--model', choices=('real', 'fixture', 'historical_debug'),
+                           default='fixture')
         if name == 'settle-session':
             p.add_argument('--session', required=True)
         if name == 'report':
