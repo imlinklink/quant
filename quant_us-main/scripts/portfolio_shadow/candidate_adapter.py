@@ -36,7 +36,12 @@ def adapt_schedule(experiment_id: str, parent_version: str, entry_rule: str,
             entry_rule=entry_rule,
             stop_reference={'atr14_micro': int(item['atr14_micro'])},
             exit_policy_id=exit_policy_id, input_hash=item['input_hash'],
-            terminal='READY'))
+            terminal='READY',
+            parent_strategy_id=item.get('parent_strategy_id', ''),
+            signal_generated_at=item.get('signal_generated_at', item['observed_at']),
+            decision_deadline=item.get('decision_deadline', ''),
+            rule_reason_codes=tuple(item.get('rule_reason_codes') or ()),
+            market_snapshot_id=item.get('market_snapshot_id', '')))
     return out
 
 
@@ -75,7 +80,11 @@ def build_real_schedule(prices: pd.DataFrame, market: pd.DataFrame, quality: pd.
             planned_execution_session=str(pd.Timestamp(row.entry_session).date()),
             rank=int(row.rank), entry_rule='b3',
             stop_reference={'initial_stop_micro': to_micro(row.initial_stop)},
-            exit_policy_id=exit_policy_id, input_hash='', terminal='READY')
+            exit_policy_id=exit_policy_id, input_hash='', terminal='READY',
+            parent_strategy_id=str(getattr(row, 'parent_strategy_id', '') or ''),
+            signal_generated_at=str(pd.Timestamp(row.decision_session).date())
+                                + 'T00:00:00+00:00',
+            market_snapshot_id=f'asof-{pd.Timestamp(row.decision_session).date()}')
         schedule.setdefault(opp.planned_execution_session, []).append(opp)
     return schedule, funnel
 
@@ -98,7 +107,7 @@ class IncrementalCandidateGenerator:
                  experiment_id: str, parent_version: str, exit_policy_id: str = 'H60',
                  top_n: int = 5, max_wait_sessions: int = 20, entry_rule: str = 'b3',
                  forward_horizon: int = DEFAULT_FORWARD_HORIZON,
-                 require_matured: bool = True):
+                 require_matured: bool = True, parent_strategy_id: str = '', now=None):
         self.prices = prices
         self.view_bars = prices[['security_id', 'session', 'raw_open', 'raw_high', 'raw_low',
                                  'raw_close', 'volume']].rename(columns={
@@ -115,6 +124,11 @@ class IncrementalCandidateGenerator:
         self.calendar = pd.DatetimeIndex(pd.to_datetime(list(calendar))).normalize().sort_values().unique()
         self.experiment_id = experiment_id
         self.parent_version = parent_version
+        self.parent_strategy_id = parent_strategy_id
+        # 可信时钟（设计 §4 signal_generated_at）。默认取信号日收盘：确定性、可重放；
+        # 真实前向运行可注入实际生成时刻。机会是「首次写入即冻结」的，注入墙钟不会
+        # 改写已落库的机会。
+        self._now = now
         self.exit_policy_id = exit_policy_id
         self.top_n = top_n
         self.max_wait_sessions = max_wait_sessions
@@ -240,12 +254,22 @@ class IncrementalCandidateGenerator:
                 if any(exec_sess <= pd.Timestamp(d).normalize() <= exit_sess for d in bdays):
                     del self.pending[cid]
                     continue
+            from .evidence import entry_decision_cutoff, entry_response_deadline
+            cutoff = entry_decision_cutoff(session)
             ready.append(Opportunity(
                 experiment_id=self.experiment_id, security_id=cand['security_id'],
                 source_candidate_id=cid, parent_version=self.parent_version,
-                signal_session=str(session.date()), observed_at=f'{session.date()}T00:00:00+00:00',
+                signal_session=str(session.date()), observed_at=cutoff,
                 planned_execution_session=str(exec_sess.date()), rank=cand['rank'],
                 entry_rule=self.entry_rule, stop_reference={'atr14_micro': atr},
-                exit_policy_id=self.exit_policy_id, input_hash='', terminal='READY'))
+                exit_policy_id=self.exit_policy_id, input_hash='', terminal='READY',
+                parent_strategy_id=self.parent_strategy_id,
+                signal_generated_at=(self._now() if self._now else cutoff),
+                decision_deadline=entry_response_deadline(exec_sess),
+                # 规则侧的入场原因：模型据此理解「规则为何产生这个机会」，不自行推算
+                rule_reason_codes=tuple(c for c in (
+                    kind, 'WEEKLY_UPTREND',
+                    'MARKET_GATE_OPEN' if self._market_gate(session) else '') if c),
+                market_snapshot_id=f'asof-{session.date()}'))
             del self.pending[cid]
         return ready

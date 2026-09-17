@@ -306,29 +306,51 @@ def entry_packet_for(opp, quote, records, cutoff, *, evidence_mode='strict',
                               model_knowledge_cutoff=knowledge_cutoff, evidence=meta)
 
 
-def run_entry_overlay(store, scope, opportunities, *, session, exec_session, quotes, records,
-                      real_model, knowledge_cutoff=None, evidence_mode='strict',
-                      force_recall=False):
-    """对一个 session 新生成的机会跑 L 侧 overlay。
+def freeze_entry_reviews(opportunities, quotes, records, cutoff, *, evidence_mode='strict',
+                         knowledge_cutoff=None):
+    """账户无关阶段：一个机会一个冻结证据包，并做数据质量分流。
 
-    返回 (kept, known_cost_micro, uncertain_attempt_ids)。
+    返回 (reviews, blocked)，两者元素均为 (opportunity, packet)。
 
-    时序：决策在信号日 t 收盘后做出（证据 as_of = t 收盘，回复截止 = 次日开盘前 10 分钟）。
-    BLOCK → 不调模型、不计成本，直接剔除（关键数据不可用/未来，成交本身就是前视）。
+    BLOCK 是**机会级**判定（关键行情/股票身份/规则计划缺失或无效），按设计必须同时禁止
+    R 与 L 的新风险，所以它必须在账户资格检查**之前**完成，不能只在某一侧剔除。
+    """
+    reviews, blocked = [], []
+    for opp in opportunities:
+        packet = entry_packet_for(opp, quotes.get(opp.security_id, {}), records, cutoff,
+                                  evidence_mode=evidence_mode,
+                                  knowledge_cutoff=knowledge_cutoff)
+        (blocked if packet['data_quality']['level'] == 'BLOCK' else reviews).append(
+            (opp, packet))
+    return reviews, blocked
 
-    `evidence_mode` 取自学验 manifest（strict/diagnostic），并冻结进证据包 —— 账本必须
-    分得清一次 VETO 建立在严格级还是诊断级证据上。
+
+def record_data_blocked(store, scopes, opp, packet, *, session, as_of):
+    """记录机会级 BLOCK：终态 DATA_BLOCKED + 每个账户一条禁止新风险的账目。
+
+    按设计 §5.3/§6，DATA_BLOCKED 对 R 与 L **同时**生效 —— 它不是某一侧的模型动作，
+    而是机会本身不允许进入任何账户的新风险。
+    """
+    reason = 'DATA_BLOCK:' + ','.join(packet['data_quality']['critical_missing'])
+    store.set_opportunity_terminal(opp.opportunity_id(), 'DATA_BLOCKED', session, note=reason)
+    for scope in scopes:
+        store.put_application(Application(
+            scope=scope, opportunity_id=opp.opportunity_id(), action='DATA_BLOCKED',
+            reason_code=reason, decision_id='', as_of=as_of, applied=True))
+
+
+def apply_entry_reviews(store, scope, reviews, *, cutoff, deadline, real_model,
+                        force_recall=False):
+    """账户相关阶段：对已冻结的证据包做三态评审。
+
+    返回 (kept, known_cost_micro, uncertain_attempt_ids)。只有 L 侧会走到这里 ——
+    R 账户执行父策略原计划，不经过模型。
 
     重复运行安全：已落库的决定原样复用；`shadow_job_runs` 记录堵住「模型已扣费但决定
     未落库」的崩溃窗口（见 `_reuse_or_decide`）。
     """
     kept, known_cost, uncertain = [], 0, []
-    cutoff = entry_decision_cutoff(session)
-    deadline = entry_response_deadline(exec_session)
-    for opp in opportunities:
-        packet = entry_packet_for(opp, quotes.get(opp.security_id, {}), records, cutoff,
-                                  evidence_mode=evidence_mode,
-                                  knowledge_cutoff=knowledge_cutoff)
+    for opp, packet in reviews:
         attempt_id = stable_id('llm_attempt', scope, opp.opportunity_id(), packet['packet_id'])
         d = _reuse_or_decide(
             store, scope, opp, packet, attempt_id, deadline,
@@ -413,24 +435,35 @@ def cmd_run_forward(args):
         exec_next = (str(pd.Timestamp(gen.calendar[nxt]).date())
                      if nxt < len(gen.calendar) else sess_str)
 
+        # 账户无关阶段：冻结证据包 + 数据质量分流。
+        # BLOCK 是机会级判定，必须同时禁止 R 与 L 的新风险，故在账户循环之前处理。
+        cutoff = entry_decision_cutoff(session)
+        reviews, blocked = freeze_entry_reviews(
+            fresh,
+            quotes={o.security_id: {'price': close_micro[(session, o.security_id)],
+                                    'observed_at': cutoff} for o in fresh},
+            records=records, cutoff=cutoff,
+            evidence_mode=m.llm_policy.get('evidence_mode', 'strict'),
+            knowledge_cutoff=m.llm_policy.get('knowledge_cutoff'))
+        for opp, packet in blocked:
+            record_data_blocked(store, m.account_scopes, opp, packet, session=sess_str,
+                                as_of=cutoff)
+            for scope in m.account_scopes:
+                drop_from_schedule(scheduled[scope], exec_next, {opp.opportunity_id()})
+
         for scope in m.account_scopes:
             row = store.latest_state(scope)
             saved = row[1] if row else None
             state = state_from_dict(saved) if saved else new_account_state(scope, m.initial_cash)
             cost, uncertain = 0, []
             if overlay == 'entry_veto' and scope.endswith(':L'):
-                kept, cost, uncertain = run_entry_overlay(
-                    store, scope, fresh, session=session, exec_session=exec_next,
-                    quotes={o.security_id: {'price': close_micro[(session, o.security_id)],
-                                            'observed_at': entry_decision_cutoff(session)}
-                            for o in fresh},
-                    records=records, real_model=real_model,
-                    knowledge_cutoff=m.llm_policy.get('knowledge_cutoff'),
-                    evidence_mode=m.llm_policy.get('evidence_mode', 'strict'))
-                # 只从**本批**机会的队列里摘掉被否决/被 BLOCK 的，别动其它执行日的队列
-                dropped = ({o.opportunity_id() for o in fresh}
-                           - {o.opportunity_id() for o in kept})
-                drop_from_schedule(scheduled[scope], exec_next, dropped)
+                kept, cost, uncertain = apply_entry_reviews(
+                    store, scope, reviews, cutoff=cutoff,
+                    deadline=entry_response_deadline(exec_next), real_model=real_model)
+                # 只从**本批**机会的队列里摘掉被否决的，别动其它执行日的队列
+                drop_from_schedule(scheduled[scope], exec_next,
+                                   {o.opportunity_id() for o, _ in reviews}
+                                   - {o.opportunity_id() for o in kept})
             intents = intents_for_session(scheduled[scope].pop(sess_str, []), sess_str)
             res = step(state, session=sess_str, bars=bars, corporate_actions=acts,
                        intents=intents, manifest=m, model_cost=cost,

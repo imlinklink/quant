@@ -79,13 +79,19 @@ def _norm_events(events, as_of_dt, *, require_observed_at: bool = True):
             'evidence_id': e.get('evidence_id') or stable_id(
                 'evidence', e.get('source', ''), content_hash,
                 e.get('published_at'), e.get('observed_at')),
+            'security_id': e.get('security_id', ''),
             'source': e.get('source', 'internal:rule'),
+            'source_url': e.get('source_url', ''),
             'kind': e.get('kind', 'rule'),
+            'event_type': e.get('event_type') or e.get('kind', 'rule'),
             'published_at': e.get('published_at'),
             'observed_at': e.get('observed_at'),
-            # 可读正文：模型必须能看到证据内容才能判断，只留哈希等于让它瞎猜
+            'cluster_id': e.get('cluster_id', ''),
+            # 可读正文：模型必须能看到证据内容才能判断，只留哈希等于让它瞎猜。
+            # summary = 可直接阅读的事实摘要；excerpt = 支持该摘要的短原文摘录。
             'title': str(e.get('title') or '')[:MAX_SUMMARY_CHARS],
             'summary': summary[:MAX_SUMMARY_CHARS],
+            'excerpt': str(e.get('excerpt') or summary)[:MAX_SUMMARY_CHARS],
             'summary_truncated': len(summary) > MAX_SUMMARY_CHARS,
             'content_hash': content_hash,
         })
@@ -121,12 +127,18 @@ def events_from_records(records, security_id, decision_cutoff, *, policy=None, r
                 break
         events.append({
             'evidence_id': e['evidence_id'],
+            'security_id': str(security_id),
             'source': e.get('source_id'),
+            # 来源可核对：设计 §5.1 要求摘要必须有支持它的原文与链接
+            'source_url': str(raw.get('source_url_or_archive_path') or ''),
             'kind': e.get('kind'),
+            'event_type': str(raw.get('kind') or e.get('kind') or ''),
             'published_at': e.get('published_at'),
             'observed_at': e.get('observed_at'),
+            'cluster_id': str(raw.get('source_record_id') or ''),
             'title': str(raw.get('title') or '')[:MAX_SUMMARY_CHARS],
             'summary': summary[:MAX_SUMMARY_CHARS],
+            'excerpt': str(raw.get('excerpt') or summary)[:MAX_SUMMARY_CHARS],
             'summary_truncated': len(summary) > MAX_SUMMARY_CHARS,
             'content_hash': e.get('content_hash'),
         })
@@ -144,8 +156,9 @@ def events_from_records(records, security_id, decision_cutoff, *, policy=None, r
 
 
 def build_entry_packet(opportunity, quote, events, fundamentals, as_of,
-                       model_knowledge_cutoff=None, evidence=None) -> dict:
-    """构建入场否决用的冻结证据包。
+                       model_knowledge_cutoff=None, evidence=None,
+                       identity=None, market_context=None, fetch_status='OK') -> dict:
+    """构建入场否决用的冻结证据包（设计 §5.1 契约）。
 
     opportunity: Opportunity（含 security_id / opportunity_id()）。
     quote: {'price'(int 微美元), 'observed_at'(ISO)}。
@@ -162,7 +175,20 @@ def build_entry_packet(opportunity, quote, events, fundamentals, as_of,
         raise ValueError('AS_OF_INVALID')
     as_of_iso = as_of_dt.isoformat()
 
-    # 关键数据（BLOCK 级）
+    # 规则原计划：由规则侧冻结，模型只读（设计 §4：模型不自行计算 ATR/下单量/止损）
+    rule_plan = {
+        'parent_strategy_id': getattr(opportunity, 'parent_strategy_id', '') or '',
+        'parent_version': opportunity.parent_version,
+        'entry_rule': opportunity.entry_rule,
+        'rule_reason_codes': list(getattr(opportunity, 'rule_reason_codes', ()) or ()),
+        'signal_session': opportunity.signal_session,
+        'planned_execution_session': opportunity.planned_execution_session,
+        'stop_reference': dict(getattr(opportunity, 'stop_reference', {}) or {}),
+        'exit_policy_id': opportunity.exit_policy_id,
+        'decision_deadline': getattr(opportunity, 'decision_deadline', '') or '',
+    }
+
+    # 关键数据（BLOCK 级，设计 §5.3：关键行情、股票身份或规则计划缺失/无效）
     quote_price = (quote or {}).get('price')
     quote_observed = _parse_iso((quote or {}).get('observed_at'))
     critical_missing = []
@@ -172,6 +198,9 @@ def build_entry_packet(opportunity, quote, events, fundamentals, as_of,
         critical_missing.append('quote.observed_at')
     if not getattr(opportunity, 'security_id', None):
         critical_missing.append('security_id')
+    if not (rule_plan['parent_version'] and rule_plan['entry_rule']
+            and rule_plan['planned_execution_session']):
+        critical_missing.append('rule_plan')
 
     # 证据等级决定双时间过滤的严格程度：诊断模式允许缺 observed_at（同一策略已由
     # evidence_store.select_visible 施加过一次，这里保持一致，不能反过来再卡一次）
@@ -193,14 +222,30 @@ def build_entry_packet(opportunity, quote, events, fundamentals, as_of,
         'opportunity_id': opportunity.opportunity_id(),
         'security_id': opportunity.security_id,
         'parent_version': opportunity.parent_version,
-        'quote': {'price': quote_price, 'observed_at': quote.get('observed_at') if quote else None},
+        # 设计 §5.1：identity 防同名公司事件误配
+        'identity': {'security_id': opportunity.security_id, **(identity or {})},
+        # 规则原计划：模型只读，不自行计算 ATR/下单量/止损
+        'rule_plan': rule_plan,
+        'market_context': {
+            'price': quote_price, 'price_unit': 'micro_usd',
+            'observed_at': quote.get('observed_at') if quote else None,
+            **(market_context or {}),
+        },
         'events': usable_events,
         'fundamentals': fundamentals,
         'data_quality': {'level': quality, 'critical_missing': critical_missing,
-                         'dropped_event_count': dropped},
+                         'dropped_event_count': dropped, 'fetch_status': fetch_status,
+                         'evidence_mode': evidence.get('evidence_mode')},
         'as_of': as_of_iso,
         'model_knowledge_cutoff': model_knowledge_cutoff,
-        'evidence': evidence or {},
+        'evidence': evidence,
+        'provenance': {
+            'as_of': as_of_iso,
+            'market_snapshot_id': getattr(opportunity, 'market_snapshot_id', '') or '',
+            'evidence_source_packet_hash': evidence.get('source_packet_hash'),
+            'model_knowledge_cutoff': model_knowledge_cutoff,
+            'packet_schema_version': 'entry-packet-v2',
+        },
     }
     packet['packet_id'] = stable_id('entry_packet', packet)
     return packet

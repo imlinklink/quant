@@ -12,8 +12,9 @@ import pandas as pd
 from scripts.evidence.evidence_store import normalize_evidence
 from scripts.live_trading.decision_ledger.event_store import stable_id
 from scripts.portfolio_shadow.candidate_adapter import intents_for_session
-from scripts.portfolio_shadow.cli import (drop_from_schedule, entry_packet_for,
-                                          manifest_from_dict, run_entry_overlay)
+from scripts.portfolio_shadow.cli import (apply_entry_reviews, drop_from_schedule,
+                                          entry_packet_for, freeze_entry_reviews,
+                                          manifest_from_dict, record_data_blocked)
 from scripts.portfolio_shadow.evidence import (build_entry_packet, entry_decision_cutoff,
                                                entry_response_deadline, events_from_records)
 from scripts.portfolio_shadow.llm_overlay import FakeModel, SCHEMA_VERSION
@@ -71,10 +72,21 @@ class OverlayForwardTests(unittest.TestCase):
         self.scope = 'SHADOW:exp1:L'
         self.quotes = {'SEC-A': {'price': to_micro(100), 'observed_at': '2026-01-04T21:00:00Z'}}
 
-    def _run(self, model, records=None, notes=None):
-        return run_entry_overlay(self.store, self.scope, notes or [opp()], session=SIGNAL,
-                                 exec_session=EXEC, quotes=self.quotes, records=records,
-                                 real_model=model)
+    def _run(self, model, records=None, notes=None, quotes=None, force_recall=False,
+             scopes=None):
+        """走生产同一条两阶段路径：先冻结证据包+质量分流，再对非 BLOCK 的做评审。"""
+        notes = notes or [opp()]
+        quotes = self.quotes if quotes is None else quotes
+        cutoff = entry_decision_cutoff(SIGNAL)
+        reviews, blocked = freeze_entry_reviews(notes, quotes, records, cutoff,
+                                                evidence_mode='strict')
+        for o, packet in blocked:
+            record_data_blocked(self.store, scopes or (self.scope,), o, packet,
+                                session='2026-01-05', as_of=cutoff)
+        return apply_entry_reviews(
+            self.store, self.scope, reviews, cutoff=cutoff,
+            deadline=entry_response_deadline(EXEC), real_model=model,
+            force_recall=force_recall)
 
     def test_no_evidence_abstains_free_and_keeps_intent(self):
         model = Mock()
@@ -86,17 +98,20 @@ class OverlayForwardTests(unittest.TestCase):
         self.assertEqual(app['action'], 'ABSTAIN')
         self.assertEqual(app['reason_code'], 'INSUFFICIENT_EVIDENCE')
 
-    def test_missing_quote_blocks_and_drops_intent(self):
+    def test_missing_quote_blocks_both_accounts(self):
+        """设计 §6：DATA_BLOCKED 同时禁止 R 与 L 的新风险，不是在某一侧剔除。"""
         model = Mock()
-        kept, cost, _ = run_entry_overlay(self.store, self.scope, [opp()], session=SIGNAL,
-                                          exec_session=EXEC, quotes={}, records=None,
-                                          real_model=model)
-        self.assertEqual(kept, [])              # BLOCK ⇒ 剔除，不能照常成交
+        kept, cost, _ = self._run(model, quotes={},
+                                  scopes=('SHADOW:exp1:R', 'SHADOW:exp1:L'))
+        self.assertEqual(kept, [])
         self.assertEqual(cost, 0)
         model.call.assert_not_called()
-        app = self.store.application(self.scope, opp().opportunity_id())
-        self.assertEqual(app['action'], 'BLOCK')
-        self.assertEqual(app['reason_code'], 'DATA_BLOCKED_QUOTE')
+        for scope in ('SHADOW:exp1:R', 'SHADOW:exp1:L'):
+            app = self.store.application(scope, opp().opportunity_id())
+            self.assertEqual(app['action'], 'DATA_BLOCKED')
+            self.assertIn('quote.price', app['reason_code'])
+        self.assertEqual(
+            self.store.opportunity_terminals()[opp().opportunity_id()], 'DATA_BLOCKED')
 
     def test_decision_carries_signal_day_cutoff_not_exec_day(self):
         self._run(Mock())
@@ -179,10 +194,14 @@ class CrashWindowTests(unittest.TestCase):
         return stable_id('llm_attempt', self.scope, self.oid, packet['packet_id'])
 
     def _run(self, model, force_recall=False):
-        return run_entry_overlay(self.store, self.scope, [opp()], session=SIGNAL,
-                                 exec_session=EXEC, quotes=self.quotes,
-                                 records=evidence_records(), real_model=model,
-                                 force_recall=force_recall)
+        cutoff = entry_decision_cutoff(SIGNAL)
+        reviews, blocked = freeze_entry_reviews([opp()], self.quotes, evidence_records(),
+                                                cutoff, evidence_mode='strict')
+        self.assertEqual(blocked, [])
+        return apply_entry_reviews(
+            self.store, self.scope, reviews, cutoff=cutoff,
+            deadline=entry_response_deadline(EXEC), real_model=model,
+            force_recall=force_recall)
 
     def test_pending_attempt_is_never_recalled_and_cost_is_flagged(self):
         self.store.put_job_run(self.attempt_id, 1, 'PENDING', {'packet_id': 'p'})
@@ -225,8 +244,11 @@ class CrashWindowTests(unittest.TestCase):
 
     def test_pending_is_only_written_when_a_call_will_happen(self):
         # 无证据 ⇒ 质量门短路，不应留下任何 PENDING 记录
-        run_entry_overlay(self.store, self.scope, [opp()], session=SIGNAL, exec_session=EXEC,
-                          quotes=self.quotes, records=None, real_model=Mock())
+        cutoff = entry_decision_cutoff(SIGNAL)
+        reviews, _ = freeze_entry_reviews([opp()], self.quotes, None, cutoff,
+                                          evidence_mode='strict')
+        apply_entry_reviews(self.store, self.scope, reviews, cutoff=cutoff,
+                            deadline=entry_response_deadline(EXEC), real_model=Mock())
         self.assertIsNone(self.store.job_run(self.attempt_id))
 
 

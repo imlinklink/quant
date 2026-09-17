@@ -156,7 +156,12 @@ class Manifest:
 
 @dataclass(frozen=True)
 class Opportunity:
-    """共同机会流（设计 §4.2），账户资格检查之前。"""
+    """共同机会流（设计 §4.2），账户资格检查之前。
+
+    设计 §4 要求程序保存「规则为何产生机会、初始保护线如何计算及退出规则」，
+    模型不自行计算 ATR、下单量或止损 —— 故 rule_reason_codes / stop_reference /
+    exit_policy_id 都由规则侧填入并冻结。
+    """
     experiment_id: str
     security_id: str
     source_candidate_id: str
@@ -170,6 +175,11 @@ class Opportunity:
     exit_policy_id: str
     input_hash: str
     terminal: str = 'WAITING'  # CANDIDATE_TERMINAL 之一
+    parent_strategy_id: str = ''
+    signal_generated_at: str = ''  # 信号实际生成时刻（可信时钟）
+    decision_deadline: str = ''  # 动作最晚冻结时刻 = 执行日开盘前
+    rule_reason_codes: tuple = ()  # 规则侧的入场原因（可读、可审计）
+    market_snapshot_id: str = ''  # 生成信号时所用的行情快照标识
 
     def opportunity_id(self) -> str:
         return stable_id('opportunity', self.experiment_id, self.security_id,

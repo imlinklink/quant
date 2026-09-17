@@ -24,7 +24,9 @@ from .schema import SHADOW_TERMINALS
 #       save_state 白名单放行 missed
 #   3 → entry-veto 证据包增 evidence{evidence_mode, source_packet_hash, exclusion 统计} 与
 #       model_knowledge_cutoff。这两项进 packet_id ⇒ 进 attempt_id ⇒ 进 Application payload。
-SHADOW_SCHEMA_VERSION = 3
+#   4 → Opportunity 增 parent_strategy_id/signal_generated_at/decision_deadline/
+#       rule_reason_codes/market_snapshot_id（设计 §4），进 shadow:opportunity 事件 payload。
+SHADOW_SCHEMA_VERSION = 4
 
 _SHADOW_DDL = '''
 CREATE TABLE IF NOT EXISTS shadow_schema(version INTEGER PRIMARY KEY);
@@ -138,14 +140,19 @@ class ShadowStore:
 
     # ---- opportunities ----
     def put_opportunity(self, opp) -> None:
+        """写入机会。**首次写入即冻结**：已存在就整体 no-op。
+
+        机会一旦生成就不该被重跑改写（`signal_generated_at` 之类来自墙钟的字段每次
+        重跑都不同，改写会变成「同 event_id 异 payload」直接报错；即便不报错，改写
+        历史机会本身也是实验纪律所禁止的）。终态变迁走 `set_opportunity_terminal`。
+        """
         oid = opp.opportunity_id()
-        body = json.dumps(_asdict(opp), ensure_ascii=False, sort_keys=True)
         with self.transaction() as con:
-            row = con.execute('SELECT terminal FROM shadow_opportunities WHERE experiment_id=? '
+            row = con.execute('SELECT 1 FROM shadow_opportunities WHERE experiment_id=? '
                               'AND opportunity_id=?', (self.experiment_id, oid)).fetchone()
-            if row and row[0] != opp.terminal and opp.terminal == 'READY':
-                # 已落终态（VETOED/MISSED_EXECUTION/...）；重跑重新生成的 READY 不得覆盖
+            if row:
                 return
+            body = json.dumps(_asdict(opp), ensure_ascii=False, sort_keys=True)
             con.execute('INSERT OR REPLACE INTO shadow_opportunities VALUES (?,?,?,?,?,?,?)',
                         (self.experiment_id, oid, opp.security_id, opp.signal_session,
                          opp.rank, opp.terminal, body))
