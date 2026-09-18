@@ -73,7 +73,12 @@ def force_tail_refetch(checkpoint: Path, year: int) -> int:
     跳过，于是个股日线**永远停在数据源当时给到的那天**：任务在跑、日志正常、一天都没前进。
 
     回退上界不影响 sha256 校验（那比对的是文件内容哈希），只让 covered 判定失败从而重取。
+
+    检查点不存在时返回 0（与下载工具 `_load_checkpoint` 的语义一致）——此时没有「已覆盖」
+    可言，不需要回退。
     """
+    if not checkpoint.exists():
+        return 0
     state = json.loads(checkpoint.read_text())
     stale = f'{year - 1}-12-31'
     changed = 0

@@ -1,11 +1,15 @@
 """行情刷新的安全防线：只追加，历史段一格都不能变；选表选不满就报错。"""
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
 import pandas as pd
 
 from scripts.medium_term.p2_selection_check import TECH
-from scripts.portfolio_shadow.refresh_data import (HISTORY_TOL, ROOT, history_unchanged,
-                                                   select_tech_master, tech_master_codes)
+from scripts.portfolio_shadow.refresh_data import (HISTORY_TOL, ROOT, force_tail_refetch,
+                                                   history_unchanged, select_tech_master,
+                                                   tech_master_codes)
 
 
 def frame(rows):
@@ -95,3 +99,82 @@ class TechMasterTests(unittest.TestCase):
             self.skipTest('缺少行情主表')
         selected = select_tech_master(pd.read_csv(path))
         self.assertEqual(set(selected.code.astype(str)), tech_master_codes())
+
+
+class ForceTailRefetchTests(unittest.TestCase):
+    """回退「已覆盖」上界：只动目标年份，别的记录一格都不能改。"""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.path = Path(self.dir.name) / 'download_state.json'
+
+    def write(self, **completed):
+        self.path.write_text(json.dumps(
+            {'completed': completed, 'failed': {}, 'unavailable': {}}, indent=2))
+        return self.path.read_bytes()
+
+    @staticmethod
+    def record(year, start='2026-01-01'):
+        return {'path': '/tmp/x.csv.gz', 'rows': 100, 'sha256': 'deadbeef',
+                'requested_start': start, 'requested_end': f'{year}-09-18'}
+
+    def test_回退上界到去年年底(self):
+        self.write(**{'US.AAPL|day|none|2026': self.record(2026)})
+        self.assertEqual(force_tail_refetch(self.path, 2026), 1)
+        rec = json.loads(self.path.read_text())['completed']['US.AAPL|day|none|2026']
+        # 下载工具的 covered 判据是 `covered_end >= part_end`；回退到去年年底必然判不覆盖，
+        # 于是重取尾部。sha256 等其它字段必须原样保留（那只校验文件内容）。
+        self.assertEqual(rec['requested_end'], '2025-12-31')
+        self.assertEqual(rec['requested_start'], '2026-01-01')
+        self.assertEqual(rec['sha256'], 'deadbeef')
+
+    def test_只动目标年份_别的记录逐字段不变(self):
+        self.write(**{'US.AAPL|day|none|2025': self.record(2025),
+                      'US.AAPL|day|none|2026': self.record(2026),
+                      'US.AAPL|day|none|2027': self.record(2027)})
+        before = json.loads(self.path.read_text())['completed']
+        self.assertEqual(force_tail_refetch(self.path, 2026), 1)
+        after = json.loads(self.path.read_text())['completed']
+        for key in ('US.AAPL|day|none|2025', 'US.AAPL|day|none|2027'):
+            self.assertEqual(before[key], after[key], key)
+
+    def test_重复调用是空操作_且不重写文件(self):
+        """定时任务一天跑三次，第二次起必须什么都不做（也免得把检查点的缩进格式改掉）。"""
+        self.write(**{'US.AAPL|day|none|2026': self.record(2026)})
+        self.assertEqual(force_tail_refetch(self.path, 2026), 1)
+        bytes_once = self.path.read_bytes()
+        self.assertEqual(force_tail_refetch(self.path, 2026), 0)
+        self.assertEqual(self.path.read_bytes(), bytes_once)
+
+    def test_年份对不上时一个字都不写(self):
+        """`if changed:` 守卫：没有可回退的记录时不能重写检查点。"""
+        before = self.write(**{'US.AAPL|day|none|2025': self.record(2025)})
+        self.assertEqual(force_tail_refetch(self.path, 2026), 0)
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_认不出的键跳过且不改动(self):
+        """键形如 `<code>|<kind>|<autype>|<year>`（4 段）。历史遗留的 3 段键是旧 qfq 记录，
+        本路径只下载 `autype=none`，解析不了就跳过 —— 但绝不能顺手改掉它们。"""
+        before = self.write(**{'US.AAPL|day|2026': self.record(2026),
+                               'US.AAPL|day|none|2026': self.record(2026)})
+        self.assertEqual(force_tail_refetch(self.path, 2026), 1)
+        after = json.loads(self.path.read_text())['completed']
+        self.assertEqual(after['US.AAPL|day|2026'],
+                         json.loads(before)['completed']['US.AAPL|day|2026'])
+
+    def test_检查点不存在时是空操作_且不新建文件(self):
+        """与下载工具 `_load_checkpoint` 的语义一致：没有检查点就没有「已覆盖」可言。"""
+        self.assertEqual(force_tail_refetch(self.path, 2026), 0)
+        self.assertFalse(self.path.exists())
+
+    def test_failed与unavailable段原样保留(self):
+        self.path.write_text(json.dumps(
+            {'completed': {'US.AAPL|day|none|2026': self.record(2026)},
+             'failed': {'US.MU|day|none|2026': {'error': 'EMPTY_RESPONSE'}},
+             'unavailable': {'US.SOXL|day|none|2026': {'reason': 'BEFORE_REPORTED_LISTING'}}},
+            indent=2))
+        self.assertEqual(force_tail_refetch(self.path, 2026), 1)
+        state = json.loads(self.path.read_text())
+        self.assertIn('US.MU|day|none|2026', state['failed'])
+        self.assertIn('US.SOXL|day|none|2026', state['unavailable'])
