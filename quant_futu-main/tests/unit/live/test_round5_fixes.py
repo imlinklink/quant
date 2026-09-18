@@ -345,7 +345,10 @@ class TestRateLimiterWindow(unittest.TestCase):
 
     def test_us_rate_limiter_keeps_in_window(self):
         import importlib.util
-        path = '/Users/wh1817w/Documents/quant/quant_us-main/mutifactor/data/futu_common.py'
+        from pathlib import Path
+        # repo 根 = quant/（本文件在 quant/quant_futu-main/tests/unit/live/ 下）
+        path = str(Path(__file__).resolve().parents[4]
+                   / 'quant_us-main/mutifactor/data/futu_common.py')
         spec = importlib.util.spec_from_file_location('us_futu_common_test', path)
         m = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(m)
@@ -358,8 +361,10 @@ class TestDualChandelierATRRatchet(unittest.TestCase):
     @staticmethod
     def _load():
         import importlib.util
-        path = ('/Users/wh1817w/Documents/quant/quant_us-main/'
-                'mutifactor/strategies/dual_chandelier.py')
+        from pathlib import Path
+        # repo 根 = quant/（本文件在 quant/quant_futu-main/tests/unit/live/ 下）
+        path = str(Path(__file__).resolve().parents[4]
+                   / 'quant_us-main/mutifactor/strategies/dual_chandelier.py')
         spec = importlib.util.spec_from_file_location('dual_chandelier_test', path)
         m = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(m)
