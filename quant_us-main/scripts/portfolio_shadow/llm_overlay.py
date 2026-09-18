@@ -100,13 +100,28 @@ def validate_model_output(output, packet: dict) -> tuple[bool, list[str]]:
     if action == 'VETO':
         if output.get('reason_code') not in VETO_REASON_CODES:
             errors.append('REASON_NOT_ALLOWED')
+        # 必须说明「规则计划漏了什么、它如何改变本次机会」：只复述指标或只说不安，
+        # 都不是语义增量（设计 §6 的三个结构化问题）
+        if not str(output.get('thesis_contrast') or '').strip():
+            errors.append('VETO_NO_THESIS_CONTRAST')
         evidence_ids = output.get('evidence_ids') or []
         if not evidence_ids:
             errors.append('VETO_NO_EVIDENCE')
         else:
-            valid_ids = {e['evidence_id'] for e in packet.get('events', [])}
-            if not all(eid in valid_ids for eid in evidence_ids):
+            by_id = {e.get('evidence_id'): e for e in packet.get('events') or []}
+            unknown = [eid for eid in evidence_ids if eid not in by_id]
+            if unknown:
                 errors.append('EVIDENCE_NOT_IN_PACKET')
+            else:
+                # 必须至少有**一条本证券自己**的证据。市场级日报对每个候选都可见（它是背景，
+                # 排在证券事件前），但它撑不起一次否决：市场事实规则计划已经用市场门算过了，
+                # 拿它取消一笔交易等于让模型复述规则已经编码的东西（审计 §4.2）。
+                sid = packet.get('security_id')
+                if not sid:
+                    # 身份都核不了 → 不放行，宁可弃权
+                    errors.append('VETO_PACKET_HAS_NO_SECURITY')
+                elif not any(by_id[eid].get('security_id') == sid for eid in evidence_ids):
+                    errors.append('VETO_NO_COMPANY_EVIDENCE')
     return (not errors), errors
 
 
@@ -190,13 +205,16 @@ class FakeModel:
 
     def __init__(self, action='PASS', reason_code='', evidence_ids=None, *, cost_micro=100,
                  status='OK', completed_at='2026-01-02T00:00:00+00:00', cost_uncertain=False,
-                 evidence_from_packet=False):
+                 evidence_from_packet=False, thesis_contrast='规则计划未覆盖的测试事实'):
         self.action = action
-        # VETO 必须引用包内证据，否则会被验证器降级成 INVALID_OUTPUT。确定性的 VETO
-        # fixture（设计 §11 验收案例）需要这个开关 —— 它只能看到调用时传入的那个包。
+        # VETO 必须引用包内**本证券**的证据，否则会被验证器降级成 INVALID_OUTPUT。确定性的
+        # VETO fixture（设计 §11 验收案例）需要这个开关 —— 它只能看到调用时传入的那个包。
         self.evidence_from_packet = evidence_from_packet
         self.reason_code = reason_code
         self.evidence_ids = evidence_ids or []
+        # 默认给一个非空值：多数 VETO 测试关心的是别的东西（成本、执行、恢复），
+        # 「缺 thesis_contrast 会被拒」由专门的测试用空值覆盖。
+        self.thesis_contrast = thesis_contrast
         self.cost_micro = cost_micro
         self.status = status
         self.completed_at = completed_at
@@ -205,13 +223,20 @@ class FakeModel:
     def call(self, packet: dict, deadline: str) -> dict:
         evidence_ids = list(self.evidence_ids)
         if self.evidence_from_packet:
-            evidence_ids = [e['evidence_id'] for e in packet.get('events', [])][:1]
+            events = packet.get('events') or []
+            # **优先取本证券的证据**：生产包的顺序是「市场级在前、证券事件在后」，直接取
+            # 第一条会拿到 MARKET —— 那不是能支撑否决的证据（验证器会拒）。
+            sid = packet.get('security_id')
+            same = [e['evidence_id'] for e in events if e.get('security_id') == sid]
+            pool = same or [e['evidence_id'] for e in events]
+            evidence_ids = pool[:1] if pool else []
         output = {'schema_version': SCHEMA_VERSION,
                   'opportunity_id': packet.get('opportunity_id'),
                   'packet_id': packet.get('packet_id'),
                   'action': self.action,
                   'reason_code': self.reason_code,
                   'evidence_ids': evidence_ids,
+                  'thesis_contrast': self.thesis_contrast,
                   'explanation': ''}
         return {'status': self.status, 'output': output, 'completed_at': self.completed_at,
                 'cost_micro': self.cost_micro, 'cost_uncertain': self.cost_uncertain}
@@ -226,6 +251,12 @@ ENTRY_VETO_SYSTEM = (
     'VETO 只允许 reason_code：\n'
     '- MATERIAL_THESIS_CONTRADICTION：重大指引/经营逻辑反证\n'
     '- MATERIAL_COMPANY_EVENT_RISK：重大公司事件风险\n'
+    'VETO 的额外要求（任一不满足即视为无效输出，会被降级为 ABSTAIN）：\n'
+    '- evidence_ids 里必须**至少有一条属于本证券自己**（其 security_id 与本次机会一致）。\n'
+    '  市场级日报（security_id=MARKET）对每个候选都可见，那是背景；市场事实规则计划已经用\n'
+    '  市场门考虑过了，所以它**单独撑不起一次否决**。若包里没有本证券的证据，只能 PASS 或 ABSTAIN。\n'
+    '- 必须给出 thesis_contrast：说明规则计划漏看了什么事实、它如何改变本次机会。\n'
+    '  不要复述包里的指标，也不要只说「存在不确定性」。\n'
     '只依据给定证据推理，不编造；不得以「资金不足」等程序理由否决。输出严格 JSON，遵循 output_schema。'
 )
 
@@ -239,6 +270,9 @@ ENTRY_VETO_SCHEMA = {
         'reason_code': {'type': 'string'},
         'evidence_ids': {'type': 'array', 'items': {'type': 'string'}},
         'counterevidence_ids': {'type': 'array', 'items': {'type': 'string'}},
+        # 仅 VETO 必填（故不放进 required，否则 PASS/ABSTAIN 也要填）：规则计划漏看的事实，
+        # 以及它如何改变本次机会。由 validate_model_output 强制。
+        'thesis_contrast': {'type': 'string'},
         'explanation': {'type': 'string'},
     },
     'required': ['schema_version', 'opportunity_id', 'packet_id', 'action'],

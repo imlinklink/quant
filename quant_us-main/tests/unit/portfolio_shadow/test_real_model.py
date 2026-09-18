@@ -18,7 +18,9 @@ def opp():
 
 
 QUOTE = {'price': to_micro(100.0), 'observed_at': '2026-01-04T21:00:00+00:00'}
+# security_id 必须与 opp() 一致：VETO 只能靠**本证券**的证据支撑（市场级背景不算）
 EVENT = {'summary': '公司下调指引', 'source': 'filing', 'kind': 'filing',
+         'security_id': 'SEC-A',
          'published_at': '2026-01-04T12:00:00+00:00',
          'observed_at': '2026-01-04T13:00:00+00:00', 'content_hash': 'abc'}
 DEADLINE = '2026-01-05T13:20:00+00:00'  # 决策截止（次日开盘前）
@@ -42,6 +44,7 @@ class RealModelTests(unittest.TestCase):
             {'schema_version': 'entry-veto-v1', 'opportunity_id': p['opportunity_id'],
              'packet_id': p['packet_id'], 'action': 'VETO',
              'reason_code': 'MATERIAL_COMPANY_EVENT_RISK',
+             'thesis_contrast': '规则计划未覆盖的测试事实',
              'evidence_ids': [p['events'][0]['evidence_id']], 'explanation': ''},
             {'cost_usd': 0.00123})
         mr = RealModel(advisor, now=lambda: NOW).call(p, DEADLINE)
@@ -141,6 +144,7 @@ class QualityGateTests(unittest.TestCase):
             {'schema_version': 'entry-veto-v1', 'opportunity_id': p['opportunity_id'],
              'packet_id': p['packet_id'], 'action': 'VETO',
              'reason_code': 'MATERIAL_THESIS_CONTRADICTION',
+             'thesis_contrast': '规则计划未覆盖的测试事实',
              'evidence_ids': [p['events'][0]['evidence_id']], 'explanation': ''},
             {'cost_usd': 0.0})
         d = decide_overlay(p, RealModel(advisor, now=lambda: NOW), DEADLINE, attempt_id='a1')
