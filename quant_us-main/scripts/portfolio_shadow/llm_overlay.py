@@ -31,10 +31,44 @@ ABSTAIN_REASONS = ('TIMED_OUT', 'FAILED', 'INVALID_OUTPUT', 'LATE_RESPONSE',
                    'INSUFFICIENT_EVIDENCE',
                    # 上一次调用已发起但结果未落库（进程挂在两者之间）：钱可能已花且金额
                    # 不可知，不复用也不重试付费，按 ABSTAIN 采用父策略并把成本挂账待补记
-                   'RECALL_ABANDONED')
+                   'RECALL_ABANDONED',
+                   # 评审窗口已过，由结算按设计 §3.3 冻结 —— **模型从未被咨询**。
+                   # 漏掉它会让「没被问过」在报告里长成「被问过但采用父策略」。
+                   'DECISION_DEADLINE_MISSED')
 # 未发起任何调用、因而确实零成本的原因（区别于「调用过但成本未知」）
 NO_CALL_REASONS = ('HISTORICAL_AS_OF', 'MODEL_KNOWLEDGE_CUTOFF', 'DATA_BLOCKED_QUOTE',
-                   'INSUFFICIENT_EVIDENCE')
+                   'INSUFFICIENT_EVIDENCE', 'DECISION_DEADLINE_MISSED')
+# 上两类在报告里的细分（`ABSTAIN_REASONS` 的下属分组，并集必须等于 ABSTAIN_REASONS）：
+#   数据拦截 —— 机会级，连 R 一起拦（设计 §5.3），从「模型可评审」分母里剔除
+DATA_BLOCK_REASONS = ('DATA_BLOCKED_QUOTE',)
+#   质量弃权 —— 包本身不足以判断，同样不进入模型分母
+QUALITY_ABSTAIN_REASONS = ('INSUFFICIENT_EVIDENCE',)
+#   故障/降级 —— 本该有判断却没有：分母要算它，否则缺口会被算成「模型没有价值」
+FAILURE_ABSTAIN_REASONS = ('TIMED_OUT', 'FAILED', 'INVALID_OUTPUT', 'LATE_RESPONSE',
+                           'RECALL_ABANDONED', 'MODEL_KNOWLEDGE_CUTOFF', 'HISTORICAL_AS_OF',
+                           'DECISION_DEADLINE_MISSED')
+
+
+def is_program_abstain(reason_code) -> bool:
+    """该动作是否由**程序侧**产生（模型没有参与判断）。
+
+    这些原因下 `ABSTAIN` 的语义是「采用父策略」，于是 L 会与 R 走出**完全相同**的仓位 ——
+    报告侧必须据此把「没被问过」与「被问过、模型自己弃权」分开：混在一起时，一次调度缺口
+    会被读成「模型没有价值」，而真相是模型从未参与。这是 `ABSTAIN_REASONS` 里那句
+    「调用方不得据此提高任何模型否决率」在报告侧的执行。
+    """
+    return reason_code in ABSTAIN_REASONS
+
+
+def program_abstain_class(reason_code) -> str | None:
+    """程序侧弃权的细分：`data_blocked` / `quality_abstain` / `failure`；非程序侧返回 None。"""
+    if reason_code in DATA_BLOCK_REASONS:
+        return 'data_blocked'
+    if reason_code in QUALITY_ABSTAIN_REASONS:
+        return 'quality_abstain'
+    if reason_code in FAILURE_ABSTAIN_REASONS:
+        return 'failure'
+    return None
 
 
 def _parse(v):

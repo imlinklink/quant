@@ -3,6 +3,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from scripts.portfolio_shadow.llm_overlay import (ABSTAIN_REASONS, DATA_BLOCK_REASONS,
+                                                FAILURE_ABSTAIN_REASONS,
+                                                NO_CALL_REASONS, QUALITY_ABSTAIN_REASONS,
+                                                is_program_abstain, program_abstain_class)
 from scripts.portfolio_shadow.paper_engine import new_account_state, step
 from scripts.portfolio_shadow.report import (daily_report, decision_trace, entry_metrics,
                                               paired_performance, render_markdown,
@@ -406,3 +410,153 @@ class DecisionTraceTests(unittest.TestCase):
         self.assertIn('规则原计划', text)
         self.assertIn('VETO', text)
         self.assertIn('成本未知，待补记', text)
+
+
+class ProgramAbstainTaxonomyTests(unittest.TestCase):
+    """程序侧弃权的分类：报告必须能区分「没被问过」与「被问过、模型自己弃权」。"""
+
+    def test_三个分组的并集等于ABSTAIN_REASONS(self):
+        groups = (set(DATA_BLOCK_REASONS) | set(QUALITY_ABSTAIN_REASONS)
+                  | set(FAILURE_ABSTAIN_REASONS))
+        self.assertEqual(groups, set(ABSTAIN_REASONS))
+
+    def test_评审窗口错过属程序侧弃权(self):
+        """这条漏掉过一次：模型从未被咨询，却会和「模型自己弃权」混在一起。"""
+        self.assertTrue(is_program_abstain('DECISION_DEADLINE_MISSED'))
+        self.assertEqual(program_abstain_class('DECISION_DEADLINE_MISSED'), 'failure')
+        self.assertIn('DECISION_DEADLINE_MISSED', NO_CALL_REASONS)   # 确实零成本
+
+    def test_模型自己的弃权不算程序侧(self):
+        self.assertFalse(is_program_abstain(''))
+        self.assertFalse(is_program_abstain('MODEL_SAYS_NO'))
+        self.assertIsNone(program_abstain_class('MODEL_SAYS_NO'))
+
+    def test_数据拦截与质量弃权分开(self):
+        self.assertEqual(program_abstain_class('DATA_BLOCKED_QUOTE'), 'data_blocked')
+        self.assertEqual(program_abstain_class('INSUFFICIENT_EVIDENCE'), 'quality_abstain')
+
+
+class ProgramAbstainMetricTests(unittest.TestCase):
+    """起点是一次真实事故（2026-09-18）：评审窗口错过 ⇒ 结算按 §3.3 冻结
+    `ABSTAIN/DECISION_DEADLINE_MISSED` ⇒ L「采用父策略」买了与 R **完全相同**的仓位。
+    它在账上与「模型自己弃权」毫无区别，会把一次调度缺口读成「模型没有价值」。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.store = ShadowStore(Path(self.tmp) / 'ledger.sqlite3', 'exp1')
+        self.m = manifest().freeze('2026-01-02')
+        self.store.save_experiment(self.m)
+        self.l = 'SHADOW:exp1:L'
+        bars = {'SEC-A': {'open': to_micro(100), 'high': to_micro(101),
+                          'low': to_micro(99), 'close': to_micro(100.5)}}
+        for scope in ('SHADOW:exp1:R', self.l):     # 配对绩效需要双方都有净值
+            res = step(new_account_state(scope, self.m.initial_cash), session='2026-01-05',
+                       bars=bars, corporate_actions=[], intents=[], manifest=self.m)
+            self.store.save_state(scope, res.state, res.nav, res.events)
+
+    def opportunity(self, sid='SEC-A'):
+        o = opp(sid, '2026-01-05')
+        self.store.put_opportunity(o)
+        return o.opportunity_id()
+
+    def packet(self, oid, level='OK'):
+        self.store.put_packet(oid, {'packet_id': f'pkt_{oid}', 'rule_plan': {'entry_rule': 'b3'},
+                                   'market_context': {'price': 100},
+                                   'data_quality': {'level': level}, 'events': []})
+
+    def application(self, oid, action, reason_code, *, decision_id='', model_id=None,
+                    execution_applied=False):
+        self.store.put_application(Application(
+            scope=self.l, opportunity_id=oid, action=action, reason_code=reason_code,
+            decision_id=decision_id, as_of='2026-01-05T13:20:00+00:00',
+            decision_frozen=True, execution_applied=execution_applied))
+        if decision_id:
+            self.store.put_job_run(decision_id, 1, 'COMPLETED',
+                                   {'model_id': model_id, 'gated': False})
+
+    def test_窗口错过计入故障降级而不是模型知情(self):
+        oid = self.opportunity()
+        self.packet(oid)                                  # 包是好的：模型本该被调用
+        self.application(oid, 'ABSTAIN', 'DECISION_DEADLINE_MISSED')
+        m = entry_metrics(self.store, self.m)
+        self.assertEqual(m['callable_for_model'], 1)
+        self.assertEqual(m['real_review_coverage'], 0.0)
+        self.assertEqual(m['failure_abstains'], 1)
+        self.assertEqual(m['model_informed_applications'], 0)
+        # 分母是「模型知情」而不是「全部应用」—— 缺口不能拉低改变率
+        self.assertIsNone(m['plan_change_rate'])
+
+    def test_网络成功但输出被降级不算有效评审(self):
+        """§4.3：网络成功不等于按期取得有效判断。修复前 status 是 COMPLETED 就算覆盖率 1.0。"""
+        oid = self.opportunity()
+        self.packet(oid)
+        self.application(oid, 'ABSTAIN', 'INVALID_OUTPUT', decision_id='d1',
+                         model_id='deepseek-chat')
+        m = entry_metrics(self.store, self.m)
+        self.assertEqual(m['actual_calls'], 1)
+        self.assertEqual(m['real_model_reviews'], 0)
+        self.assertEqual(m['real_review_coverage'], 0.0)
+        self.assertEqual(m['failure_abstains'], 1)
+
+    def test_数据拦截排除出模型分母但单列(self):
+        """BLOCK 是数据问题不是模型的失败；把它算进分母等于让数据质量冒充模型表现。"""
+        oid = self.opportunity()
+        self.packet(oid, level='BLOCK')
+        self.application(oid, 'BLOCK', 'DATA_BLOCKED_QUOTE')
+        m = entry_metrics(self.store, self.m)
+        self.assertEqual(m['data_blocked'], 1)
+        self.assertEqual(m['callable_for_model'], 0)
+        self.assertIsNone(m['real_review_coverage'])       # 没有对象可评 ≠ 评了全放行
+        self.assertEqual(m['data_block_rate'], 1.0)
+        self.assertEqual(m['eligible_for_review'],
+                         m['data_blocked'] + m['quality_abstain'] + m['callable_for_model'])
+
+    def test_质量弃权同样不进模型分母(self):
+        oid = self.opportunity()
+        self.packet(oid, level='LLM_INSUFFICIENT')
+        self.application(oid, 'ABSTAIN', 'INSUFFICIENT_EVIDENCE')
+        m = entry_metrics(self.store, self.m)
+        self.assertEqual(m['quality_abstain'], 1)
+        self.assertEqual(m['callable_for_model'], 0)
+        self.assertIsNone(m['real_review_coverage'])
+
+    def test_模型知情时覆盖率与改变率都用模型分母(self):
+        a = self.opportunity('SEC-A')
+        self.packet(a)
+        self.application(a, 'PASS', '', decision_id='d1', model_id='deepseek-chat')
+        b = self.opportunity('SEC-B')
+        self.packet(b)
+        self.application(b, 'VETO', 'MATERIAL_THESIS_CONTRADICTION', decision_id='d2',
+                         model_id='deepseek-chat', execution_applied=True)
+        m = entry_metrics(self.store, self.m)
+        self.assertEqual(m['callable_for_model'], 2)
+        self.assertEqual(m['real_review_coverage'], 1.0)
+        self.assertEqual(m['model_informed_applications'], 2)
+        self.assertEqual(m['plan_change_count'], 1)
+        self.assertEqual(m['plan_change_rate'], 0.5)
+        self.assertEqual(m['veto_applied'], 1)
+        self.assertEqual(m['veto_unapplied'], 0)
+
+    def test_未兑现的VETO会被标出来(self):
+        """冻结了否决而账户照样买入，是最该看见的形态（§4.3）。"""
+        oid = self.opportunity()
+        self.packet(oid)
+        self.application(oid, 'VETO', 'MATERIAL_THESIS_CONTRADICTION', decision_id='d1',
+                         model_id='deepseek-chat', execution_applied=False)
+        m = entry_metrics(self.store, self.m)
+        self.assertEqual(m['veto_unapplied'], 1)
+        text = render_markdown(daily_report(self.store, self.m),
+                               paired_performance(self.store, self.m))
+        self.assertIn('未落到执行', text)
+
+    def test_退化配对在配对绩效里单列(self):
+        """L 走的是「采用父策略」，与 R 同路 —— 该配对不携带模型信息，必须有名字。"""
+        oid = self.opportunity()
+        self.packet(oid)
+        self.application(oid, 'ABSTAIN', 'DECISION_DEADLINE_MISSED')
+        p = paired_performance(self.store, self.m)
+        self.assertEqual(p['L_program_abstain_applications'], 1)
+        self.assertEqual(p['L_model_informed_applications'], 0)
+        text = render_markdown(daily_report(self.store, self.m), p)
+        self.assertIn('退化', text)

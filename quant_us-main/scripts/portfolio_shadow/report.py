@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import pandas as pd
 
+from .llm_overlay import is_program_abstain, model_call_expected, program_abstain_class
 from .store import SHADOW_SCHEMA_VERSION, ShadowStore, state_from_dict
 
 
@@ -118,10 +119,17 @@ def paired_performance(store: ShadowStore, manifest, calendar=None) -> dict:
     def _count(scope, action):
         return sum(1 for a in store.applications(scope) if a['action'] == action)
 
+    l_apps = store.applications(l_scope)
+    l_program = sum(1 for a in l_apps if is_program_abstain(a.get('reason_code') or ''))
+
     return {
         'common_sessions': len(common),
         'total_sessions': len(all_sessions),
         'excluded_after_gap': len(all_sessions) - len(common),
+        # 「模型从未参与」的应用数：这些机会上 L 走的是 ABSTAIN=采用父策略，与 R **同路**，
+        # 配对为**退化**、不携带任何模型信息。单列出来，否则一次调度缺口会被读成「模型无价值」。
+        'L_program_abstain_applications': l_program,
+        'L_model_informed_applications': len(l_apps) - l_program,
         'R_full_cost_return': r_ret,
         'L_full_cost_return': l_ret,
         'L_minus_R_return': l_ret - r_ret,
@@ -183,6 +191,11 @@ def render_markdown(report: dict, paired: dict) -> str:
     lines.append('## 配对绩效')
     lines.append(f"- 共同 session={paired.get('common_sessions')}")
     lines.append(f"- L−R 全成本收益差={_pct(paired.get('L_minus_R_return'))}")
+    if paired.get('L_program_abstain_applications'):
+        lines.append(f"- **L 有 {paired['L_program_abstain_applications']} 个应用是程序侧弃权"
+                     f"（模型从未参与，L 采用父策略、与 R 同路）—— 这些配对是**退化**的，"
+                     f"不能用来判断模型的贡献；模型知情的应用 "
+                     f"{paired.get('L_model_informed_applications')} 个")
     lines.append(f"- R MDD={_pct(paired.get('R_max_drawdown'))} "
                  f"L MDD={_pct(paired.get('L_max_drawdown'))}")
     lines.append(f"- VETO={paired.get('L_VETO')} ABSTAIN={paired.get('L_ABSTAIN')} "
@@ -196,17 +209,26 @@ def render_markdown(report: dict, paired: dict) -> str:
         lines.append('## 入场三项指标（设计 §8）')
         lines.append(f"- 有效真实评审覆盖率="
                      f"{_pct(metrics.get('real_review_coverage'))} "
-                     f"（真实评审 {metrics.get('real_model_reviews')} / 应评审 "
-                     f"{metrics.get('eligible_for_review')}）")
+                     f"（真实评审 {metrics.get('real_model_reviews')} / 可评审 "
+                     f"{metrics.get('callable_for_model')}）")
         lines.append(f"- 实际交易计划改变率="
                      f"{_pct(metrics.get('plan_change_rate'))} "
-                     f"（改变 {metrics.get('plan_change_count')} / 已评审 "
-                     f"{metrics.get('reviewed')}）")
+                     f"（改变 {metrics.get('plan_change_count')} / 模型知情 "
+                     f"{metrics.get('model_informed_applications')}）")
         lines.append(f"- 决策到执行可追踪完成率="
                      f"{_pct(metrics.get('trackable_completion_rate'))} "
                      f"（完成 {metrics.get('execution_completed')} + 明确失败 "
                      f"{metrics.get('execution_failed_terminal')} / 已批准 "
                      f"{metrics.get('approved_applications')}）")
+        lines.append(f"- 漏斗：应评审 {metrics.get('eligible_for_review')} = 数据拦截 "
+                     f"{metrics.get('data_blocked')} + 质量弃权 {metrics.get('quality_abstain')} "
+                     f"+ 可评审 {metrics.get('callable_for_model')}；已评审 "
+                     f"{metrics.get('reviewed')}（实际调用 {metrics.get('actual_calls')}，"
+                     f"夹具 {metrics.get('fixture_reviews')}）；故障降级 "
+                     f"{metrics.get('failure_abstains')}")
+        if metrics.get('veto_unapplied'):
+            lines.append(f"- **注意**：{metrics['veto_unapplied']} 次 VETO 已冻结但未落到执行 "
+                         f"（账户照样买入）—— 否决必须兑现，否则等于没发生")
         if metrics.get('note'):
             lines.append(f"- {metrics['note']}")
     return '\n'.join(lines)
@@ -216,13 +238,19 @@ def render_markdown(report: dict, paired: dict) -> str:
 FIXTURE_MODEL_IDS = ('', 'fixture', None)
 
 
-def _is_real_review(attempt: dict | None) -> bool:
-    """有效真实评审：真实模型、确实发起了调用（非质量门短路）、且拿到了输出。"""
+def _is_real_review(attempt: dict | None, reason_code: str = '') -> bool:
+    """有效真实评审：真实模型、确实发起了调用（非质量门短路）、且**判断真的生效**。
+
+    「网络成功」不等于「按期取得有效判断」：被降级成程序侧 ABSTAIN 的尝试（超时、失败、
+    无效输出、晚到、评审窗口已过）不得计入覆盖率 —— 那是故障，不是模型的一次表态。
+    """
     if not attempt:
         return False
     if attempt.get('model_id') in FIXTURE_MODEL_IDS:
         return False
     if attempt.get('gated'):
+        return False
+    if is_program_abstain(reason_code):
         return False
     return attempt.get('status') == 'COMPLETED'
 
@@ -271,50 +299,101 @@ def decision_trace(store, opportunity_id: str, scopes=()) -> dict:
 
 
 def entry_metrics(store, manifest) -> dict:
-    """设计 §8 的三项首版指标（入场）。
+    """设计 §8 的三项首版指标（入场），按 §4.3 要求把口径分列。
 
     无候选或全 PASS **不是失败**，也不能冒充已经观察到真实 VETO 价值 —— 所以覆盖率与
     影响率在分母为 0 时返回 None 而不是 0，「没有对象可评」和「评了但全放行」必须能区分。
+
+    核心是把**模型有没有参与**与**执行上发生了什么**分成两套数：
+
+      · 模型可评审分母 = 应评审 − 数据拦截 − 质量弃权。BLOCK 是数据问题、不是模型的失败，
+        算进分母等于让数据质量冒充模型表现（§4.3：BLOCK 排除出分母，但单列数据阻断率）。
+      · 计划改变率的分母 = **模型真正参与过判断**的应用，不是全部应用。
+      · 执行侧「放行 / 成交」照实统计，另列其中「模型知情」的那一份。
+
+    否则一次调度缺口（评审窗口错过 ⇒ 程序侧 ABSTAIN ⇒ L 采用父策略）在账上与「模型自己
+    弃权」完全一样，会被读成「模型没有价值」—— 而真相是模型从未参与。
     """
     l_scope = next((s for s in manifest.account_scopes if s.endswith(':L')), None)
     terminals = store.opportunity_terminals()
-    eligible = reviewed = real_reviews = changed = 0
-    approved = completed = failed_terminal = 0
+    n = dict(eligible=0, data_blocked=0, quality_abstain=0, callable=0, reviewed=0,
+             calls=0, real_reviews=0, fixture_reviews=0, failure_abstains=0,
+             model_informed=0, changed=0, veto_applied=0, veto_unapplied=0,
+             approved=0, completed=0, failed_terminal=0)
     for oid, _body in store.opportunity_rows():
-        if store.packet_for_opportunity(oid) is None:
+        packet = store.packet_for_opportunity(oid)
+        if packet is None:
             continue                      # 还没进入 prepare 阶段，不算「应评审」
-        eligible += 1
+        n['eligible'] += 1
         app = store.application(l_scope, oid) if l_scope else None
+        reason = (app or {}).get('reason_code') or ''
+        kind = program_abstain_class(reason)
+        level = (packet.get('data_quality') or {}).get('level')
+        # 机会级分类：包的质量门是「模型能不能被调用」的权威，与账户级 reason 取并集且不重复计
+        if level == 'BLOCK' or kind == 'data_blocked':
+            n['data_blocked'] += 1
+        elif level == 'LLM_INSUFFICIENT' or kind == 'quality_abstain':
+            n['quality_abstain'] += 1
+        else:
+            n['callable'] += 1
+        if kind == 'failure':
+            n['failure_abstains'] += 1
         if app is None:
             continue                      # 包已冻结但还没评审
-        reviewed += 1
+        n['reviewed'] += 1
         attempt = store.job_run(app['decision_id']) if app.get('decision_id') else None
-        real_reviews += 1 if _is_real_review(attempt) else 0
+        if attempt and not attempt.get('gated'):
+            n['calls'] += 1
+        if _is_real_review(attempt, reason):
+            n['real_reviews'] += 1
+        elif attempt and attempt.get('model_id') in FIXTURE_MODEL_IDS:
+            n['fixture_reviews'] += 1
         if not app.get('decision_frozen'):
             continue
         action = app.get('action')
-        if action == 'VETO':
-            changed += 1                  # 因 LLM 而改变最终计划
+        if not is_program_abstain(reason):
+            n['model_informed'] += 1
+            if action == 'VETO':
+                n['changed'] += 1         # 因 LLM 而改变最终计划
+                # VETO 必须落到执行上：冻结了否决而账户照样买入，是最该看见的形态
+                if app.get('execution_applied'):
+                    n['veto_applied'] += 1
+                else:
+                    n['veto_unapplied'] += 1
         if action not in ('VETO', 'BLOCK', 'DATA_BLOCKED'):
-            approved += 1
+            n['approved'] += 1
             if app.get('execution_applied'):
-                completed += 1
+                n['completed'] += 1
             elif terminals.get(oid) == 'MISSED_EXECUTION':
-                failed_terminal += 1      # 明确失败终态也算「可追踪完成」
+                n['failed_terminal'] += 1  # 明确失败终态也算「可追踪完成」
     return {
-        'eligible_for_review': eligible,
-        'reviewed': reviewed,
-        'real_model_reviews': real_reviews,
-        'real_review_coverage': (real_reviews / eligible) if eligible else None,
-        'plan_change_count': changed,
-        'plan_change_rate': (changed / reviewed) if reviewed else None,
-        'approved_applications': approved,
-        'execution_completed': completed,
-        'execution_failed_terminal': failed_terminal,
-        'trackable_completion_rate': (((completed + failed_terminal) / approved)
-                                      if approved else None),
+        # 漏斗（相加为应评审：data_blocked + quality_abstain + callable == eligible）
+        'eligible_for_review': n['eligible'],
+        'data_blocked': n['data_blocked'],
+        'quality_abstain': n['quality_abstain'],
+        'callable_for_model': n['callable'],
+        'reviewed': n['reviewed'],
+        'actual_calls': n['calls'],
+        'real_model_reviews': n['real_reviews'],
+        'fixture_reviews': n['fixture_reviews'],
+        'failure_abstains': n['failure_abstains'],
+        'model_informed_applications': n['model_informed'],
+        # 比率：分母一律是「该有判断的对象」，不是「碰过的对象」
+        'real_review_coverage': (n['real_reviews'] / n['callable']) if n['callable'] else None,
+        'data_block_rate': (n['data_blocked'] / n['eligible']) if n['eligible'] else None,
+        'plan_change_count': n['changed'],
+        'plan_change_rate': ((n['changed'] / n['model_informed'])
+                             if n['model_informed'] else None),
+        # 执行侧
+        'approved_applications': n['approved'],
+        'veto_applied': n['veto_applied'],
+        'veto_unapplied': n['veto_unapplied'],
+        'execution_completed': n['completed'],
+        'execution_failed_terminal': n['failed_terminal'],
+        'trackable_completion_rate': (((n['completed'] + n['failed_terminal']) / n['approved'])
+                                      if n['approved'] else None),
         'note': ('无候选或全部为夹具评审：这不构成失败，也不能冒充已观察到真实 VETO 价值'
-                 if real_reviews == 0 else ''),
+                 if n['real_reviews'] == 0 else ''),
     }
 
 
