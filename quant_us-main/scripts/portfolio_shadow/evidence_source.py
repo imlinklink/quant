@@ -59,6 +59,17 @@ class EvidenceFetchResult:
         return self.status == 'OK' and bool(self.events)
 
 
+def _newest_per_kind(events) -> list:
+    """按 `event_type` 分组，每组只留 `published_at` 最新的那条（稳定：同刻取 evidence_id）。"""
+    newest = {}
+    for e in events:
+        kind = e.get('event_type') or ''
+        key = (str(e.get('published_at') or ''), e.get('evidence_id') or '')
+        if kind not in newest or key > newest[kind][0]:
+            newest[kind] = (key, e)
+    return [e for _, e in sorted(newest.values(), key=lambda kv: kv[0])]
+
+
 def _ingest_stamp(value=None) -> str:
     if value is None:
         return datetime.now(timezone.utc).isoformat()
@@ -209,6 +220,10 @@ class JsonlEvidenceSource:
         # 排在证券事件之前 —— 它是背景，不是这条证券自己的证据。
         market_events, _, market_meta = events_from_records(
             in_window, MARKET_SECURITY, cutoff, policy=policy_for_mode(evidence_mode))
+        # 市场级证据**按类型只留最新一条**：日报每天一份，全都塞进包会随天数线性膨胀
+        # （`evidence_max_events` 只限条数不限字数：50 × 6000 = 30 万字符进 prompt）。
+        # 市场级的正确语义是「最新的市场视图」，不是一叠历史视图。
+        market_events = _newest_per_kind(market_events)
         if market_events:
             events = market_events + events
             meta = {**meta,

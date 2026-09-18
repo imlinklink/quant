@@ -1,16 +1,20 @@
 """市场级日报 → 证据事件。
 
-用户每日采集的市场舆情以 HTML 报告落在 `~/Documents/daily-market-suite-v10-1/output/`。
+日报由**另一个项目**产出，各定时任务用 `ops/publish_digest.py` 发布到
+`~/quant-inputs/market-digest/`（不是 `~/Documents` —— 后台调度没有 TCC 权限，读不到）。
 它是**市场级**的：不属于任何单一标的，但每个候选都该看到 —— 所以以
 `security_id='MARKET'` 的事件入库，由来源适配器并入**每一个**候选的证据包。
 
-两个刻意的选择：
+三个刻意的选择：
 
 - **从报告开头截断**，不按小节解析。执行摘要（一句话结论 / 核心驱动 / 关键风险）永远在
   最前面；而分节结构随版本演进（目录下已有 v2/v3/v4 并存），按小节解析太脆。截断状态记进
   包内，`content_hash` 仍对**全文**计算，所以被截掉的部分依然可审计。
 - **`published_at` 用文件 mtime**，不用报告自述的时间。按设计 §5.2 的同一条道理：文件是
   数据、它的自述是它的说法；我们能用的是「我们这边何时拿到它」。报告自述时间仍在正文里。
+- **同日多份按文件名取用序**（见 `DIGEST_PRIORITY`）。2026-09-18 起同一天会并存盘前/盘后/
+  美股盘后/全球盘后四类日报，它们同日期前缀、而盘前总是**最早**写出（mtime 最小），
+  若只按 mtime 比就会被盘后顶掉、且每天喂给模型的是哪一类会随产出顺序漂移。
 """
 from __future__ import annotations
 
@@ -25,7 +29,33 @@ from pathlib import Path
 MAX_DIGEST_CHARS = 6000
 MARKET_SECURITY = 'MARKET'
 MARKET_EVENT_TYPE = 'market_digest'
-DIGEST_DIR = Path.home() / 'Documents' / 'daily-market-suite-v10-1' / 'output'
+DIGEST_DIR = Path.home() / 'quant-inputs' / 'market-digest'
+
+# 同日多份日报时的取用序：**数字越小越优先**，未列出的文件名排最后。
+# 与 `ops/publish_digest.py` 的 KINDS 一一对应，改动需两边同步。
+# 为什么盘前优先：它是决策链的起点，且与本次改造前的既有效果一致（此前目录里只有盘前）。
+# 想换冠军只改这一个元组的顺序，不必动排序逻辑。
+DIGEST_PRIORITY = (
+    ('premarket', 0),       # 盘前简报
+    ('uspostmarket', 1),    # 美股盘后深度
+    ('globalpost', 2),      # 全球盘后
+    ('postmarket', 3),      # 每日盘后复盘
+)
+DEFAULT_PRIORITY = 9
+
+
+def name_priority(name: str) -> int:
+    """从文件名推断取用序；命中不到返回 ``DEFAULT_PRIORITY``。
+
+    先去掉非字母数字再匹配，这样 `2026-09-18_us_postmarket.html` 与
+    `2026-09-18_uspostmarket.html` 等价；同时按 ``DIGEST_PRIORITY`` 的顺序匹配，
+    保证 `uspostmarket`（含子串 `postmarket`）不会先被 `postmarket` 抢走。
+    """
+    stem = re.sub(r'[^a-z0-9]', '', Path(name).stem.lower())
+    for token, pri in DIGEST_PRIORITY:
+        if token in stem:
+            return pri
+    return DEFAULT_PRIORITY
 
 
 def html_to_text(html: str) -> str:
@@ -67,11 +97,15 @@ DATE_PREFIX = re.compile(r'^(\d{4}-\d{2}-\d{2})')
 def latest_digest(directory: Path, session: str) -> Path | None:
     """**日期 ≤ session 的最近一份**日报；没有则 None。
 
-    同一天可能有多份（v2/v3/v4、盘前/盘后、交易日记），取该日 mtime 最新的一份。
+    同一天可能有多份（盘前/盘后/美股盘后/全球盘后、v2/v3/v4），取该日中
+    「取用序最小、其次 mtime 最大」的一份 —— 取用序见 ``DIGEST_PRIORITY``。
     取哪一份会打印出来 —— 取错必须看得见。
 
     取「≤ session 的最近一份」而不是「必须等于 session」：日报不一定每个交易日都有，
     而最近一份市场综述仍是有用的背景（可见性由 `published_at` 与窗口自行把关）。
+
+    注意只看**顶层** `*.html`：辅助产物（监控页、周报）发布在 `aux/` 子目录里，
+    因此不会被当成市场日报喂给模型。
     """
     if not directory.is_dir():
         return None
@@ -80,7 +114,8 @@ def latest_digest(directory: Path, session: str) -> Path | None:
         m = DATE_PREFIX.match(path.name)
         if not m or m.group(1) > session:
             continue
-        key = (m.group(1), path.stat().st_mtime)
+        # 先比日期，再比取用序（小的优先 ⇒ 取负），最后才用 mtime 兜底
+        key = (m.group(1), -name_priority(path.name), path.stat().st_mtime)
         if best is None or key > best[0]:
             best = (key, path)
     return best[1] if best else None

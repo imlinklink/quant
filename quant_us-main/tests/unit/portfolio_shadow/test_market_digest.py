@@ -1,6 +1,7 @@
 """市场日报 → 市场级证据：抽取、挑选、截断、追加去重。"""
 import hashlib
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -80,6 +81,55 @@ class LatestDigestTests(unittest.TestCase):
     def test_none_when_nothing_is_early_enough_or_dir_missing(self):
         self.assertIsNone(latest_digest(self.tmp, '2026-09-01'))
         self.assertIsNone(latest_digest(self.tmp / 'nope', '2026-09-16'))
+
+
+class NamePriorityTests(unittest.TestCase):
+    """同日多份日报（盘前/盘后/美股盘后/全球盘后）靠文件名定胜负，不靠 mtime。
+
+    回归背景：2026-09-18 起四个定时任务都发布到同一个目录。盘前总在**当天 16:30**
+    写出，而盘后/美股盘后/全球盘后都是**次日早晨**才写 —— 若只按 mtime 比，
+    盘前永远输，且每天喂给模型的日报类型会随产出顺序漂移。
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def _write(self, name, mtime):
+        p = self.tmp / name
+        p.write_text('<p>x</p>', encoding='utf-8')
+        os.utime(p, (mtime, mtime))          # 显式钉住 mtime，测试不依赖写盘顺序
+        return p
+
+    def test_premarket_beats_the_postmarket_batch_despite_older_mtime(self):
+        self._write('2026-09-18_postmarket.html', 1_800_000_000)
+        self._write('2026-09-18_uspostmarket.html', 1_800_000_100)
+        self._write('2026-09-18_globalpost.html', 1_800_000_050)
+        self._write('2026-09-18_premarket.html', 1_700_000_000)   # 最旧
+        self.assertEqual(latest_digest(self.tmp, '2026-09-18').name,
+                         '2026-09-18_premarket.html')
+
+    def test_underscored_name_is_not_stolen_by_postmarket(self):
+        """`us_postmarket` 含子串 `postmarket` —— 匹配顺序错了它就会被降级。"""
+        from scripts.portfolio_shadow.market_digest import name_priority
+        self.assertLess(name_priority('2026-09-18_us_postmarket.html'),
+                        name_priority('2026-09-18_postmarket.html'))
+
+    def test_unlisted_name_ranks_below_every_listed_kind(self):
+        from scripts.portfolio_shadow.market_digest import (DEFAULT_PRIORITY,
+                                                            name_priority)
+        self.assertEqual(name_priority('2026-09-18_somethingelse.html'),
+                         DEFAULT_PRIORITY)
+        self._write('2026-09-18_somethingelse.html', 1_900_000_000)   # 最新
+        self._write('2026-09-18_postmarket.html', 1_800_000_000)
+        self.assertEqual(latest_digest(self.tmp, '2026-09-18').name,
+                         '2026-09-18_postmarket.html')
+
+    def test_aux_subdirectory_is_never_read(self):
+        """监控页与 X 周报发布在 aux/ 下，不能被当成市场日报喂给模型。"""
+        (self.tmp / 'aux').mkdir()
+        (self.tmp / 'aux' / '2026-09-18_gsmonitor.html').write_text('<p>x</p>',
+                                                                    encoding='utf-8')
+        self.assertIsNone(latest_digest(self.tmp, '2026-09-18'))
 
 
 class AppendSemanticsTests(unittest.TestCase):
@@ -173,3 +223,60 @@ class MixedTimestampFormatTests(unittest.TestCase):
         kinds = [e['event_type'] for e in fetch.events]
         self.assertIn(MARKET_EVENT_TYPE, kinds, f'日报被静默丢掉：{kinds}')
         self.assertIn('earnings', kinds)
+
+
+class MarketDigestAccumulationTests(unittest.TestCase):
+    """日报每天一份，全塞进包会随天数线性膨胀 —— 市场级证据按类型只留最新一条。"""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.store = self.tmp / 'store.csv'
+
+    def _publish(self, day, summary, *, published):
+        f = self.tmp / f'digest-{day}.jsonl'
+        f.write_text(json.dumps({
+            'security_id': MARKET_SECURITY, 'event_type': MARKET_EVENT_TYPE,
+            'summary': summary, 'source_url': f'file://{day}',
+            'source_type': 'daily_market_report', 'published_at': published,
+            'quality_status': 'verified'}) + '\n', encoding='utf-8')
+        import_evidence_jsonl(f, self.store, append=self.store.exists(),
+                              observed_at_policy='unknown')
+
+    def _load(self, cutoff='2026-09-18T09:40:00+00:00'):
+        from scripts.portfolio_shadow.evidence_source import JsonlEvidenceSource
+        return JsonlEvidenceSource(self.store, window_days=365, max_events=50).load_events(
+            'SEC-US-AMD', cutoff, evidence_mode='diagnostic')
+
+    def test_only_the_newest_digest_enters_the_packet(self):
+        self._publish('d1', '第一天：市场中性', published='2026-09-10T20:00:00Z')
+        self._publish('d2', '第二天：风险偏好回落', published='2026-09-11T20:00:00Z')
+        fetch = self._load()
+        digests = [e for e in fetch.events if e['event_type'] == MARKET_EVENT_TYPE]
+        self.assertEqual(len(digests), 1, f'应只留最新一条，实得 {len(digests)}')
+        self.assertIn('第二天', digests[0]['summary'])
+
+    def test_other_market_kinds_are_not_dropped(self):
+        """只按类型归一，别的市场级类型（若有）不受影响。"""
+        self._publish('d1', '第一天', published='2026-09-10T20:00:00Z')
+        other = self.tmp / 'other.jsonl'
+        other.write_text(json.dumps({
+            'security_id': MARKET_SECURITY, 'event_type': 'market_regime_change',
+            'summary': '风险状态切换', 'source_url': 'file://r', 'source_type': 'rule',
+            'published_at': '2026-09-10T21:00:00Z', 'quality_status': 'verified'}) + '\n',
+            encoding='utf-8')
+        import_evidence_jsonl(other, self.store, append=True, observed_at_policy='unknown')
+        kinds = [e['event_type'] for e in self._load().events]
+        self.assertIn(MARKET_EVENT_TYPE, kinds)
+        self.assertIn('market_regime_change', kinds)
+
+    def test_digest_is_ordered_before_security_events(self):
+        self._publish('d1', '市场综述', published='2026-09-10T20:00:00Z')
+        sec = self.tmp / 'sec.jsonl'
+        sec.write_text(json.dumps({
+            'security_id': 'SEC-US-AMD', 'event_type': 'earnings', 'summary': '财报',
+            'source_url': 'futu://x', 'source_type': 'futu',
+            'published_at': '2026-09-11T20:00:00Z', 'quality_status': 'verified'}) + '\n',
+            encoding='utf-8')
+        import_evidence_jsonl(sec, self.store, append=True, observed_at_policy='unknown')
+        kinds = [e['event_type'] for e in self._load().events]
+        self.assertEqual(kinds[0], MARKET_EVENT_TYPE, f'市场级应排在最前，实得 {kinds}')
