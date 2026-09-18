@@ -41,10 +41,8 @@ def build_block() -> str:
         f'>> {log_dir}/cron_hk_scan_backfill.log 2>&1 && '
         f'{PY} scripts/live_trading/decision_ledger/hk_scan_attribution.py '
         f'>> {log_dir}/cron_hk_scan_backfill.log 2>&1',
-        '# 美东收盘后(北京 08:50)：R/L 双影子账户前向运行（结算 T / 准备 T / 评审 T+1）',
-        '#   北京周二~周六 = 美东周一~周五；08:50 时 T 的行情已落定，而 T+1 的决策截止',
-        '#   （美东 09:20）还有约 12 小时。脚本在未冻结实验时只记一行日志后退出 0。',
-        f'50 8 * * 2-6 bash {ROOT}/ops/shadow_daily.sh >> {log_dir}/cron_shadow_daily.log 2>&1',
+        '# R/L 双影子账户每日运行**不在 cron**：见 install_launchd.py 顶部的两条实测原因',
+        '#   （cron 无 ~/Documents 的 TCC 权限；且 macOS cron 不补跑睡过的任务）。',
         '# 看护：每 5 分钟检查（只告警，默认不自动重启）',
         f'*/5 * * * * cd {ROOT} && {PY} ops/watchdog.py --once >> {log_dir}/cron_watchdog.log 2>&1',
         MARK_END,
