@@ -38,6 +38,56 @@ ETF_UNIVERSE = ETF_ROOT / 'universe_etf.csv'
 HISTORY_TOL = 1e-9
 
 
+def tech_master_codes() -> set[str]:
+    """13 只 TECH 的证券 id → 行情主表的 `code`。
+
+    **两种格式的转换只在这里定义一次**：`p2_selection_check.TECH` 是 `SEC-US-AAPL`
+    这样的证券 id，而主表 `code` 是 `US.AAPL`。
+    """
+    return {'US.' + sid.replace('SEC-US-', '') for sid in TECH}
+
+
+def select_tech_master(master: pd.DataFrame) -> pd.DataFrame:
+    """从主表选出 13 只 TECH；**选不满就报错，绝不返回空表**。
+
+    空表会一路变成 `download(codes=[])`：下载工具对空 codes 不报错、只是什么都不做。实测
+    2026-09-17 之后个股日线一直停在 09-16 —— 任务在跑、日志正常、数据一天都没前进，根因
+    就是这里拿 `SEC-US-AAPL` 去匹配主表的 `US.AAPL`（0 行）。这种失败必须在这一步炸出来。
+    """
+    codes = tech_master_codes()
+    selected = master[master.code.astype(str).isin(codes)]
+    if selected.empty:
+        raise ValueError('TECH_MASTER_EMPTY:主表里一只 TECH 都没匹配上（code 格式变了吗？）')
+    missing = codes - set(selected.code.astype(str))
+    if missing:
+        raise ValueError(f'TECH_MASTER_INCOMPLETE:主表缺 {sorted(missing)}')
+    return selected
+
+
+def force_tail_refetch(checkpoint: Path, year: int) -> int:
+    """把 `year` 年各分区的「已覆盖」上界回退，迫使下载工具**重新取尾部**。
+
+    下载工具把「**请求过的**范围」当成「**已覆盖的**范围」：同一范围内第二次刷新会被判定
+    covered 而**完全跳过下载**。但数据源可能当时还没发布最近那几天 —— 实测：北京 10:45
+    请求 09-04..09-18 并记为已覆盖（当时 Futu 还没有 09-17），14:21 再请求同一范围就直接
+    跳过，于是个股日线**永远停在数据源当时给到的那天**：任务在跑、日志正常、一天都没前进。
+
+    回退上界不影响 sha256 校验（那比对的是文件内容哈希），只让 covered 判定失败从而重取。
+    """
+    state = json.loads(checkpoint.read_text())
+    stale = f'{year - 1}-12-31'
+    changed = 0
+    for key, rec in (state.get('completed') or {}).items():
+        parts = key.split('|')
+        if len(parts) != 4 or parts[3] != str(year) or rec.get('requested_end') == stale:
+            continue
+        rec['requested_end'] = stale
+        changed += 1
+    if changed:
+        checkpoint.write_text(json.dumps(state))
+    return changed
+
+
 def download(*, master: Path, start: str, end: str, output_root: Path, checkpoint: Path) -> dict:
     """调用既有下载工具（追加 + 去重）。**绝不传 `--overwrite`**。"""
     cmd = [sys.executable, str(ROOT / 'scripts/data/download_market_history.py'),
@@ -133,9 +183,12 @@ def refresh(*, live_dir: Path, through: str | None = None) -> dict:
     end = through or pd.Timestamp.today().strftime('%Y-%m-%d')
     start = (pd.Timestamp(end) - pd.Timedelta(days=14)).strftime('%Y-%m-%d')
     tech_master = ROOT / 'data/security_master_39.csv'
-    tech = pd.read_csv(tech_master)
-    tech[tech.code.astype(str).isin(set(TECH))].to_csv('/tmp/_tech_master.csv', index=False)
+    select_tech_master(pd.read_csv(tech_master)).to_csv('/tmp/_tech_master.csv', index=False)
+    year = pd.Timestamp(end).year
     return {
+        # 先回退覆盖上界，否则同级范围的重跑会被判定 covered 而跳过下载（见函数说明）
+        'tech_refetch': force_tail_refetch(CHECKPOINT, year),
+        'etf_refetch': force_tail_refetch(ETF_ROOT / 'download_none.json', year),
         'tech_download': download(master=Path('/tmp/_tech_master.csv'), start=start, end=end,
                                   output_root=RAW_ROOT, checkpoint=CHECKPOINT),
         'etf_download': download(master=ETF_UNIVERSE, start=start, end=end,
