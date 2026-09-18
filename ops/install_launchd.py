@@ -30,18 +30,21 @@ PLIST = Path.home() / 'Library' / 'LaunchAgents' / f'{LABEL}.plist'
 # 至少日志本身还能写出来，否则我们会看到一个"什么都没发生"的空洞。
 LOG_DIR = Path.home() / 'Library' / 'Logs' / 'quant'
 SCRIPT = ROOT / 'ops' / 'shadow_daily.sh'
-# 北京周二~周六 **17:40**。launchd 的 Weekday：0/7=周日，1=周一 … 6=周六。
+# 北京周二~周六，**一天三次**。launchd 的 Weekday：0/7=周日，1=周一 … 6=周六。
 #
-# 为什么不是更早：**Futu 的个股日线在收盘后数小时才出**。实测（北京 10:45 = 美东 09-17
-# 22:45，收盘后 6.75 小时）TECH 个股仍停在 09-16，而同批 ETF 已到 09-17 —— `run-daily`
-# 于是退回用 09-16 当目标，永远慢一天，评审窗口就这么被错过（`DECISION_WINDOW_MISSED`）。
-# 17:40 时 T 的收盘已过 13.7 小时，数据充足；距 T+1 的决策截止（美东 09:20 = 北京 21:20）
-# 还有 3.7 小时，够跑完。
+# 为什么要多次：**Futu 的个股日线在收盘后数小时才出，且滞后时长不稳定**。实测滞后
+# 已超过 8 小时（北京 11:50 = 美东 09-17 23:50，收盘后 8 小时，TECH 个股仍停在 09-16，
+# 而同批 ETF 已到 09-17）—— 单次定时就是在赌那一刻数据到了没有，赌错就永远慢一天、
+# 评审窗口直接错过（实测 `DECISION_WINDOW_MISSED`）。
+#
+# 三次尝试是安全的：整个任务**幂等**（机会/证据包/决策都是首次写入即冻结，`run-daily`
+# 的结算按"晚于上次已结算"取值），数据没出的那几次会安静地什么都不做。
+# 最后一次 19:40 距 T+1 的决策截止（美东 09:20 = 北京 21:20）还有 1.7 小时。
 #
 # 注意：LaunchAgent 的补跑是「唤醒后执行」，**不保证在截止前醒来**。所以脚本会记录每个
 # 应跑 session 的终态（`ops/shadow_status.py`），漏跑看得见。
 WEEKDAYS = (2, 3, 4, 5, 6)
-HOUR, MINUTE = 17, 40
+ATTEMPTS = ((16, 40), (18, 10), (19, 40))
 
 
 def build_plist() -> dict:
@@ -49,8 +52,8 @@ def build_plist() -> dict:
         'Label': LABEL,
         'ProgramArguments': ['/bin/bash', str(SCRIPT)],
         'WorkingDirectory': str(ROOT),
-        'StartCalendarInterval': [{'Weekday': w, 'Hour': HOUR, 'Minute': MINUTE}
-                                  for w in WEEKDAYS],
+        'StartCalendarInterval': [{'Weekday': w, 'Hour': h, 'Minute': m}
+                                  for w in WEEKDAYS for (h, m) in ATTEMPTS],
         'StandardOutPath': str(LOG_DIR / 'shadow_daily.log'),
         'StandardErrorPath': str(LOG_DIR / 'shadow_daily.err.log'),
         'ProcessType': 'Background',
