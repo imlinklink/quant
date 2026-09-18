@@ -7,12 +7,20 @@
 
 分类（按严重度从"没事发生"到"完成了"）：
 
+    WAITING_FOR_DATA  数据未就绪且**最近确实请求过**（上游还没发布）—— 等待，不是故障
     NO_OPPORTUNITIES  当天没有候选（设计 §4：不是失败，也不制造候选）
     NO_EVIDENCE       有候选但证据包都是 LLM_INSUFFICIENT —— 模型根本没被调用
     DEADLINE_MISSED   评审窗口已过，动作被冻结为 ABSTAIN/DECISION_DEADLINE_MISSED
     MODEL_FAILED      发起了模型调用但尝试以 FAILED/TIMED_OUT/UNKNOWN 收场
     DECIDED           动作已冻结（真实模型或夹具，看 model_id）
     SETTLED           该 session 的成交已结算入账
+
+数据就绪门的故障态（**优先于上面这些**：门拦住了就不可能有新的决策，必须先看它）：
+
+    DATA_PARTIAL      两个源到齐的会话不一致（一个前进、一个没动）
+    DATA_STALE        一致地落后，但有源很久没有成功取数 —— 没人真的在请求
+    DATA_AHEAD        数据比规则历给出的应处理会话还新
+    NO_CALENDAR       规则历给不出应处理会话
 
 用法：
     python3 ops/shadow_status.py --manifest <冻结 manifest> --output <实验根> [--run-json <f>]
@@ -23,6 +31,15 @@ import argparse
 import json
 import sys
 from pathlib import Path
+
+#: 就绪门的非就绪态 → 本脚本的状态名。门拦住了前向工作，就先报它。
+GATE_STATUS = {
+    'WAITING_FOR_DATA': 'WAITING_FOR_DATA',
+    'PARTIAL_DATA': 'DATA_PARTIAL',
+    'STALE_REQUEST': 'DATA_STALE',
+    'AHEAD_OF_CALENDAR': 'DATA_AHEAD',
+    'NO_CALENDAR': 'NO_CALENDAR',
+}
 
 
 def _load(path):
@@ -79,7 +96,13 @@ def classify(manifest_path: str, output: str, run_json: str | None = None) -> di
             if attempt.get('model_id'):
                 model_ids.add(str(attempt['model_id']))
 
-    if not due:
+    gate = ((run or {}).get('steps') or {}).get('gate') or {}
+    gate_state = gate.get('state')
+
+    if gate_state in GATE_STATUS:
+        # 门拦住了 prepare/review —— 这次运行不可能产生新决策，先报门的状态与原因
+        status = GATE_STATUS[gate_state]
+    elif not due:
         status = 'NO_OPPORTUNITIES'
     elif frozen == 0:
         status = 'NO_EVIDENCE' if no_evidence == len(due) else 'NO_DECISION'
@@ -104,6 +127,8 @@ def classify(manifest_path: str, output: str, run_json: str | None = None) -> di
         'l_actions': sorted(k for k in kinds if k),
         'attempt_statuses': sorted(attempt_statuses),
         'model_ids': sorted(model_ids),
+        'gate_state': gate_state, 'gate_reason': gate.get('reason', ''),
+        'expected_session': gate.get('expected_session'),
         'review_skipped': ((run or {}).get('steps', {}).get('review') or {}).get('skipped', ''),
     }
 
@@ -119,12 +144,18 @@ def main(argv=None):
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
     else:
+        gate_note = ''
+        if result['gate_state'] and result['gate_state'] != 'READY':
+            gate_note = f" 门={result['gate_state']}"
+            if result['gate_reason']:
+                gate_note += f"（{result['gate_reason']}）"
         print(f"{result['status']} 信号日={result['signal_session']} "
               f"发文={result['prepared_for_next']} 执行日={result['execution_session']} "
               f"应评审={result['due']} "
               f"冻结={result['frozen_applications']} 包无证据={result['no_evidence_packets']} "
               f"模型={result['model_ids'] or '-'} 尝试={result['attempt_statuses'] or '-'}"
-              f"{' 评审跳过=' + result['review_skipped'] if result['review_skipped'] else ''}")
+              f"{' 评审跳过=' + result['review_skipped'] if result['review_skipped'] else ''}"
+              f"{gate_note}")
     return 0
 
 

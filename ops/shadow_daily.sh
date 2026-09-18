@@ -99,6 +99,11 @@ ARGS=(--manifest "$MANIFEST" --output "$BASE" --model "$MODEL"
       --etf-raw "$LIVE_ETF/etf_raw_daily.csv.gz")
 [ -f "$EVIDENCE" ] && ARGS+=(--evidence "$EVIDENCE")
 "$PY" -m scripts.portfolio_shadow.cli run-daily "${ARGS[@]}" | tee "$RUNS/$TODAY.json"
+# 就绪门的故障态（源不一致 / 没人真的在请求 / 数据比日历新 / 日历不可用）让 run-daily 以
+# 非 0 退出。`set -uo pipefail` 没有 `-e`，脚本不会因此中断 —— 但必须在这里留一行，
+# 否则「作业正常结束」看起来和「门拦住了」一模一样（2026-09-18 事故的形态）。
+RC=${PIPESTATUS[0]}
+[ "$RC" -ne 0 ] && echo "$STAMP 注意：run-daily 退出码 $RC —— 数据未就绪或就绪门故障，见上方的 gate/skipped_by_gate"
 
 # ---- 运行结果：把「今天到底完成了什么」写成一行，漏跑/无候选/无证据/模型失败能区分 ----
 echo "$STAMP 状态：$("$PY" "$ROOT/ops/shadow_status.py" --manifest "$MANIFEST" --output "$BASE" \

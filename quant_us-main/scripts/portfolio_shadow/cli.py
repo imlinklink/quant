@@ -779,6 +779,19 @@ def last_settled_session(store, scopes) -> str | None:
     return last
 
 
+def _data_gate(explicit_session) -> dict:
+    """T 的就绪判定（见 `data_readiness`）。
+
+    显式 `--session` 是操作者的覆盖：不拦，只记录 —— 回放与补做本来就要指定历史日。
+    """
+    from .data_readiness import gate
+    if explicit_session:
+        return {'state': 'SKIPPED_EXPLICIT_SESSION', 'blocking': False, 'sources': {},
+                'expected_session': None,
+                'reason': f'显式指定 --session {explicit_session}，由操作者负责'}
+    return gate()
+
+
 def cmd_run_daily(args):
     """每日前向运行（设计 §3 的时序，一次做完三件事）。
 
@@ -790,7 +803,13 @@ def cmd_run_daily(args):
 
     `review` 错过截止时不补：`settle(T+1)` 会按设计 §3.3 明确冻结
     `ABSTAIN/DECISION_DEADLINE_MISSED`，而不是静默跳过或事后补一个动作。
+
+    **T 先过数据就绪门**：T 必须等于规则历里收盘已过的最新 session。数据没到就只等待并留痕，
+    不拿一个过期会话当今天的任务 —— 那会按早已过去的截止时间冻结机会、评审必然错过，而退出码
+    与日志全都正常（2026-09-18 事故正是这个形态）。门只拦前向工作，结算照做（那是有行情的
+    已有 session，幂等）。
     """
+    from .data_readiness import READY
     from types import SimpleNamespace
     import pandas as pd
     m = manifest_from_dict(json.loads(Path(args.manifest).read_text()))
@@ -820,7 +839,17 @@ def cmd_run_daily(args):
                  session=day, etf_raw=etf_raw)
     result['steps']['settled'] = to_settle
 
-    # ② 准备 T 的机会与证据（排在 T+1 执行）
+    # ② 数据就绪门：不做「拿过期会话当今天任务」这件事
+    readiness = _data_gate(args.session)
+    result['steps']['gate'] = readiness
+    if readiness['state'] != READY:
+        result['steps']['skipped_by_gate'] = {'state': readiness['state'],
+                                              'reason': readiness['reason']}
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        # 等待不算故障（明天再来）；故障必须看得见
+        return 1 if readiness.get('blocking') else 0
+
+    # ③ 准备 T 的机会与证据（排在 T+1 执行）
     prepared = _capture(cmd_prepare_entry_reviews, manifest=args.manifest, output=args.output,
                         session=target, evidence=getattr(args, 'evidence', None),
                         etf_raw=etf_raw)
@@ -829,7 +858,7 @@ def cmd_run_daily(args):
         # 无候选不是失败，但必须如实记录，不能制造候选或强行调用模型（设计 §4）
         result['steps']['no_opportunities'] = True
 
-    # ③ 评审 T+1：只在截止之前做；错过就留给 settle 按规则冻结 ABSTAIN
+    # ④ 评审 T+1：只在截止之前做；错过就留给 settle 按规则冻结 ABSTAIN
     if exec_session is None:
         result['steps']['review'] = {'skipped': 'NO_NEXT_SESSION'}
     elif now > deadline:
