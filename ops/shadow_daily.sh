@@ -8,6 +8,9 @@
 # 每个应跑 session 的终态，漏跑看得见（见 §运行结果）。
 #
 # 环境变量（都可覆盖）：
+#   SHADOW_BASE        影子实验根目录（默认 $US/data/portfolio_shadow）
+#                      —— **必须可覆盖**：一个不能被指向别处的生产入口等于没法预演，
+#                      而它每天在无人看管下跑（硬编码路径/身份曾导致"每天静默 SKIP"）。
 #   SHADOW_EXPERIMENT  冻结实验 id；留空则自动发现（0 个→跳过，多个→报错）
 #   SHADOW_EVIDENCE    已导入的规范证据存储
 #   SHADOW_DIGEST_DIR  每日市场日报（HTML）的发布目录
@@ -19,7 +22,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 US="$ROOT/quant_us-main"
 PY=/usr/bin/python3
 
-BASE="$US/data/portfolio_shadow"
+BASE="${SHADOW_BASE:-$US/data/portfolio_shadow}"
 EVIDENCE="${SHADOW_EVIDENCE:-$BASE/evidence/live.csv}"
 EVIDENCE_DIR="$(dirname "$EVIDENCE")"
 INBOX="$EVIDENCE_DIR/inbox"
