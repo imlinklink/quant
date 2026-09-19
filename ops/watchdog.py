@@ -100,19 +100,29 @@ def alert_if_changed(problems: list) -> Optional[dict]:
 
 
 def drift_checks():
-    """跑两个安装器的 `--check`，返回 [(名称, 返回码, 输出)]。
+    """跑三处一致性核对，返回 [(名称, 返回码, 输出)]。
 
-    **为什么把这个放进看护**：本仓库的典型失效形态是「代码是对的、**装上去的是旧的**」——
+    **为什么放进看护**：本仓库的典型失效形态是「代码是对的、**盘上/记录里的是旧的**」——
     迁移到 `~/quant` 之后没人重跑 `install_cron.py --install`，整块 crontab 仍指向
     `~/Documents`、六条任务全在报 `Operation not permitted`，而**生成器一直是对的**。
     单元测试抓不住这类漂移（它测"生成什么"，坏的是"盘上装的是什么"），
     而**一个没人执行的核对与没有核对等价** —— 所以挂在这里，让它每 5 分钟被自动跑一次。
+
+    三处：`crontab`、`LaunchAgent`、以及 `config.yaml` 与那份在 git 里的
+    `docs/llm-decision-settings.yaml` 记录是否一致（`config.yaml` 含明文 key、不在 git 里，
+    所以它的改动没有版本历史，记录就是那份历史）。
     """
     out = []
-    for label, script in (('crontab', 'install_cron.py'), ('LaunchAgent', 'install_launchd.py')):
+    for label, args in (('crontab', ['install_cron.py', '--check']),
+                        ('LaunchAgent', ['install_launchd.py', '--check']),
+                        # 配置记录：`config.yaml` 不在 git 里（含明文 key），所以"改了配置
+                        # 才让某个行为成立"的决定记在 docs 那份**在** git 里的记录中。
+                        # 记录落后于配置就比没有更糟（读的人以为那就是现状）。
+                        # 会弹告警，但 `alert_if_changed` 去重 ⇒ 改配置时只弹一次。
+                        ('配置记录', ['check_config_record.py'])):
         try:
             proc = subprocess.run(
-                [sys.executable, str(ROOT / 'ops' / script), '--check'],
+                [sys.executable, str(ROOT / 'ops' / args[0]), *args[1:]],
                 check=False, capture_output=True, text=True, timeout=30)
             out.append((label, proc.returncode,
                         ((proc.stdout or '') + (proc.stderr or '')).strip()))
@@ -183,13 +193,15 @@ def check_once(cfg: dict) -> int:
         else:
             problems.append(f"[{m.get('name')}] 简报不是今天的，需要运行 run_market_brief.py")
 
-    # 已安装 vs 应安装：漂移必须被**自动**发现（理由见 `drift_checks`）
+    # 三处一致性核对：**必须被自动发现**，理由见 `drift_checks`。
+    # 措辞保持中性 —— 三项性质不同（装到系统的 crontab / plist，与一份记录文件），
+    # 用"与生成结果一致""需重装"这类只对其中一项成立的说法会误导。
     for label, rc, detail in drift_checks():
         if rc == 0:
-            log(f'✅ {label} 与生成结果一致')
+            log(f'✅ {label} 与预期一致')
         else:
-            problems.append(f'{label} 已安装内容与生成结果不一致（需重装）')
-            log(f'❌ {label} 漂移:\n{detail}')
+            problems.append(f'{label} 与预期不一致（需同步）')
+            log(f'❌ {label} 与预期不一致:\n{detail}')
 
     status = {'ok': not problems, 'checked_at': datetime.now().isoformat(timespec='seconds'),
               'problems': problems}

@@ -1,32 +1,109 @@
-# 配置示例，不含凭证。合入现有 config.yaml 的同名节点，不替换整份配置。
-# 本轮未修改 config.yaml，也未启动/重启交易进程。
+# LLM 决策层的配置记录（**不含凭证**）。合入 config.yaml 的同名节点，不替换整份配置。
+#
+# **这份文件为什么存在**：`config.yaml` 含明文 API key，因此不在 git 里（skip-worktree
+# 隐藏）—— 于是它的改动**没有版本历史**。凡是"改了配置才让某个行为成立"的决定，
+# 都必须记在这里，否则丢了文件就丢了依据。
+#
+# 用户 2026-09-19 明确：**明文 key 就用现在的，不轮换**（§17 的迁移要求已知未做、接受）。
+# 本文只记 llm_decision / llm_permissions / shadow_integration 三个节点。
+#
+# 最后核对：2026-09-19（此时 config.yaml 的这三个节点与本文件一致）。
+
 llm_decision:
-  enabled: true                 # 代码默认 true；false 使用原 LLM + 人工逐笔审批入口
-  workers: 2                   # 进程内共享队列；首次初始化后固定
+  enabled: true
+  workers: 2                    # 进程内共享队列；首次初始化后固定
   queue_capacity: 32
   review_ttl_seconds: 180       # 同时受提案有效期限制
-  evidence_ttl_seconds:
-    rule: 86400
-    news: 86400
-    filing: 7776000
-  engine_v2:
-    selection: legacy          # 按 selection → entry → position 逐项切为 shadow
-    entry: legacy              # legacy | shadow
-    position: legacy
-    fallback_before_call: true # 只允许在 Packet/路由阶段、模型调用前回退
-    account_scope: DRY-RUN     # 应与当前 PositionRegistry namespace 一致
-  position_review:
-    enabled: false             # 只读影子复核，默认关闭
-    check_interval_seconds: 60
-    near_stop_pct: 0.01
-    near_target_pct: 0.01
-    dedup_seconds: 900
 
-# 沿用现有 llm.enabled/model/api_key/timeout/max_retries。
+  engine_v2:
+    # 2026-09-19 起三条路由全部切到 shadow（原为 legacy）。
+    selection: shadow           # legacy | shadow
+    entry: shadow
+    position: shadow
+    fallback_before_call: true  # 只允许在 Packet/路由阶段、模型调用前回退
+    account_scope: DRY-RUN      # 应与当前 PositionRegistry namespace 一致
+
+  position_review:
+    enabled: true               # 只读影子复核
+    check_interval_seconds: 60
+    counterfactual_fee_rate: 0.0
+
+  protocol_review:
+    # 2026-09-19 开启（原 false，理由写的是"会发起付费调用，不该自动开始"——该理由作废：
+    # 判断该不该调看的是"是不是该做的那件事"，不是花多少钱）。
+    #
+    # **weekday 按 `DEFAULT_TZ`（America/New_York）判定，不是北京时间。**
+    # 原写 5（周六）会烧在美东周六 18:30 = 北京周日 06:30，比注释写的"美东周五收盘后"
+    # **晚一天**，且落在测试与注释都没描述的日子上。三处出处都说周五：
+    # `test_protocol_review.py` 用 `weekday: 4` + `FRIDAY = 2026-09-18 19:00 NY` 断言到期；
+    # `outcome_scheduler.py` 注释「默认星期是美东周五收盘后（北京周六）」；本字段原注释亦然。
+    # 现为 4 ⇒ 美东周五 18:30 = 北京周六 06:30。
+    enabled: true
+    weekday: 4
+    time: "18:30"
+    protocol_version: ''        # 当前协议版本；进包并随候选留痕
+
+  portfolio_review:
+    # 2026-09-19 接通实盘调用方（`scripts/live_trading/portfolio_allocation.py`）。
+    # 触发点 = 买入提案评审时；**只在确有容量冲突时**才调模型，且同账户**每天最多一次**
+    # 付费调用（复用 `claim_daily_job`；无冲突时不消耗当天认领）。
+    # 权限是 shadow ⇒ 生效动作恒为父策略 `keep_rule_allocation`，**实盘行为一字不变**。
+    enabled: true
+
+  validation_repair:
+    enabled: true               # 校验失败时允许一次结构修复（只给原输出/错误/合法 ID/schema）
+
+  selection_capacity:
+    enabled: true               # P1：Selection 排序的影子容量反事实
+    max_positions: 3
+
+  outcomes:
+    enabled: true
+    time: '17:30'
+
+llm_permissions:
+  # **逐项列全**（不靠注释概括）：注释会漂移，值不会。
+  # 全部仍是 `shadow` ⇒ 模型建议被记录、不改变执行行为。
+  _default: shadow
+  selection_rank: shadow
+  entry_review: shadow
+  exit_review: shadow
+  position_scale: shadow
+  plan_template: shadow
+  auto_exit_thesis: shadow
+  protection_tighten: shadow
+  thesis_reduce: shadow
+  portfolio_allocation: shadow
+  protocol_review: shadow
+  # **满足门槛只表示"具备晋级资格"**：本系统不自动切换等级、不改变执行路径。
+  # 2026-09-19 实测第一份判定：review 是五个角色里第一个达标的；
+  # selection 输出有效率 0.4 < 0.95；其余 unavailable（刻意 fail-closed）。
+  promotion:
+    _default:
+      min_output_validity: 0.95
+      max_hard_risk_overreach: 0
+      max_unreplayable: 0
+      require_model_effective_distinguishable: true
+      min_independent_samples: 30
+      min_excess_return_after_cost: 0.0
+      max_mdd_delta: 0.05
+      max_top_contributor_share: 0.5
+      require_out_of_sample_window: true
+      require_human_approval: true
+
+shadow_integration:
+  # 开着 ⇒ 服务的 `OutcomeSchedulerThread` 走 `_integration_tick`，
+  # 其 `_protocol_review_tick` **在 session 门之前**调用 —— 非交易日的周五晚照样触发
+  # （那正是它有意义的时刻），而放在门后会被整段跳过且不报错。
+  enabled: true
+
+# 沿用现有 llm.enabled / model / api_key / timeout / max_retries。
+# **api_key 为明文**（用户已决定不迁移）；启动自检会给 warn，那是如实的偏差披露。
 # 若要统计调用金额，配置实际供应商的单价；不配置则成本为 unknown，不能视为免费。
 # llm:
 #   input_cost_per_million: <实际输入单价>
 #   output_cost_per_million: <实际输出单价>
 
-# 原 risk_budget、策略开关及人工审批参数全部沿用。
-# 模型超时、队列满、缺 jsonschema、引用验证失败均不满足审批门槛。
+# 原 risk_budget、策略开关及人工审批参数全部沿用（不在本文范围内）。
+# `evidence_ttl_seconds` 已不在 config.yaml 中（2026-09-19 核对）——`complete_review`
+# 的 `ttls` 参数因此传 None，走其默认。
