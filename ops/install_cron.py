@@ -27,12 +27,11 @@ def build_block() -> str:
         # `Operation not permitted`（TCC）。**实测探针确认**：仓库搬到 ~/quant 之后
         # cron 已能正常执行这里的命令（探针每分钟写一行，两次都成功）。
         # 但「macOS cron 不补跑睡过的任务」这条没变 —— 时间敏感的任务仍应走 launchd。
-        '# 盘前：美股简报（服务的监控器读它：仓位缩放 + avoid 闸门）',
-        # 只跑简报，**不跑 pipeline --mode morning**：那条把「选股建议」也捆在里面，
-        # 而选股建议会调 LLM（付费）。恢复哪些是逐个定的，定时任务不该顺手把没定的
-        # 一起打开 —— 要开请显式加一条。
-        f'20 8 * * 1-5 cd {ROOT}/quant_us-main && '
-        f'{PY} scripts/live_trading/run_market_brief.py '
+        '# 盘前：美股简报 + 选股建议 + 结果回填（`--mode morning` 的构成）',
+        # 只跑美股（`--markets us`）。**选股建议会调 LLM** —— 那正该调；判断依据是
+        # "是不是该做的那件事"，不是花多少钱。
+        f'20 8 * * 1-5 cd {ROOT} && '
+        f'{PY} ops/pipeline.py --mode morning --markets us '
         f'>> {log_dir}/cron_morning.log 2>&1',
         '# 盘后：结果回填（只美股；港股线 2026-09-19 起未恢复）',
         f'10 17 * * 1-5 cd {ROOT} && '
