@@ -13,6 +13,7 @@
   - position_closed    持仓平仓（后续接入，用于真实盈亏统计）
 """
 import json
+import os
 import threading
 import time
 from datetime import datetime, timedelta
@@ -25,6 +26,14 @@ _LOCK = threading.Lock()
 def _shared_dir() -> Path:
     # 该文件位于 <项目>/scripts/live_trading/decision_ledger/ledger.py
     # parents[3] = 项目根（quant_us-main / quant_futu-main）
+    #
+    # `QUANT_LEDGER_DIR` 是**给测试用的隔离口**：本账本写的是项目固定路径，与调用方用哪个
+    # registry 无关 —— 于是"建了 ProposalStore 却没 patch `_record_ledger`"的测试会往
+    # **生产账本**追加。实测 `signals.jsonl` 515 行里 466 行是测试代码 `US.A`（90%），
+    # 而周报把它当"最近提案样例"读出来。**未设该变量时生产行为一字不变。**
+    override = os.environ.get('QUANT_LEDGER_DIR')
+    if override:
+        return Path(override)
     return Path(__file__).resolve().parents[3] / 'data' / 'decision_ledger'
 
 
