@@ -131,6 +131,28 @@ def drift_checks():
     return out
 
 
+def shadow_job_check(days: int = 3):
+    """近 N 天每个交易日的三个影子作业是否跑完。返回 `(返回码, 输出)`。
+
+    **为什么放进看护**：`ShadowJobs.claim` 在重试耗尽后恒返回 None ⇒ **失败的 session
+    会永久停在那里**；更隐蔽的一类是**完全没有记录**（服务当时没在跑），
+    而"没有事件"不会出现在任何报表里。在此之前没有任何东西会说这件事。
+
+    窗口取近 3 天且**不含今天**：今天的作业在美东 16:20 之后才跑，白天报缺就是狼来了。
+    告警文案刻意**不含数字与日期** —— 状况不变时它必须稳定，否则 `alert_if_changed`
+    的去重会失效，变成每天弹一次。
+    """
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(ROOT / 'quant_us-main' / 'scripts' / 'live_trading'
+                                  / 'shadow_job_health.py'), '--days', str(days)],
+            check=False, capture_output=True, text=True, timeout=180,
+            cwd=str(ROOT / 'quant_us-main'))
+        return proc.returncode, ((proc.stdout or '') + (proc.stderr or '')).strip()
+    except Exception as exc:
+        return 1, repr(exc)
+
+
 def port_open(port: int, host: str = '127.0.0.1') -> bool:
     try:
         with socket.create_connection((host, port), timeout=3):
@@ -202,6 +224,14 @@ def check_once(cfg: dict) -> int:
         else:
             problems.append(f'{label} 与预期不一致（需同步）')
             log(f'❌ {label} 与预期不一致:\n{detail}')
+
+    # 每日作业完整性（理由见 `shadow_job_check`）：**缺口必须被看见**
+    rc, detail = shadow_job_check()
+    if rc == 0:
+        log('✅ 影子日作业：近 3 天全部完成')
+    else:
+        problems.append('影子日作业有未完成的 session（近 3 天）')
+        log(f'❌ 影子日作业缺口:\n{detail}')
 
     status = {'ok': not problems, 'checked_at': datetime.now().isoformat(timespec='seconds'),
               'problems': problems}
