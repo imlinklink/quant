@@ -873,3 +873,108 @@ account_scope + role + security_id + primary_event_cluster + trading_week
 **恢复方式（已查明）**：`run_outcomes.main()` 失败时**不持久化任何状态**（只打 JSON 返回 1），服务侧 `ShadowJobs.execute` 的键是 `(job_key, 日期)` ⇒ **次日自然重新领取，无需清理**。真正需要处理的是两件：① 那一条投影与事件不一致的行（`divergences()` 报出，`repair_projection` 修复 —— 只修差异 ≤1e-6 的，更大的差异意味着另有故事，必须走 `revise_outcome`）；② 冲突处**整批中止**，那天之后的条目没结算，会在下次成功运行时补齐（结算是增量的）。**失败记录全部保留**：原始 `outcome_observed` 一字未改，修复与修订各留独立事件。
 
 全量 **1244 passed**（新增 `test_outcome_settlement_guard.py` 15 条）。
+
+### 2026-09-19（续十）：真实模型路径拿不到有效决策 —— 三处「校验器强制的约束没进契约」
+
+**发现方式**：真实模型跑持仓评审，返回完全合理的 `hold`，却被判 `INVALID_OUTPUT` 降级
+`POSITION_ABSTAIN`。查 12 条校验错误，全是同一个形态：**校验器 fail-closed 强制的东西，
+提示词/契约没告诉模型**。
+
+**已完成**：
+
+- **原因码闭集进提示词**。`validate_entry_v2` / `validate_position_v2` 用
+  `valid_for_role(rc, role)` 逐条拒（注册表 14 项），而 `build_*_prompt` 只发 packet + schema，
+  schema 里 `reason_codes` 是**任意字符串**。模型只能猜，实测自造 5 个看似合理的码
+  （`SUBJECT_ONLY_MARKET_EVIDENCE` 等）⇒ 全部被拒、整条作废。
+  新增 `reason_codes.reasons_for_role` / `with_reason_code_enum`（返回**副本** ——
+  schema 被多方共享且进快照/进哈希，就地改会串味），接进三个提示词构造器
+  （live entry、live position、影子 `build_position_action_prompt`）。
+- **entry/position 契约补 `normalize` 钩子**。`validate_claims` 的
+  `fact 未逐字匹配证据摘要` 判据**本身对**（不许把释义当事实），但这两个角色的契约
+  **没有 normalize 钩子**（selection/portfolio/review 都有）⇒ 直接让整条决策作废。
+  而真实模型引的是 6000 字市场日报的**片段**，与整段全等**在长度上不可能**。
+  新增 `evidence.downgrade_nonverbatim_facts`：把非逐字 `fact` 降为 `inference`，
+  **只降低声明强度**（不动证据、置信度、权限），与 selection 的 `normalize_selection_output`
+  同一做法 —— 那条 2026-09 就修过，这两个角色漏了。
+  判据取"**每一条**所引摘要都全等"而非"至少一条"：校验器是逐条 eid 比的，
+  按"至少一条"保留仍会被判失败，等于没修。
+- **持仓路径单独接线**：`validate_position_output` 有**两个**调用方
+  （`OverlayReviewer.call_model` 记错误、`resolve_position_overlay` 定动作），
+  归一化放在**函数内**而不是各调用点 —— 只补后者会出现"记下的错误"和"据以判定的规则"
+  不是同一套（第一版正是这样）。
+- **review 的变量方向进包**：校验器强制每个可变更变量的**方向**
+  （如 `single_position_risk_bp` 只允许 `decrease`），系统提示只说"取自白名单"、
+  包里只有变量名。包新增 `changeable_variable_directions`（派生自同一常量）+ 提示补一句。
+- **§12 晋级：`ROLE_BASELINE` 少两个角色**。`promotion_review.ROLE_BASELINE` 手写三项，
+  而执行侧 `EFFECTIVE_BASELINE` 有**五项** ⇒ `baseline=None` ⇒ 越权判据
+  `effective_action not in (None, None)` 退化成「动作非空即越权」⇒ **完全正确的决策被记成
+  硬风控越权、永久挡住晋级**。原一致性测试 `for role, baseline in ROLE_BASELINE.items()`
+  只遍历**小**字典，少掉的角色永远测不到。改为派生 + 双向断言。
+
+**为什么此前测试全绿**：夹具路径手工只发合法值（`FakePositionModel` 的注释就写着
+"给一个自造的会被校验器拒" —— 阅读时看到的是"已处理"，实际是"绕开了"），
+且夹具摘要是一句话。
+
+**验收（真实模型，副本，实时窗口）**：
+
+```
+修复前  reason_code=INVALID_OUTPUT   12 条校验错误  → POSITION_ABSTAIN
+修复后  reason_code=THESIS_WEAKENED  0 条错误       → POSITION_HOLD
+```
+
+`path_changed` 两次都是 0，但含义相反：前者是"决策被丢弃"，后者是"模型判断该持有"。
+**Position 角色第一次产出有效真实决策。**
+
+**限制**：`selection` 的证据 ID 闭集修复（续二）**在本批之前从未被运行验证过** ——
+6 次失败都在修复前 16 小时。本批手动跑 `run_daily_selection.py` 后 `validated` /
+`rule_ranking` / 无新增失败事件，修复后有效率 1/1。
+
+全量 **1299 passed**（新增 11 条）。
+
+### 2026-09-19（续十一）：Portfolio 进实盘层 + 容量分配
+
+**已完成**：
+
+- **Portfolio 的实盘调用方**（设计缺口：此前 `decide_portfolio` 全仓只有影子实验一个调用方，
+  实盘 `llm_decision_runs` 里该角色 0 条）。新增
+  `scripts/live_trading/portfolio_allocation.py`，照 `protocol_review.py` 的先例
+  **直接构造 `DecisionEngine`**，不动 `DecisionRuntime.ROLES`（那是 selection/entry/position 的
+  路由门）。**触发点 = 买入提案评审时**：在途提案对 `risk_quantity` 不可见，所以只有那里
+  能看到竞争全貌。仅确有容量冲突才调模型，**同账户每天最多一次付费调用**（复用
+  `claim_daily_job`；无冲突不消耗当天认领）。
+- **两处"结构上不可达"**：① 组上限只支持标量，而实盘是**按组**的
+  （`risk_budget.group_limits`），传 `None` 则 `reduce_same_group_concentration`
+  **永远生成不出来** —— 改了 `_group_cap` 支持 `int` 或 `{group: bp}`（向后兼容）。
+  ② Portfolio 是**多证券**角色而校验器只认单一 `subject_code` ⇒ 候选自己的证据全被判
+  「跨股票引用」，而改变分配的模板**必须**引用证据 ⇒ 两条合起来让"改变分配"不可达。
+  已把候选证券并入允许主体。（影子实验因包内 `new_evidence` 恒为空从没暴露过。）
+- **容量分配**：`risk_quantity` 与 `submit` 的 `occupied` 都只认 `book['orders']`，
+  而 `pending` 提案**不是订单** ⇒ 并发的待审提案互相看不见、各自按"容量全空"定仓，
+  第 N 个要到提交时才被拒，**谁赢取决于轮询顺序**。修法：
+  `ProposalStore.active_buys()`（按 `side` 过滤 —— 卖单共用同一 store 而卖单**释放**容量）；
+  `proposal_reservations()` 折成统一预留形状（风险取 `risk_summary.budget_risk` →
+  `trade_plan.initial_stop` 现算 → `equity × per_trade` 兜底，**兜底是估计不是 0**）；
+  `risk_quantity(..., proposals=())` 默认空 ⇒ 既有调用与数字一字不变；
+  **规则序 = 信号到达顺序**从隐式变显式，`submit` 里**只被排在本条前面的提案挡**
+  （算上全部会互相阻塞：`max_positions=1` 且有 A、B 时双双被拒、一个都进不去）；
+  `reconcile_capacity()` 把超出的按规则序标 `skipped`（note 写明位次与上限，
+  **不静默**、**不打断进行中的评审**）；状态机补 `pending/approved → skipped`
+  （**不复用 `expired`** —— 那是"过期"，与"容量未分配"是两回事）。
+- **受约束买入补 `max_positions`**：`submit_constrained_entry` 的 docstring 声称校验
+  "持仓数量"，**代码里没有**（只查风险预算）。补上，口径与 `submit` 一致但**更严一档**
+  （决策直发的入场不在提案队列里、没有规则序位次，按"排在最后"处理）。
+
+**验收**：
+- 副本上 4 个候选 / 上限 3 → 恰好第 4 位标 `skipped` 且 note 为
+  `容量未分配：规则序第 4 位，超出 max_positions=3`，前三位不动。
+- Portfolio：`consult_required=True` → `validated` → `promotion_review` 里该角色从
+  `unavailable` 变成 `output_validity 1.0`。
+- 生产账本全程未动。
+- 每处修复都验证过"**没有它会失败**"。
+
+**限制**：Portfolio 的实盘触发今天是**罕见的** —— 监控器前置于"持仓数"、且在途提案
+此前不被计入容量，所以"多个不同代码同时挂提案"这个窗口存在但很少被物化。本次修复让它
+**可见且确定**，但效果证据仍需真实候选。**P0 门槛（一条 Entry 决策完整贯穿）仍未过**，
+仍卡在数据上。
+
+全量 **1319 passed**（新增 20 条）。
