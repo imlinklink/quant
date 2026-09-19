@@ -389,6 +389,23 @@ class RoleWiringTests(unittest.TestCase):
         self.assertEqual(tuple(STORE_ROLES), tuple(ENGINE_ROLES))
         self.assertEqual(set(STORE_ROLES), set(ROLE_CONTRACTS))
 
+    def test_the_runtime_routing_whitelist_covers_only_roles_that_route(self):
+        """`DecisionRuntime.ROLES` 是**路由白名单**，比角色清单窄 —— 这一条钉死它的边界。
+
+        它只含走 runtime 的三个角色；`portfolio` / `review` 直接构造 `DecisionEngine`
+        （`portfolio_allocation.py` / `protocol_review.py`），**不在此列**，且
+        `mode('portfolio')` 抛「非法决策角色」是**想要**的行为（给不在此路由的角色配开关
+        应当立刻失败，而不是静默按 legacy 跑）。
+
+        曾经还有第三份清单 `reason_codes.ROLES`，同样停在三个角色且**零消费者** ——
+        已于 2026-09-19 删除（一份没人用又比真相少的清单，只会误导下一个读代码的人）。
+        """
+        from scripts.live_trading.decision_runtime import ROLES as RUNTIME_ROLES
+        self.assertTrue(set(RUNTIME_ROLES) <= set(ROLE_CONTRACTS),
+                        '路由白名单里出现了不是角色的东西（拼错？）')
+        self.assertEqual(set(ROLE_CONTRACTS) - set(RUNTIME_ROLES), {'portfolio', 'review'})
+
+
 class EngineRoutingTests(unittest.TestCase):
     """两个新角色必须真正走通 `DecisionEngine._decide`。
 

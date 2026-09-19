@@ -8,6 +8,11 @@ from typing import Any, Dict
 from scripts.live_trading.decision_engine import DecisionEngine
 
 
+# **路由白名单**，不是角色清单 —— 两者不同，别把这份改成派生自 `ROLE_CONTRACTS`。
+# 它只列"走 DecisionRuntime 路由的"三个角色；`portfolio` / `review` 不走这里
+# （`portfolio_allocation.py` 与 `protocol_review.py` 都直接构造 `DecisionEngine`），
+# 所以这里不含它们，而 `mode('portfolio')` 抛"非法决策角色"正是想要的行为：
+# 谁想给一个不在此路由的角色配 `engine_v2.<role>` 开关，应该立刻失败而不是静默按 legacy 跑。
 ROLES = ('selection', 'entry', 'position')
 MODES = ('legacy', 'shadow')
 

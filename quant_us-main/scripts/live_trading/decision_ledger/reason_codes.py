@@ -34,8 +34,11 @@ LEGACY_MIGRATION = {
     'data_gap': 'INSUFFICIENT_EVIDENCE',
 }
 
-# 合法角色
-ROLES = ('selection', 'entry', 'position')
+# 这里曾有一个 `ROLES = ('selection','entry','position')`（2026-09-19 删除）。
+# 它**零消费者**、且停在三个角色 —— 而角色权威是 `ROLE_CONTRACTS`（五个）。
+# 一份没人用、又比真相少的清单，作用是让下一个读代码的人以为"只有三个角色"，
+# 并在新增角色时被误当成需要同步的地方。角色适用性由 `REASON_REGISTRY[code]['roles']`
+# 表达，`valid_for_role` 也只查它 —— 那才是这一个模块的权威。
 
 REASON_REGISTRY_VERSION = 'reason-v2'
 
