@@ -106,5 +106,20 @@ RC=${PIPESTATUS[0]}
 [ "$RC" -ne 0 ] && echo "$STAMP 注意：run-daily 退出码 $RC —— 数据未就绪或就绪门故障，见上方的 gate/skipped_by_gate"
 
 # ---- 运行结果：把「今天到底完成了什么」写成一行，漏跑/无候选/无证据/模型失败能区分 ----
-echo "$STAMP 状态：$("$PY" "$ROOT/ops/shadow_status.py" --manifest "$MANIFEST" --output "$BASE" \
+STATUS_LINE="$("$PY" "$ROOT/ops/shadow_status.py" --manifest "$MANIFEST" --output "$BASE" \
   --run-json "$RUNS/$TODAY.json" 2>/dev/null || echo '状态判定失败')"
+echo "$STAMP 状态：$STATUS_LINE"
+
+# ---- P0 观察：流水按日累积，并在**值得你知道**的状态上弹一次通知 ----
+# 为什么不通知常态化状态：`NO_OPPORTUNITIES` 是当前常态，天天弹等于没弹，
+# 真正要看见的是「链路走没走到模型」——那是 P0 的验收点。
+P0_LOG="$BASE/p0-watch.log"
+printf '%s\t%s\n' "$STAMP" "$STATUS_LINE" >> "$P0_LOG"
+STATE="${STATUS_LINE%% *}"
+case "$STATE" in
+  DECIDED|SETTLED|MODEL_FAILED|DEADLINE_MISSED|NO_EVIDENCE)
+    # 通知是"顺便让你看见"，失败不阻断（launchd 上下文里不一定能弹出来）
+    /usr/bin/osascript -e "display notification \"${STATUS_LINE//\"/}\" \
+with title \"影子账户 ${STATE}\"" >/dev/null 2>&1 || true
+    ;;
+esac
