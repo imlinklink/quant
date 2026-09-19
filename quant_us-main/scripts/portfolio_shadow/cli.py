@@ -986,6 +986,22 @@ def portfolio_subject_key(execution_session: str) -> str:
     return subject_key(execution_session)
 
 
+def _engine_registry(store, packet):
+    """给 DecisionEngine 开一个指向**同一份账本**的注册表。
+
+    `DecisionEngine.__init__` 要的是 `PositionRegistry`（用它的 `namespace` 与 `path`），
+    而 `ShadowStore` **没有** `.registry` —— 直接写 `store.registry` 会 AttributeError。
+    这个错此前没暴露，是因为 `consult_required` 一直是 False、根本走不到这一行。
+
+    namespace 必须等于包里的 `context.account_scope`（引擎会硬校验二者相同）。
+    """
+    from scripts.live_trading.position_registry import PositionRegistry
+    scope = (packet.get('context') or {}).get('account_scope')
+    if not scope:
+        raise ValueError('PORTFOLIO_PACKET_WITHOUT_ACCOUNT_SCOPE')
+    return PositionRegistry(store.path, scope)
+
+
 def cmd_prepare_portfolio_review(args):
     """`prepare-portfolio-review --session T`：冻结 T 的容量分配评审包（**不调模型**）。
 
@@ -1060,14 +1076,28 @@ def cmd_review_portfolio(args):
         advisor.timeout = 60
         engine_kwargs['advisor'] = advisor
     else:
+        from mutifactor.llm.contracts.portfolio_v1 import PORTFOLIO_ACTIONS
+        wanted = getattr(args, 'fixture_action', None) or 'keep_rule_allocation'
+        if wanted not in PORTFOLIO_ACTIONS:
+            raise ValueError(f'UNKNOWN_FIXTURE_ACTION:{wanted}')
+
         def fixture(_contract, packet_inner):
+            # 模板 id 必须**存在于包里**：凭空给一个会被校验器判「模板不存在」
+            # ⇒ 决策失败、没有应用 —— 夹具动作静默失效，演练变成空转。
+            templates = packet_inner.get('templates') or []
+            chosen = next((t for t in templates if t.get('action') == wanted), None)
+            if chosen is None:
+                chosen = next((t for t in templates
+                               if t.get('action') == 'keep_rule_allocation'),
+                              templates[0] if templates else None)
             return {'schema_version': 'portfolio-v1',
                     'packet_id': packet_inner.get('packet_id'), 'status': 'complete',
-                    'chosen_template_id': 'keep_rule_allocation', 'reason_codes': [],
-                    'facts': [], 'inferences': [], 'counterevidence': [],
-                    'missing_information': ['夹具模型：采用规则分配']}
+                    'chosen_template_id': (chosen or {}).get('template_id'),
+                    'reason_codes': [], 'facts': [], 'inferences': [], 'counterevidence': [],
+                    'missing_information': [f'夹具模型：选择 {wanted}']}
         engine_kwargs['call_model'] = fixture
-    result = DecisionEngine(store.registry, config={}, **engine_kwargs).decide_portfolio(packet)
+    result = DecisionEngine(_engine_registry(store, packet), config={},
+                            **engine_kwargs).decide_portfolio(packet)
     applied = result.effective_action
     if result.status == 'validated' and applied:
         store.put_application(Application(
@@ -1316,7 +1346,9 @@ def cmd_run_daily(args):
                                 output=args.output, session=target, etf_raw=etf_raw),
             'review': _capture(cmd_review_portfolio, manifest=args.manifest,
                                output=args.output, execution_session=exec_session,
-                               model=args.model)}
+                               model=args.model,
+                               fixture_action=getattr(args, 'portfolio_fixture_action',
+                                                      'keep_rule_allocation'))}
 
     # ④ 评审 T+1：只在截止之前做；错过就留给 settle 按规则冻结 ABSTAIN
     if exec_session is None:
@@ -1550,6 +1582,11 @@ def main(argv=None):
         if name == 'review-portfolio':
             p.add_argument('--execution-session', required=True)
             p.add_argument('--model', choices=('real', 'fixture'), default='fixture')
+            p.add_argument('--fixture-action',
+                           choices=('keep_rule_allocation', 'select_ranked_subset',
+                                    'reduce_same_group_concentration', 'hold_cash_buffer'),
+                           default='keep_rule_allocation',
+                           help='fixture 模型选的模板（确定性验收用；只会在包内已有的模板里选）')
         if name == 'settle-session':
             p.add_argument('--session', required=True)
         if name in ('prepare-entry-reviews', 'prepare-position-reviews',
@@ -1564,6 +1601,11 @@ def main(argv=None):
             p.add_argument('--position-fixture-action',
                            choices=('hold', 'reduce_25', 'reduce_50', 'exit'),
                            default='hold', help='持仓评审的 fixture 动作')
+            p.add_argument('--portfolio-fixture-action',
+                           choices=('keep_rule_allocation', 'select_ranked_subset',
+                                    'reduce_same_group_concentration', 'hold_cash_buffer'),
+                           default='keep_rule_allocation',
+                           help='容量分配的 fixture 动作')
         if name == 'report':
             p.add_argument('--trace', action='append',
                            help='要展开的 opportunity_id（可重复）')
