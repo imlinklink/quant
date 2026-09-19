@@ -23,28 +23,38 @@ def build_block() -> str:
     log_dir.mkdir(parents=True, exist_ok=True)
     lines = [
         MARK_START,
-        '# 盘前：简报(美股/港股) + 选股建议 + 结果回填',
-        f'20 8 * * 1-5 cd {ROOT} && {PY} ops/pipeline.py --mode morning >> {log_dir}/cron_morning.log 2>&1',
-        '# 盘后：结果回填（港股收盘后）',
-        f'10 17 * * 1-5 cd {ROOT} && {PY} ops/pipeline.py --mode evening >> {log_dir}/cron_evening.log 2>&1',
-        '# 周六：周报',
-        f'0 10 * * 6 cd {ROOT} && {PY} ops/pipeline.py --mode weekly >> {log_dir}/cron_weekly.log 2>&1',
+        # 2026-09-19 重装。此前整块指向迁移前的 ~/Documents/quant，六条全在报
+        # `Operation not permitted`（TCC）。**实测探针确认**：仓库搬到 ~/quant 之后
+        # cron 已能正常执行这里的命令（探针每分钟写一行，两次都成功）。
+        # 但「macOS cron 不补跑睡过的任务」这条没变 —— 时间敏感的任务仍应走 launchd。
+        '# 盘前：美股简报（服务的监控器读它：仓位缩放 + avoid 闸门）',
+        # 只跑简报，**不跑 pipeline --mode morning**：那条把「选股建议」也捆在里面，
+        # 而选股建议会调 LLM（付费）。恢复哪些是逐个定的，定时任务不该顺手把没定的
+        # 一起打开 —— 要开请显式加一条。
+        f'20 8 * * 1-5 cd {ROOT}/quant_us-main && '
+        f'{PY} scripts/live_trading/run_market_brief.py '
+        f'>> {log_dir}/cron_morning.log 2>&1',
+        '# 盘后：结果回填（只美股；港股线 2026-09-19 起未恢复）',
+        f'10 17 * * 1-5 cd {ROOT} && '
+        f'{PY} ops/pipeline.py --mode evening --markets us '
+        f'>> {log_dir}/cron_evening.log 2>&1',
+        '# 周六：周报（只美股）',
+        f'0 10 * * 6 cd {ROOT} && '
+        f'{PY} ops/pipeline.py --mode weekly --markets us '
+        f'>> {log_dir}/cron_weekly.log 2>&1',
         '# 美东收盘后(北京 08:35)：抄底扫描回填 + 归因（美股 P2 评估闭环）',
         f'35 8 * * 1-6 cd {ROOT}/quant_us-main && '
         f'{PY} scripts/live_trading/decision_ledger/backfill_scan_outcomes.py --days 3 '
         f'>> {log_dir}/cron_scan_backfill.log 2>&1 && '
         f'{PY} scripts/live_trading/decision_ledger/scan_attribution.py --horizon 24 '
         f'>> {log_dir}/cron_scan_backfill.log 2>&1',
-        '# 港股收盘后(17:35)：扫描回填 + 归因（港股评估闭环）',
-        f'35 17 * * 1-5 cd {ROOT}/quant_futu-main && '
-        f'{PY} scripts/live_trading/decision_ledger/backfill_hk_checks.py --days 7 '
-        f'>> {log_dir}/cron_hk_scan_backfill.log 2>&1 && '
-        f'{PY} scripts/live_trading/decision_ledger/hk_scan_attribution.py '
-        f'>> {log_dir}/cron_hk_scan_backfill.log 2>&1',
-        '# R/L 双影子账户每日运行**不在 cron**：见 install_launchd.py 顶部的两条实测原因',
-        '#   （cron 无 ~/Documents 的 TCC 权限；且 macOS cron 不补跑睡过的任务）。',
-        '# 看护：每 5 分钟检查（只告警，默认不自动重启）',
-        f'*/5 * * * * cd {ROOT} && {PY} ops/watchdog.py --once >> {log_dir}/cron_watchdog.log 2>&1',
+        '# 港股收盘后(17:35)的扫描回填 + 归因**已移除**（2026-09-19：港股线未恢复）。',
+        '#   要恢复就加回来，并同时把 ops_config.yaml 的 markets.hk.enabled 打开，',
+        '#   否则看护会每 5 分钟报一次"港股简报不是今天的"。',
+        '# R/L 双影子账户每日运行与常驻服务**都不在 cron**：',
+        '#   见 install_launchd.py —— shadow-daily（每日三次）与 trading-service（KeepAlive）。',
+        '# 看护（watchdog）**已移到 launchd**（StartInterval 300s）：它原在本块里每 5 分钟跑，',
+        '#   但块整体是死的，等于没有看护 —— 2026-09-19 服务静默停了 3.5 小时无人知道。',
         MARK_END,
     ]
     return '\n'.join(lines) + '\n'

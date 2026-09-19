@@ -94,6 +94,11 @@ def check_once(cfg: dict) -> int:
                                  cwd=str(ROOT / svc.get('project', '')))
 
     for m in cfg.get('markets', []):
+        # 关掉的市场不检查（默认 true）。港股线 2026-09-19 起未恢复，不关掉的话
+        # 它的简报会永远是"不是今天的"，于是每 5 分钟报一次港股 —— 把真问题淹掉。
+        if not m.get('enabled', True):
+            log(f"⏭️  [{m.get('name')}] 已停用，跳过简报检查")
+            continue
         fresh, data = brief_fresh(ROOT / m.get('brief_path', ''))
         if fresh:
             log(f"✅ [{m.get('name')}] 简报是今天的: {data.get('risk_level')}")

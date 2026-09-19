@@ -11,9 +11,14 @@ services:
     enabled: true
     project: quant_us-main
     cmdline: run_all.py
-    port: 8899
-    url: http://127.0.0.1:8899/api/approvals
+    # 2026-09-19 修正：服务实际监听 **8890**（`lsof -nP -iTCP:8890`），这里原是 8899。
+    # 端口写错的后果不是"少报一次"，而是**每 5 分钟假报一次「服务不在线」** ——
+    # 真停机与假警在屏幕上长得一模一样，看护就废了。
+    port: 8890
+    url: http://127.0.0.1:8890/api/decision-health
     # 自动重启命令（留空 = 不重启）。注意：DRY-RUN/REAL 由你手动决定。
+    # us 服务已由 launchd KeepAlive 托管（`install_launchd.py --job trading-service`），
+    # 看护只管告警，不要在这里再挂一条重启命令造成两套机制。
     restart_cmd: null
 
   - name: hk
@@ -24,9 +29,14 @@ services:
     url: http://127.0.0.1:8899/api/approvals
     restart_cmd: null
 
-# 哪些市场需要"当天简报"提醒（简报日期落后于今天时告警）
+# 哪些市场需要"当天简报"提醒（简报日期落后于今天时告警）。
+# `enabled` 默认 true；**关掉的市场不会再被检查** —— 港股线 2026-09-19 起未恢复
+# （crontab 里不再有港股条目），不关掉的话它的简报会永远是"不是今天的"，
+# 于是看护每 5 分钟报一次港股，把真正的问题淹掉。
 markets:
   - name: us
+    enabled: true
     brief_path: quant_us-main/data/market_brief/latest.json
   - name: hk
+    enabled: false
     brief_path: quant_futu-main/data/market_brief/latest.json

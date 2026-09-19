@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""安装/预览/卸载本项目的两个 macOS LaunchAgent 作业。
+"""安装/预览/卸载本项目的三个 macOS LaunchAgent 作业。
 
 **为什么不用 cron**（实测两个硬伤）：
 
@@ -17,6 +17,8 @@ LaunchAgent 的 `StartCalendarInterval` **在唤醒后会补跑**，这正是这
   它是手工前台启动的，2026-09-19 静默死过一次（17:40 起日志一行不写、无退出信息），
   停了 3.5 小时无人知道 —— 而唯一会喊「服务不在线」的 `ops/watchdog.py` 挂在 crontab
   上、整块仍指向迁移前的旧路径。**没有守护的常驻服务等于随时会停，且停了你不知道。**
+- `watchdog`：`ops/watchdog.py --once` 每 300 秒一次，只告警不重启（自动重启交给上面
+  的 KeepAlive）。原在本项目 cron 块里跑，随整块一起死了。
 
 用法：
     python3 ops/install_launchd.py --print                # 预览 plist（默认 shadow-daily）
@@ -84,6 +86,17 @@ JOBS = {
         # 启动即失败时不至于打爆日志（launchd 的重启下限是 10s）
         'throttle': 60,
     },
+    'watchdog': {
+        'label': 'com.quant.watchdog',
+        'argv': ['/usr/bin/python3', str(ROOT / 'ops' / 'watchdog.py'), '--once'],
+        'workdir': str(ROOT),
+        'stdout': 'watchdog.log',
+        'stderr': 'watchdog.err.log',
+        'run_at_load': False,
+        # 用 `StartInterval` 而不是 `StartCalendarInterval`：这是个轮询，跑得越准时越没意义，
+        # 而且间隔式调度在睡醒后会立刻补一次 —— 正是"漏跑看得见"需要的行为。
+        'start_interval': 300,
+    },
 }
 
 
@@ -108,6 +121,8 @@ def build_plist(job: str = 'shadow-daily') -> dict:
         plist['ProcessType'] = spec['process_type']
     if spec.get('calendar'):
         plist['StartCalendarInterval'] = spec['calendar']
+    if spec.get('start_interval'):
+        plist['StartInterval'] = spec['start_interval']
     if spec.get('keep_alive'):
         plist['KeepAlive'] = True
     if spec.get('throttle'):
