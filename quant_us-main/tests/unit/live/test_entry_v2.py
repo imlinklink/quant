@@ -104,6 +104,23 @@ class EntryV2ValidationTests(unittest.TestCase):
         errs = validate_entry_v2(_valid_raw(), packet)
         self.assertTrue(any('跨股票引用' in e for e in errs))
 
+    def test_market_and_declared_sector_evidence_allowed(self):
+        for subject in ('MARKET', 'US.SOXX', 'semis'):
+            packet = _packet(_templates(), evidence=[
+                _ev('e1', '财报超预期，营收同比增长 20%', subject=subject),
+                _ev('e2', '估值处于历史高位', subject=subject, cluster='c2')])
+            packet['identity'] = {'sector': 'US.SOXX', 'risk_group': 'semis'}
+            self.assertEqual(validate_entry_v2(_valid_raw(), packet), [])
+
+    def test_undeclared_sector_and_missing_subject_rejected(self):
+        for subject in ('US.XLE', None):
+            packet = _packet(_templates(), evidence=[
+                _ev('e1', '财报超预期，营收同比增长 20%', subject=subject),
+                _ev('e2', '估值处于历史高位', cluster='c2')])
+            packet['identity'] = {'sector': 'US.SOXX', 'risk_group': 'semis'}
+            errs = validate_entry_v2(_valid_raw(), packet)
+            self.assertTrue(any(('跨股票引用' in e or '缺少归属' in e) for e in errs))
+
 
 class EntryV2ForcedActionTests(unittest.TestCase):
     def test_quality_gate_no_entry_forces_defer(self):

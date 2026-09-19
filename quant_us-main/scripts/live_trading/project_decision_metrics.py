@@ -80,6 +80,10 @@ class ProjectDecisionMetrics:
                 'FROM decision_outcomes_v2 WHERE account_scope=? AND decision_id IN '
                 '(SELECT decision_id FROM llm_decision_runs WHERE account_scope=? AND role=?)',
                 (self.scope, self.scope, 'selection')).fetchall()
+            counterfactual_rows = con.execute(
+                "SELECT horizon,excess_return_pct FROM decision_outcomes_v2 "
+                "WHERE account_scope=? AND subject_key LIKE ?",
+                (self.scope, '%:selection_cf')).fetchall()
         import json as _json
         by_horizon: Dict[str, List[float]] = {}
         for h, ret, excess, mfe, mae, body in rows:
@@ -90,7 +94,16 @@ class ProjectDecisionMetrics:
             h: {'count': len(v), 'mean_return_pct': sum(v) / len(v)}
             for h, v in by_horizon.items()
         }
-        return {'horizon_stats': horizon_stats, 'outcome_count': len(rows)}
+        counterfactual = {}
+        for horizon in sorted({r[0] for r in counterfactual_rows}):
+            values = [float(delta) for h, delta in counterfactual_rows
+                      if h == horizon and delta is not None]
+            if values:
+                counterfactual[horizon] = {
+                    'count': len(values), 'mean_delta_return_pct': sum(values) / len(values),
+                    'llm_win_rate': sum(value > 0 for value in values) / len(values)}
+        return {'horizon_stats': horizon_stats, 'outcome_count': len(rows),
+                'counterfactual': counterfactual}
 
     # ---------- Entry ----------
 
@@ -102,15 +115,39 @@ class ProjectDecisionMetrics:
                 'WHERE account_scope=? AND decision_id IN '
                 '(SELECT decision_id FROM llm_decision_runs WHERE account_scope=? AND role=?)',
                 (self.scope, self.scope, 'entry')).fetchall()
+            counterfactual_rows = con.execute(
+                "SELECT horizon,excess_return_pct,body FROM decision_outcomes_v2 "
+                "WHERE account_scope=? AND subject_key LIKE ?",
+                (self.scope, '%:entry_cf')).fetchall()
         import json as _json
         paths: Dict[str, List[float]] = {}
         for h, rr, ret, body in rows:
             p = _json.loads(body).get('path', 'unknown') if body else 'unknown'
             if rr is not None:
                 paths.setdefault(p, []).append(float(rr))
+        by_horizon: Dict[str, List[Dict[str, float]]] = {}
+        for horizon, delta, body in counterfactual_rows:
+            if delta is None:
+                continue
+            parsed = _json.loads(body) if body else {}
+            by_horizon.setdefault(horizon, []).append({
+                'delta': float(delta),
+                'saved_loss': float(parsed.get('saved_loss_pct') or 0.0),
+                'missed_upside': float(parsed.get('missed_upside_pct') or 0.0),
+            })
+        counterfactual = {
+            horizon: {
+                'count': len(values),
+                'mean_delta_return_pct': sum(v['delta'] for v in values) / len(values),
+                'llm_win_rate': sum(v['delta'] > 0 for v in values) / len(values),
+                'mean_saved_loss_pct': sum(v['saved_loss'] for v in values) / len(values),
+                'mean_missed_upside_pct': sum(v['missed_upside'] for v in values) / len(values),
+            } for horizon, values in sorted(by_horizon.items())
+        }
         return {'path_net_r': {k: {'count': len(v), 'mean_net_r': sum(v) / len(v)}
                                for k, v in paths.items()},
-                'outcome_count': len(rows)}
+                'outcome_count': len(rows), 'counterfactual': counterfactual,
+                'counterfactual_outcome_count': len(counterfactual_rows)}
 
     # ---------- Position ----------
 
@@ -122,6 +159,10 @@ class ProjectDecisionMetrics:
                 'WHERE account_scope=? AND horizon=? AND decision_id IN '
                 '(SELECT decision_id FROM llm_decision_runs WHERE account_scope=? AND role=?)',
                 (self.scope, 'exit', self.scope, 'position')).fetchall()
+            counterfactual_rows = con.execute(
+                "SELECT horizon,return_pct,benchmark_return_pct,excess_return_pct,mae_pct,body "
+                "FROM decision_outcomes_v2 WHERE account_scope=? AND subject_key LIKE ?",
+                (self.scope, '%:position_cf')).fetchall()
         import json as _json
         saved = [r[0] for r in rows if r[0] is not None]
         premature = []
@@ -129,10 +170,34 @@ class ProjectDecisionMetrics:
             b = _json.loads(body) if body else {}
             if b.get('premature_exit_cost_r') is not None:
                 premature.append(float(b['premature_exit_cost_r']))
+        by_horizon: Dict[str, List[Dict[str, float]]] = {}
+        for horizon, l_ret, r_ret, delta, l_mae, body in counterfactual_rows:
+            if delta is None:
+                continue
+            parsed = _json.loads(body) if body else {}
+            by_horizon.setdefault(horizon, []).append({
+                'delta': float(delta),
+                'drawdown_delta': float(l_mae or 0.0) - float(
+                    parsed.get('r_max_drawdown_pct') or 0.0),
+                'saved_loss': float(parsed.get('saved_loss_pct') or 0.0),
+                'missed_upside': float(parsed.get('missed_upside_pct') or 0.0),
+            })
+        counterfactual = {}
+        for horizon, values in sorted(by_horizon.items()):
+            counterfactual[horizon] = {
+                'count': len(values),
+                'mean_delta_return_pct': sum(v['delta'] for v in values) / len(values),
+                'llm_win_rate': sum(v['delta'] > 0 for v in values) / len(values),
+                'mean_drawdown_delta_pct': sum(v['drawdown_delta'] for v in values) / len(values),
+                'mean_saved_loss_pct': sum(v['saved_loss'] for v in values) / len(values),
+                'mean_missed_upside_pct': sum(v['missed_upside'] for v in values) / len(values),
+            }
         return {
             'saved_r': {'count': len(saved), 'mean': sum(saved) / len(saved)} if saved else None,
             'premature_exit_cost_r': {'count': len(premature), 'mean': sum(premature) / len(premature)} if premature else None,
             'outcome_count': len(rows),
+            'counterfactual': counterfactual,
+            'counterfactual_outcome_count': len(counterfactual_rows),
         }
 
     # ---------- 健康 ----------

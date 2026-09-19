@@ -22,10 +22,11 @@ from scripts.live_trading.decision_ledger.decision_run_store import (
 )
 from scripts.live_trading.decision_ledger.event_store import stable_id, utc
 from scripts.live_trading.decision_ledger.permission_guard import PermissionGuard
+from scripts.live_trading.decision_contracts import ROLE_CONTRACTS, role_contract, validate_role_action
 
 logger = logging.getLogger(__name__)
 
-VALID_ROLES = ('selection', 'entry', 'position')
+VALID_ROLES = tuple(ROLE_CONTRACTS)
 
 
 @dataclass(frozen=True)
@@ -90,10 +91,46 @@ def _position_contract():
     }
 
 
+def _portfolio_contract():
+    from mutifactor.llm.contracts.portfolio_v1 import (
+        PORTFOLIO_DECISION_SCHEMA, PORTFOLIO_SYSTEM, PORTFOLIO_V1_PROMPT_VERSION,
+        PORTFOLIO_V1_SCHEMA_VERSION, build_portfolio_prompt, normalize_portfolio_output,
+        validate_portfolio_v1,
+    )
+    return {
+        'schema_version': PORTFOLIO_V1_SCHEMA_VERSION,
+        'prompt_version': PORTFOLIO_V1_PROMPT_VERSION,
+        'output_schema': PORTFOLIO_DECISION_SCHEMA,
+        'system_prompt': PORTFOLIO_SYSTEM,
+        'build_prompt': build_portfolio_prompt,
+        'normalize': normalize_portfolio_output,
+        'validate': validate_portfolio_v1,
+    }
+
+
+def _review_contract():
+    from mutifactor.llm.contracts.review_v1 import (
+        REVIEW_DECISION_SCHEMA, REVIEW_SYSTEM, REVIEW_V1_PROMPT_VERSION,
+        REVIEW_V1_SCHEMA_VERSION, build_review_prompt, normalize_review_output,
+        validate_review_v1,
+    )
+    return {
+        'schema_version': REVIEW_V1_SCHEMA_VERSION,
+        'prompt_version': REVIEW_V1_PROMPT_VERSION,
+        'output_schema': REVIEW_DECISION_SCHEMA,
+        'system_prompt': REVIEW_SYSTEM,
+        'build_prompt': build_review_prompt,
+        'normalize': normalize_review_output,
+        'validate': validate_review_v1,
+    }
+
+
 _CONTRACTS = {
     'selection': _selection_contract,
     'entry': _entry_contract,
     'position': _position_contract,
+    'portfolio': _portfolio_contract,
+    'review': _review_contract,
 }
 
 # 关键审计事件：写失败即抛异常（不能出现「有动作无审计链」）
@@ -127,6 +164,13 @@ class DecisionEngine:
     def decide_position(self, packet: Dict[str, Any]) -> DecisionResult:
         return self._decide('position', 'trade', packet, _CONTRACTS['position']())
 
+    def decide_portfolio(self, packet: Dict[str, Any]) -> DecisionResult:
+        return self._decide('portfolio', 'portfolio', packet, _CONTRACTS['portfolio']())
+
+    def decide_review(self, packet: Dict[str, Any]) -> DecisionResult:
+        return self._decide('review', 'evaluation_window', packet,
+                            _CONTRACTS['review']())
+
     # ---------- 显式重试（§4.1：新 attempt，不改变历史有效动作） ----------
 
     def retry_selection(self, packet: Dict[str, Any]) -> DecisionResult:
@@ -158,6 +202,8 @@ class DecisionEngine:
             raise ValueError(f'非法 role: {role}')
         if context.get('role') != role:
             raise ValueError(f'DecisionContext role 与调用入口不一致: {context.get("role")} != {role}')
+        if subject_type != role_contract(role).subject_type:
+            raise ValueError(f'{role} subject_type 契约错误: {subject_type}')
         if context.get('subject_type') != subject_type:
             raise ValueError(
                 f'DecisionContext subject_type 与调用入口不一致: '
@@ -221,8 +267,6 @@ class DecisionEngine:
                                   input_snapshot_id, attempt_id)
 
         parsed = self._parse(raw)
-        self._save_attempt(attempt_id, decision_id, 'completed', raw, parsed, latency_ms,
-                           started, model_id)
 
         # 7. 确定性规范化 + 校验。raw/parsed attempt 保留原始模型响应；
         # validated snapshot 保存降权后的规范结果。
@@ -236,6 +280,17 @@ class DecisionEngine:
                 errors = tuple(contract['validate'](parsed, packet) or [])
             except Exception as exc:
                 errors = (f'validate异常: {type(exc).__name__}: {exc}',)
+
+        self._save_attempt(attempt_id, decision_id, 'completed', raw, parsed, latency_ms,
+                           started, model_id, validation_errors=list(errors) or None)
+
+        # 可选的一次结构修复：只提供原输出、错误、合法 evidence ID 和原 schema，
+        # 不重新要求模型分析行情。默认关闭，由运行配置显式启用。
+        if errors and self._repair_enabled():
+            repaired = self._repair_once(
+                role, contract, packet, parsed, errors, decision_id, model_id)
+            if repaired is not None:
+                parsed, errors, attempt_id = repaired
 
         if errors:
             self._record('decision_validation_failed', [decision_id, attempt_id],
@@ -254,6 +309,7 @@ class DecisionEngine:
 
         # 8. 权限应用（伞级 + 具体子权限取最严格，子权限 scope gate）
         model_action = self._model_action(role, validated)
+        validate_role_action(role, model_action)
         perms = applicable_permissions(role, model_action)
         restrictive = self.guard.most_restrictive(perms, perm_snapshot, self.config, versions)
         level = restrictive['level']
@@ -309,7 +365,9 @@ class DecisionEngine:
     def _model_action(self, role: str, validated: Dict[str, Any]) -> str:
         if role == 'selection':
             return 'llm_ranking'
-        return validated.get('action', 'hold')
+        # 回退用**该角色契约里的 fallback_action**，不要硬编码某个角色的默认值：
+        # 写死 'hold' 会让新角色的缺失动作静默变成一次 position 动作。
+        return validated.get('action') or role_contract(role).fallback_action
 
     def _call_model(self, contract: Dict[str, Any], packet: Dict[str, Any]):
         if self._call_model_fn is not None:
@@ -361,7 +419,7 @@ class DecisionEngine:
         }
 
     def _save_attempt(self, attempt_id, decision_id, status, raw, parsed,
-                      latency_ms, started, model_id):
+                      latency_ms, started, model_id, validation_errors=None):
         meta = getattr(self.advisor, 'last_metadata', {}) or {}
         self.store.save_attempt({
             'attempt_id': attempt_id,
@@ -371,11 +429,64 @@ class DecisionEngine:
             'status': status,
             'raw_response': json.dumps(raw, ensure_ascii=False, default=str) if raw is not None else None,
             'parsed_response': parsed,
-            'validation_errors': None,
+            'validation_errors': validation_errors,
             'latency_ms': latency_ms,
             'input_tokens': (meta.get('usage') or {}).get('prompt_tokens'),
             'output_tokens': (meta.get('usage') or {}).get('completion_tokens'),
         })
+
+    def _repair_enabled(self) -> bool:
+        decision = (self.config.get('llm_decision')
+                    if isinstance(self.config.get('llm_decision'), dict)
+                    else self.config)
+        repair = (decision or {}).get('validation_repair') or {}
+        return bool(repair.get('enabled', False))
+
+    @staticmethod
+    def _evidence_ids(role: str, packet: Dict[str, Any]):
+        if role == 'selection':
+            items = [e for stock in packet.get('stocks', []) for e in stock.get('evidence', [])]
+        elif role == 'position':
+            items = packet.get('new_evidence', [])
+        else:
+            items = packet.get('evidence', [])
+        return sorted({e.get('evidence_id') for e in items if e.get('evidence_id')})
+
+    def _repair_once(self, role, contract, packet, parsed, errors, decision_id, model_id):
+        repair_id = stable_id('attempt', decision_id, model_id, 'repair', str(time.time()))
+        repair_input = {
+            'repair_only': True, 'role': role, 'original_output': parsed,
+            'validation_errors': list(errors),
+            'allowed_evidence_ids': self._evidence_ids(role, packet),
+            'output_schema': contract['output_schema'],
+        }
+        repair_contract = {
+            'repair': True,
+            'build_prompt': lambda value: json.dumps(value, ensure_ascii=False),
+            'system_prompt': (
+                '只修复给定 JSON 的结构和引用错误。不得增加新的事实、判断、动作或证据；'
+                'evidence_ids 只能从 allowed_evidence_ids 逐字复制。只输出修复后的 JSON。'),
+        }
+        self._record('decision_repair_attempted', repair_id,
+                     {'decision_id': decision_id, 'source_errors': list(errors)},
+                     decision_id=decision_id, attempt_id=repair_id)
+        started = time.time()
+        raw = self._call_model(repair_contract, repair_input)
+        latency_ms = int((time.time() - started) * 1000)
+        repaired = self._parse(raw)
+        repair_errors = ('模型无输出/非 JSON',) if repaired is None else ()
+        if repaired is not None:
+            try:
+                if contract.get('normalize'):
+                    repaired = contract['normalize'](repaired, packet)
+                repair_errors = tuple(contract['validate'](repaired, packet) or [])
+            except Exception as exc:
+                repair_errors = (f'validate异常: {type(exc).__name__}: {exc}',)
+        self._save_attempt(repair_id, decision_id,
+                           'completed' if raw is not None else 'failed', raw, repaired,
+                           latency_ms, started, model_id,
+                           validation_errors=list(repair_errors) or None)
+        return repaired, repair_errors, repair_id
 
     def _record(self, event_type, key, payload, critical=False, **links):
         """记录事件。关键审计事件写失败即抛异常；辅助事件 best-effort。"""

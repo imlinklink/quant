@@ -136,6 +136,7 @@ def build_packet_from_bars(code, bars, *, name=None, sector=None, risk_group=Non
                f'1日收益 {_fmt(ret(1))}；5日收益 {_fmt(ret(5))}；'
                f'20日收益 {_fmt(ret(20))}；ATR {_fmt(atr)}；趋势 {trend or "N/A"}')
     snapshot_evidence = evidence(summary, 'internal:quote-snapshot', bar_end_iso, kind='rule')
+    snapshot_evidence['subject_code'] = code
 
     # 程序行情快照 + 外部事件证据（财报/公告/新闻），让 LLM 有真实事件可引用
     all_events = [snapshot_evidence] + list(events or [])
@@ -247,6 +248,16 @@ def run_selection(config, advisor, fetcher, now=None, dry_run=False, registry=No
                 'model': getattr(advisor, 'model', ''), 'universe': universe,
             }
             batch = dict(base, **selection_legacy_projection(result))
+            capacity_cfg = (config.get('llm_decision', {}).get('selection_capacity') or {})
+            if result.status == 'validated' and capacity_cfg.get('enabled', True):
+                from scripts.live_trading.decision_ledger.selection_counterfactual import (
+                    SelectionCounterfactualLedger,
+                )
+                frozen = SelectionCounterfactualLedger(decision_registry).freeze(
+                    packet, result, batch_id=batch_id,
+                    max_positions=int(capacity_cfg.get(
+                        'max_positions', config.get('risk_budget', {}).get('max_positions', 3))))
+                batch['selection_counterfactual_id'] = frozen['counterfactual_id']
     else:
         batch = rank(advisor, universe, packets, now=now)
     save_research_batch(batch)

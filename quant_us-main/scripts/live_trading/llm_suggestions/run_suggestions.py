@@ -26,6 +26,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger('run_suggestions')
 
 DEFAULT_DIRS = [
+    str(Path.home() / 'quant-inputs' / 'market-digest'),
     '/Users/wh1817w/WorkBuddy/2026-08-16-13-46-46/output',
     '/Users/wh1817w/Documents',
     '/Users/wh1817w/Documents/github/mySkill/report-result',
@@ -35,6 +36,7 @@ DEFAULT_DIRS = [
 DEFAULT_VIEW_DIRS = [
     '/Users/wh1817w/Documents/xcom',
 ]
+DEFAULT_VIEW_MAX_AGE_SECONDS = 3 * 86400
 
 # 本工程只生成美股候选（港股写自己的 hk_latest.json）
 SELF_MARKET = 'US'
@@ -101,6 +103,13 @@ def main():
     external_views = load_view_files(view_paths)
     if not args.views:
         logger.info(f'使用默认外部观点目录: {DEFAULT_VIEW_DIRS}')
+        cutoff = time.time() - DEFAULT_VIEW_MAX_AGE_SECONDS
+        fresh_views = [v for v in external_views
+                       if Path(v['path']).stat().st_mtime >= cutoff]
+        if len(fresh_views) != len(external_views):
+            logger.info('忽略 %d 条超过 3 天的默认外部观点',
+                        len(external_views) - len(fresh_views))
+        external_views = fresh_views
     for v in external_views:
         logger.info(f'外部观点素材: {v["source"]}（{len(v["text"])} 字符）')
     if args.views and not external_views:

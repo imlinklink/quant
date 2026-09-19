@@ -120,6 +120,27 @@ class DecisionEngineTests(unittest.TestCase):
         self.assertEqual(result.status, 'failed')
         self.assertTrue(result.validation_errors)
 
+    def test_one_repair_attempt_can_fix_invalid_evidence_reference(self):
+        invalid = _valid_entry_raw()
+        invalid['facts'][0]['evidence_ids'] = ['invented']
+        replies = [invalid, _valid_entry_raw()]
+        engine = DecisionEngine(
+            self.registry, advisor=_FakeAdvisor(),
+            config={'llm_decision': {'validation_repair': {'enabled': True}}},
+            call_model=lambda contract, packet: replies.pop(0))
+        result = engine.decide_entry(self._packet('sig-repair'))
+        self.assertEqual(result.status, 'validated')
+        self.assertEqual(result.validated_output['facts'][0]['evidence_ids'], ['e1'])
+        events = engine.store.events.events()
+        self.assertEqual(sum(e['event_type'] == 'decision_repair_attempted' for e in events), 1)
+        with engine.store.events.transaction() as con:
+            attempts = con.execute(
+                'SELECT validation_errors FROM llm_model_attempts WHERE decision_id=? '
+                'ORDER BY started_at', (result.decision_id,)).fetchall()
+        self.assertEqual(len(attempts), 2)
+        self.assertIsNotNone(attempts[0][0])
+        self.assertIsNone(attempts[1][0])
+
     def test_idempotent_same_decision(self):
         self._raw = _valid_entry_raw()
         packet = self._packet('sig4')

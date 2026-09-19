@@ -218,8 +218,11 @@ def validate_position_v2(raw: Dict[str, Any], packet: Dict[str, Any],
 
     # 证据引用 / 跨股票（position 级 claim 只能引用同股票或市场/板块）
     index = _evidence_index(packet)
+    identity = packet.get('identity') or {}
+    allowed_subjects = {v for v in (identity.get('sector'), identity.get('risk_group')) if v}
     for claims_field in ('facts', 'inferences', 'counterevidence'):
-        errs = validate_claims(raw.get(claims_field, []), index, code, 'position', as_of)
+        errs = validate_claims(raw.get(claims_field, []), index, code, 'position', as_of,
+                               allowed_subjects)
         errors.extend(f'{claims_field}: {e}' for e in errs)
     errors.extend(require_counterevidence_or_missing(
         raw.get('counterevidence', []), raw.get('missing_information', [])))
@@ -259,6 +262,11 @@ def validate_position_v2(raw: Dict[str, Any], packet: Dict[str, Any],
     # status 语义
     if raw.get('status') == 'complete' and not (raw.get('facts') or raw.get('inferences')):
         errors.append('complete 必须提供事实或推断依据')
+    if action in ('reduce', 'exit'):
+        cited = {eid for field in ('facts', 'inferences', 'counterevidence')
+                 for claim in raw.get(field, []) for eid in claim.get('evidence_ids', [])}
+        if not cited:
+            errors.append(f'动作 {action} 必须引用至少一条证据')
     return errors
 
 

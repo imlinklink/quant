@@ -42,15 +42,17 @@ def bar_time(value, daily=False):
     return utc(value)
 
 
-def news_evidence(context):
+def news_evidence(context, subject_code=None):
     from mutifactor.llm.trade_review import evidence
     result = []
     for row in (context or {}).get('news', []):
         # Missing publication times are displayed as unverified context only.
         if row.get('url') and row.get('published_at') and row.get('observed_at') and row.get('title'):
             try:
-                result.append(evidence(row['title'], row['url'], row['observed_at'], row['published_at'],
-                                       cluster_id=row.get('cluster_id'), kind='news'))
+                item = evidence(row['title'], row['url'], row['observed_at'], row['published_at'],
+                                cluster_id=row.get('cluster_id'), kind='news')
+                item['subject_code'] = subject_code
+                result.append(item)
             except (ValueError, TypeError):
                 logger.warning('新闻时间无效，保留为未验证上下文')
     return result
@@ -192,6 +194,15 @@ def start_review(owner, item):
                                'model_id': getattr(advisor, 'model', ''),
                                'temperature': 0.0, 'timeout_seconds': 30})
                     result = runtime.engine().decide_entry(packet)
+                    if result.status == 'validated':
+                        try:
+                            from .entry_counterfactual import EntryCounterfactualLedger
+                            frozen = EntryCounterfactualLedger(store.registry).freeze(
+                                packet, result, proposal_id=request['id'],
+                                review_id=request['review_id'])
+                            request['counterfactual_id'] = frozen['counterfactual_id']
+                        except Exception:
+                            logger.exception('Entry 反事实冻结失败；不影响评审主链')
                     store.complete_v2_review(
                         request, result, ttl=float(cfg.get('review_ttl_seconds', 180)))
                     store.events.export()

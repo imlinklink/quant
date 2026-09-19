@@ -447,7 +447,9 @@ def make_option_evidence(code, view, now=None):
     from mutifactor.llm.trade_review import evidence
     now = now if now is not None else time.time()
     summary = option_view_summary(view)
-    return evidence(summary, 'internal:option-view', now, kind='option')
+    item = evidence(summary, 'internal:option-view', now, kind='option')
+    item['subject_code'] = code
+    return item
 
 
 # ============ 富途 I/O（真跑需要 OpenD，单测不依赖） ============

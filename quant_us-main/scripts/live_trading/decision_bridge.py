@@ -16,7 +16,7 @@ from mutifactor.llm.contracts.entry_v2 import build_entry_templates
 from mutifactor.llm.contracts.position_v2 import build_position_action_templates
 from scripts.live_trading.decision_engine import DecisionEngine
 from scripts.live_trading.decision_ledger.decision_run_store import build_context
-from scripts.live_trading.decision_ledger.event_store import utc
+from scripts.live_trading.decision_ledger.event_store import stable_id, utc
 
 # 默认版本（§4.1 / §11.2）；实际版本由调用方从配置覆盖
 DEFAULT_VERSIONS = {
@@ -29,12 +29,13 @@ DEFAULT_VERSIONS = {
 }
 
 
-def evidence_item(e: Dict[str, Any], subject_code: Optional[str]) -> Dict[str, Any]:
+def evidence_item(e: Dict[str, Any], subject_code: Optional[str] = None) -> Dict[str, Any]:
     """把 legacy 证据 dict 归一为统一 EvidenceItem（§4.2）。"""
     observed = e.get('observed_at') or e.get('event_time') or utc()
     return build_evidence_item(
         evidence_id=e.get('evidence_id') or '',
-        subject_code=subject_code,
+        # 证据归属是来源事实，不能用当前候选代码覆盖。subject_code 参数仅保留调用兼容性。
+        subject_code=e.get('subject_code'),
         kind=e.get('kind', 'rule'),
         source=e.get('source', 'internal:legacy'),
         source_grade=int(e.get('source_grade', 1)),
@@ -55,10 +56,11 @@ def stocks_from_packets(packets: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     stocks = []
     for p in packets or []:
         code = p.get('code')
-        evidence = [evidence_item(e, code) for e in p.get('events', [])]
+        evidence = [evidence_item(e) for e in p.get('events', [])]
         stocks.append({
             'code': code,
             'packet_id': p.get('packet_id'),
+            'identity': dict(p.get('identity') or {}),
             'evidence': evidence,
             'features': p.get('strategy') or {},
             'option_view': {},
@@ -121,6 +123,7 @@ def build_entry_packet(*, signal: Dict[str, Any], plan: Dict[str, Any],
                        review_triggers=(),
                        setup_snapshot: Optional[Dict[str, Any]] = None,
                        selection_context: Optional[Dict[str, Any]] = None,
+                       identity: Optional[Dict[str, Any]] = None,
                        market_session: str = 'regular') -> Dict[str, Any]:
     """构造 §8.1 EntryPacket（程序先算好模板）。"""
     versions = versions or {'packet_schema': 'entry-v2', 'prompt': 'entry-v2',
@@ -139,10 +142,15 @@ def build_entry_packet(*, signal: Dict[str, Any], plan: Dict[str, Any],
         'context': context,
         'signal': signal,
         'selection_context': selection_context or {},
+        'identity': dict(identity or plan.get('identity') or {
+            'code': plan.get('stock_code'),
+            'sector': plan.get('sector'),
+            'risk_group': plan.get('risk_group'),
+        }),
         'setup_snapshot': setup_snapshot or {},
         'plan': plan,
         'templates': templates,
-        'evidence': [evidence_item(e, plan.get('stock_code')) for e in evidence],
+        'evidence': [evidence_item(e) for e in evidence],
         'portfolio': {},
         'quality_gate': {'status': 'pass', 'allowed_uses': list(quality_uses)},
     }
@@ -154,6 +162,7 @@ def build_position_packet(*, trade: Dict[str, Any], protection: Dict[str, Any],
                           versions: Optional[Dict[str, str]] = None,
                           model: Optional[Dict[str, Any]] = None,
                           thesis: Optional[Dict[str, Any]] = None,
+                          identity: Optional[Dict[str, Any]] = None,
                           removed_evidence_ids: Optional[List[str]] = None,
                           market_session: str = 'regular') -> Dict[str, Any]:
     """构造 §9.2 PositionPacket（程序先算好动作模板）。"""
@@ -172,9 +181,14 @@ def build_position_packet(*, trade: Dict[str, Any], protection: Dict[str, Any],
     return {
         'context': context,
         'trade': trade,
+        'identity': dict(identity or trade.get('identity') or {
+            'code': code,
+            'sector': trade.get('sector'),
+            'risk_group': trade.get('risk_group'),
+        }),
         'protection': protection,
         'thesis': thesis or {},
-        'new_evidence': [evidence_item(e, code) for e in new_evidence],
+        'new_evidence': [evidence_item(e) for e in new_evidence],
         'removed_or_expired_evidence_ids': list(removed_evidence_ids or []),
         'market_and_portfolio': {},
         'trigger': {},
@@ -344,3 +358,88 @@ def position_legacy_projection(result, *, trigger: str,
     review['input_snapshot_id'] = legacy_input_snapshot_id
     review['decision_input_snapshot_id'] = result.input_snapshot_id
     return review
+
+
+def build_portfolio_packet(*, candidates: List[Dict[str, Any]],
+                           positions: List[Dict[str, Any]], limits: Dict[str, Any],
+                           new_evidence: List[Dict[str, Any]], account_scope: str,
+                           subject_id: str, as_of: str,
+                           rule_rejected: Optional[List[Dict[str, Any]]] = None,
+                           versions: Optional[Dict[str, str]] = None,
+                           model: Optional[Dict[str, Any]] = None,
+                           identity: Optional[Dict[str, Any]] = None,
+                           subject_code: str = '',
+                           market_session: str = 'regular') -> Dict[str, Any]:
+    """构造 §6.3 的 PortfolioPacket。**模板由程序生成**，模型只能选一个。
+
+    `candidates` 必须已通过 Selection/Entry；生成器只从这里取，因此"模型引入了未合格
+    证券"在构造上不可能。`consult_required=False` 表示没有容量冲突，调用方据此跳过模型
+    调用（§6.3：避免制造无意义决策）——此时冻结包仍然落库，作为"评估过且无冲突"的记录。
+    """
+    from mutifactor.llm.contracts.portfolio_v1 import build_portfolio_templates
+    versions = versions or {'packet_schema': 'portfolio-v1', 'prompt': 'portfolio-v1',
+                            'output_schema': 'portfolio-v1', 'feature': 'feature-v2',
+                            'rule': 'rule-v2', 'permission': 'permission-v2'}
+    model = model or {'provider': 'deepseek', 'model_id': 'deepseek-chat',
+                      'temperature': 0.0, 'timeout_seconds': 30}
+    context = build_context(role='portfolio', subject_type='portfolio',
+                            subject_id=subject_id, account_scope=account_scope,
+                            as_of=as_of, versions=versions, model=model,
+                            market_session=market_session)
+    built = build_portfolio_templates(candidates=candidates, positions=positions,
+                                      limits=limits)
+    packet = {
+        'context': context,
+        'subject_code': subject_code,
+        'identity': dict(identity or {}),
+        'candidates': [dict(c) for c in candidates],
+        'positions': [dict(p) for p in positions],
+        'limits': dict(limits),
+        'templates': built['templates'],
+        'consult_required': built['consult_required'],
+        'rule_rejected': list(rule_rejected or built.get('rule_rejected') or []),
+        'new_evidence': [evidence_item(e) for e in new_evidence],
+    }
+    # 内容寻址：校验器按 packet_id 绑包（模型必须证明它选的是**这个**包里的模板）
+    packet['packet_id'] = stable_id('portfolio_packet', packet)
+    return packet
+
+
+def build_review_packet(*, sample_groups: List[Dict[str, Any]],
+                        role_stats: Dict[str, Any], protocol_version: str,
+                        account_scope: str, subject_id: str, as_of: str,
+                        window: Optional[Dict[str, Any]] = None,
+                        versions: Optional[Dict[str, str]] = None,
+                        model: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """构造 §6.5 的 ReviewPacket：**统计由程序算好**，模型只提假设。
+
+    `sample_groups` 是程序给出的分层样本（按证据来源/动作/市场状态/风险组），
+    模型只能把失败模式挂在其中的分组名上，不得自行编造分组。
+    包里没有任何可写配置的字段，也不含变更后的协议内容 —— 那些由人另行创建。
+    """
+    versions = versions or {'packet_schema': 'review-v1', 'prompt': 'review-v1',
+                            'output_schema': 'review-v1', 'feature': 'feature-v2',
+                            'rule': 'rule-v2', 'permission': 'permission-v2'}
+    model = model or {'provider': 'deepseek', 'model_id': 'deepseek-chat',
+                      'temperature': 0.0, 'timeout_seconds': 60}
+    context = build_context(role='review', subject_type='evaluation_window',
+                            subject_id=subject_id, account_scope=account_scope,
+                            as_of=as_of, versions=versions, model=model,
+                            market_session='closed')
+    packet = {
+        'context': context,
+        'protocol_version': protocol_version,
+        'window': dict(window or {}),
+        'sample_groups': [dict(g) for g in sample_groups],
+        'role_stats': dict(role_stats),
+        'changeable_variables': sorted(set(_changeable_variables())),
+    }
+    # 内容寻址：校验器按 packet_id 绑包。**只有一处定义** —— 调用方不得再算第二份，
+    # 两份算法一旦不同，绑定就会静默错位。
+    packet['packet_id'] = stable_id('review_packet', packet)
+    return packet
+
+
+def _changeable_variables():
+    from mutifactor.llm.contracts.review_v1 import CHANGEABLE_VARIABLES
+    return CHANGEABLE_VARIABLES

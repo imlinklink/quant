@@ -4,6 +4,7 @@ import time
 import unittest
 from pathlib import Path
 
+from mutifactor.llm.contracts.selection_v4 import validate_selection_v4
 from scripts.live_trading.decision_bridge import (
     ShadowBridge, build_entry_packet, build_position_packet,
     build_selection_packet, evidence_item, stocks_from_packets,
@@ -44,23 +45,41 @@ def _valid_selection_raw(eid):
 class BridgePacketTests(unittest.TestCase):
     def test_evidence_item_normalizes_legacy(self):
         e = evidence_item({'summary': 's', 'source': 'internal:x', 'observed_at': time.time(),
-                           'kind': 'news'}, 'US.A')
-        self.assertEqual(e['subject_code'], 'US.A')
+                           'kind': 'news', 'subject_code': 'MARKET'}, 'US.A')
+        self.assertEqual(e['subject_code'], 'MARKET')
         self.assertEqual(e['kind'], 'news')
         self.assertIn('evidence_id', e)
+
+    def test_evidence_item_does_not_invent_missing_subject(self):
+        e = evidence_item({'summary': 's', 'source': 'internal:x',
+                           'observed_at': time.time(), 'kind': 'news'}, 'US.A')
+        self.assertIsNone(e['subject_code'])
 
     def test_build_selection_packet(self):
         packet = build_evidence_packet(
             'US.A', quote={'price': 100.0, 'observed_at': time.time() - 60},
             events=[{'summary': '财报超预期', 'source': 'internal:test',
                      'published_at': time.time() - 3600, 'observed_at': time.time() - 3600,
-                     'kind': 'fundamental'}])
+                     'kind': 'fundamental', 'subject_code': 'US.A'}])
         stocks = stocks_from_packets([packet])
         p = build_selection_packet(batch_id='b1', account_scope='DRY-RUN',
                                    discovery_codes=['US.A'], stocks=stocks, as_of=utc())
         self.assertEqual(p['universe']['discovery_codes'], ['US.A'])
         self.assertEqual(p['stocks'][0]['code'], 'US.A')
         self.assertTrue(p['stocks'][0]['evidence'])
+
+    def test_selection_subject_allowlist_comes_from_packet_identity(self):
+        for subject, valid in (('MARKET', True), ('US.SOXX', True),
+                               ('semis', True), ('US.XLE', False), (None, False)):
+            ev = evidence_item({'evidence_id': 'e1', 'summary': '财报超预期，营收同比增长 20%',
+                                'source': 'internal:test', 'observed_at': time.time() - 60,
+                                'kind': 'news', 'subject_code': subject})
+            packet = {'code': 'US.A', 'identity': {'sector': 'US.SOXX',
+                                                   'risk_group': 'semis'},
+                      'events': [ev]}
+            errs = validate_selection_v4(_valid_selection_raw('e1'), ['US.A'], [packet],
+                                         as_of=utc())
+            self.assertEqual(not errs, valid, (subject, errs))
 
     def test_build_entry_and_position_packet(self):
         plan = {'plan_id': 'p1', 'stock_code': 'US.AAPL',
@@ -87,7 +106,7 @@ class ShadowBridgeTests(unittest.TestCase):
             'US.A', quote={'price': 100.0, 'observed_at': time.time() - 60},
             events=[{'summary': '财报超预期，营收同比增长 20%', 'source': 'internal:test',
                      'published_at': time.time() - 3600, 'observed_at': time.time() - 3600,
-                     'kind': 'fundamental'}],
+                     'kind': 'fundamental', 'subject_code': 'US.A'}],
             now=time.time() - 60)
         eid = packet['events'][0]['evidence_id']
         bridge = ShadowBridge(self.registry, _FakeAdvisor(_valid_selection_raw(eid)))

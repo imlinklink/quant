@@ -69,6 +69,7 @@ class PositionReviewScheduler:
 
         def run():
             raw = None
+            packet = None
             try:
                 from scripts.live_trading.decision_runtime import DecisionRuntime
                 runtime = DecisionRuntime(self.events.registry, self.advisor,
@@ -81,6 +82,9 @@ class PositionReviewScheduler:
                         'trade_id': record['trade_id'], 'code': record['code'],
                         'direction': 'long', 'remaining_qty': float(record['qty']),
                         'entry_price': float(record.get('entry_price') or 0),
+                        'mark_price': float(price),
+                        'sector': record.get('sector'),
+                        'risk_group': record.get('risk_group'),
                     }
                     protection = {
                         'active_stop': float(stop or 0),
@@ -109,6 +113,17 @@ class PositionReviewScheduler:
             review.update(shadow_only=True, trigger=trigger, input_snapshot_id=snapshot['input_snapshot_id'],
                           raw_output=raw, plan_change_applied=False,
                           comparison='无新增独立证据，保持原批准计划' if not evidence_items else '建议需人工审阅并另行确认')
+            if (packet is not None and review.get('status') == 'complete'
+                    and review.get('decision_id')):
+                try:
+                    from .decision_ledger.position_counterfactual import PositionCounterfactualLedger
+                    frozen = PositionCounterfactualLedger(self.events.registry).freeze(
+                        packet, review, review_id=rid, trigger=trigger,
+                        fee_rate=float(self.config.get('counterfactual_fee_rate', 0.0)))
+                    review['counterfactual_id'] = frozen['counterfactual_id']
+                except Exception:
+                    # 影子实验失败不得影响持仓评审主链。
+                    pass
             decision_link = ({'decision_id': review.get('decision_id')}
                              if review.get('decision_id') else {})
             self.events.record('position_reviewed',rid,review,**links, **decision_link)

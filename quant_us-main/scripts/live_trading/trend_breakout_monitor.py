@@ -378,7 +378,7 @@ class TrendBreakoutMonitor:
             kline_signal='donchian_breakout',
             reason=reason,
             context=context_text,
-            evidence_items=news_evidence(signal_ctx),
+            evidence_items=news_evidence(signal_ctx, code),
             llm=None if enabled(self) else self._ask_llm_verdict(code, price, context_text=context_text),
             expires_at=time.time() + self.proposal_ttl_hours * 3600,
             **decision,

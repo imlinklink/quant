@@ -68,7 +68,7 @@ class DecisionScenarios(unittest.TestCase):
             'US.A', quote={'price': 100.0, 'observed_at': time.time() - 60},
             events=[{'summary': '财报超预期', 'source': 'internal:test',
                      'published_at': time.time() - 3600, 'observed_at': time.time() - 3600,
-                     'kind': 'fundamental'}],
+                     'kind': 'fundamental', 'subject_code': 'US.A'}],
             now=time.time() - 60)
 
     def test_1_candidate_entry_confirmed_fill(self):
@@ -141,8 +141,9 @@ class DecisionScenarios(unittest.TestCase):
                                        subject_id='t1', as_of=utc())
         engine = DecisionEngine(self.registry, advisor=_Advisor(raw), config=CFG)
         result = engine.decide_position(packet)
-        self.assertEqual(result.status, 'validated')
-        self.assertEqual(result.effective_action, 'hold')  # shadow 下 reduce 不生效
+        self.assertEqual(result.status, 'failed')
+        self.assertTrue(any('必须引用至少一条证据' in e
+                            for e in result.validation_errors))
 
     def test_4_bullish_but_hard_stop_exits(self):
         """LLM 看多但硬止损触发 → 立即退出（不依赖 LLM）。"""

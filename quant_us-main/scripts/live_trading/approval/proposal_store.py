@@ -370,6 +370,8 @@ class ProposalStore:
             kind = 'llm_completed' if review['status'] in ('complete','insufficient_information') else 'llm_failed'
             if applicable:
                 item['llm'] = review
+                if request.get('counterfactual_id'):
+                    item['counterfactual_id'] = request['counterfactual_id']
                 self.events.save_proposal(item, kind, review, key=request['review_id'],
                     snapshots=(('review', request['review_id'], 1, review),))
                 self._items[item['id']] = item

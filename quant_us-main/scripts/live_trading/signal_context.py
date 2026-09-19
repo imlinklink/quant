@@ -517,6 +517,7 @@ def fetch_event_evidence(symbol: str, count: int = 5) -> List[Dict]:
         source = str(n.get('publisher') or '富途')
         kind = str(n.get('kind') or 'news')
         e = evidence(title, source, n.get('observed_at'), n.get('published_at'), kind=kind)
+        e['subject_code'] = symbol
         if e['evidence_id'] not in seen:
             out.append(e)
             seen.add(e['evidence_id'])

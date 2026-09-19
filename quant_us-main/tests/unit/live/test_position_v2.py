@@ -127,6 +127,22 @@ class PositionV2ValidationTests(unittest.TestCase):
         errs = validate_position_v2(raw, packet)
         self.assertTrue(any('原因码' in e for e in errs))
 
+    def test_market_and_declared_sector_evidence_allowed(self):
+        for subject in ('MARKET', 'US.SOXX', 'semis'):
+            packet = _packet(_templates(), evidence=[
+                _ev('e1', '财报低于预期', subject=subject),
+                _ev('e2', '估值已回落', subject=subject, cluster='c2')])
+            packet['identity'] = {'sector': 'US.SOXX', 'risk_group': 'semis'}
+            self.assertEqual(validate_position_v2(_valid_raw(), packet), [])
+
+    def test_reduce_requires_cited_evidence_even_when_incomplete(self):
+        packet = _packet(_templates(), evidence=[])
+        raw = _valid_raw(action='reduce', template_id='t1:reduce:25')
+        raw.update(status='insufficient_information', facts=[], inferences=[],
+                   counterevidence=[], missing_information=['只有市场背景'])
+        errs = validate_position_v2(raw, packet)
+        self.assertTrue(any('必须引用至少一条证据' in e for e in errs))
+
 
 if __name__ == '__main__':
     unittest.main()

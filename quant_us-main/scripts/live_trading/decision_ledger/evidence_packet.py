@@ -92,8 +92,10 @@ def build_evidence_packet(code, *, name=None, market=None, sector=None, risk_gro
                 str(e.get('summary', '')), str(e.get('source', 'internal:rule')),
                 e.get('observed_at', now), e.get('published_at'),
                 e.get('cluster_id'), str(e.get('kind', 'rule')))
-        # 同一条宏观/模板证据可能同时进入多只股票。selection 的引用必须
-        # 绑定当前 packet 股票，避免相同原始 evidence_id 被跨股票误引用。
+        # 归属来自证据源；缺失就保持缺失，不能用当前 packet 股票补写。
+        item['subject_code'] = e.get('subject_code')
+        # 同一条证据进入多个 packet 时仍给每份输入稳定、唯一的引用 id；
+        # source_evidence_id 保留来源身份，subject_code 保留真实归属。
         source_evidence_id = item.get('evidence_id')
         item['source_evidence_id'] = source_evidence_id
         item['evidence_id'] = stable_id('evidence', str(code), source_evidence_id)

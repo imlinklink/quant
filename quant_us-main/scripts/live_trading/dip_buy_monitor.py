@@ -377,7 +377,7 @@ class DipBuyMonitor:
             kline_signal=result.get('signal'),
             reason=reason,
             context=context_text,
-            evidence_items=news_evidence(signal_ctx),
+            evidence_items=news_evidence(signal_ctx, code),
             llm=None if enabled(self) else self._ask_llm_verdict(code, price, context_text=context_text),
             **result.get('_decision', {}),
         )

@@ -199,9 +199,11 @@ def validate_entry_v2(raw: Dict[str, Any], packet: Dict[str, Any],
 
     # 证据引用 / 跨股票 / 未来 / 过期 / 无效
     index = _evidence_index(packet)
+    identity = packet.get('identity') or {}
+    allowed_subjects = {v for v in (identity.get('sector'), identity.get('risk_group')) if v}
     for claims_field in ('facts', 'inferences', 'counterevidence'):
         errs = validate_claims(raw.get(claims_field, []), index,
-                               _subject_code(packet), 'entry', as_of)
+                               _subject_code(packet), 'entry', as_of, allowed_subjects)
         errors.extend(f'{claims_field}: {e}' for e in errs)
     errors.extend(require_counterevidence_or_missing(
         raw.get('counterevidence', []), raw.get('missing_information', [])))

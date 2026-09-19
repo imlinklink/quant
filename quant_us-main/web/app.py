@@ -516,7 +516,11 @@ def api_decision_health():
         scope=approval_store.events.scope,
     )
     from scripts.live_trading.project_decision_metrics import ProjectDecisionMetrics
-    health['decision_engine'] = ProjectDecisionMetrics(_decision_registry()).health()
+    metrics = ProjectDecisionMetrics(_decision_registry())
+    health['decision_engine'] = metrics.health()
+    health['selection_counterfactual'] = metrics.selection_metrics().get('counterfactual', {})
+    health['entry_counterfactual'] = metrics.entry_metrics().get('counterfactual', {})
+    health['position_counterfactual'] = metrics.position_metrics().get('counterfactual', {})
     return jsonify({'ok': True, 'health': health, 'server_time': datetime.now().timestamp()})
 
 

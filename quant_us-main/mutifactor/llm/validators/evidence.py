@@ -11,7 +11,8 @@ def _evidence_index(evidence_items: List[Dict]) -> Dict[str, Dict]:
 
 
 def validate_claims(claims: List[Dict], index: Dict[str, Dict],
-                    subject_code: str, role: str, as_of) -> List[str]:
+                    subject_code: str, role: str, as_of,
+                    allowed_subject_codes=None) -> List[str]:
     """校验一列 claim。返回错误列表；空列表 = 通过。"""
     errors = []
     as_of = str(as_of)
@@ -26,10 +27,14 @@ def validate_claims(claims: List[Dict], index: Dict[str, Dict],
             if ev is None:
                 errors.append(f'引用不存在: {eid}')
                 continue
-            # subject 隔离：股票级 claim（selection/entry/position）只能引用同股票或市场/板块证据
-            if role in ('selection', 'entry', 'position'):
+            # subject 隔离：股票级 claim 只允许当前股票、MARKET，以及 packet 声明的板块身份。
+            # 角色清单必须**含全部股票级角色**：漏掉一个就等于对该角色静默关闭隔离。
+            if role in ('selection', 'entry', 'position', 'portfolio'):
                 subj = ev.get('subject_code')
-                if subj and subj != subject_code:
+                allowed = {subject_code, 'MARKET'} | set(allowed_subject_codes or ())
+                if not subj:
+                    errors.append(f'证据缺少归属: {eid}')
+                elif subj not in allowed:
                     errors.append(f'跨股票引用: {eid} -> {subj}')
             if ev.get('quality') in ('invalid', 'stale'):
                 errors.append(f'引用 {ev.get("quality")} 证据: {eid}')
