@@ -17,10 +17,17 @@ from zoneinfo import ZoneInfo
 from scripts.live_trading.llm_permission import (OPERATOR_ATTESTED, PERMISSIONS,
                                                  ROLE_PERMISSIONS, level_for,
                                                  promotion_report, validate_permissions)
+from mutifactor.llm.validators.action import EFFECTIVE_BASELINE
 
-# 角色 → 与执行侧一致的动作基线（`mutifactor.llm.validators.action.EFFECTIVE_BASELINE`）。
-# 由测试钉死一致性；漂移会让"越权"判定算错。
-ROLE_BASELINE = {'selection': 'rule_ranking', 'entry': 'rule_baseline', 'position': 'hold'}
+# 角色 → 与执行侧一致的动作基线。**直接从执行侧派生，不另抄一份**：
+# 原先这里手写 `{'selection','entry','position'}` 三项，而 `EFFECTIVE_BASELINE` 有五项 ——
+# `portfolio`/`review` 取不到值 ⇒ `baseline=None` ⇒ 越权判据退化成
+# `effective_action not in (None, None)`，即「动作非空就算越权」。后果是**完全正确的
+# `no_change` 被报成硬风控越权**，把一个本该达标的角色永久挡在晋级之外。
+# 而当时的一致性测试写成 `for role, baseline in ROLE_BASELINE.items()` —— 只遍历小字典，
+# 少掉的角色永远测不到，两份字典不一致照样绿。现改为派生（不可能漂移）+ 测试改成
+# **双向集合相等**。
+ROLE_BASELINE = dict(EFFECTIVE_BASELINE)
 
 
 def _events(con, event_type):

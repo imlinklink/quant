@@ -46,8 +46,18 @@ class ConsistencyTests(unittest.TestCase):
         self.assertEqual(set(ROLE_PERMISSIONS['position']), position)
 
     def test_role_baseline_matches_the_execution_side(self):
-        for role, baseline in ROLE_BASELINE.items():
-            self.assertEqual(baseline, EFFECTIVE_BASELINE[role])
+        """**双向**相等 —— 只遍历一边是抓不住漂移的。
+
+        原先是 `for role, baseline in ROLE_BASELINE.items()`：`portfolio`/`review`
+        不在那个字典里，所以少掉的角色永远测不到，两份字典不一致它照样绿。
+        而基线缺失的后果不是"少一项"，是越权判据里 `baseline=None` 让
+        `effective_action not in (None, None)` 退化成「动作非空即越权」——
+        一个完全正确的 `no_change` 被报成硬风控越权，把该角色永久挡在晋级之外。
+        """
+        self.assertEqual(set(ROLE_BASELINE), set(EFFECTIVE_BASELINE),
+                         '角色集合不一致：未被覆盖的角色会算出错误的越权数')
+        for role in ROLE_BASELINE:
+            self.assertEqual(ROLE_BASELINE[role], EFFECTIVE_BASELINE[role])
 
     def test_every_declared_permission_belongs_to_some_role(self):
         assigned = {p for perms in ROLE_PERMISSIONS.values() for p in perms}
