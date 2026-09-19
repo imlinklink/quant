@@ -24,8 +24,11 @@ ACTIVE_STATUSES = {'pending', 'approved', 'executing', 'submitted', 'partially_f
 TERMINAL_STATUSES = {'rejected', 'expired', 'executed', 'failed', 'skipped'}
 
 _ALLOWED_TRANSITIONS = {
-    'pending': {'approved', 'rejected', 'expired'},
-    'approved': {'executing', 'rejected', 'expired'},
+    # `pending`/`approved → skipped`：**容量未分配**（不是"过期"）。
+    # 两者是不同的事，混用 `expired` 会让界面撒谎（用户会以为是自己没及时处理）。
+    # 由容量对账在确有超容量时标记，note 里带规则序位次与上限。
+    'pending': {'approved', 'rejected', 'expired', 'skipped'},
+    'approved': {'executing', 'rejected', 'expired', 'skipped'},
     'executing': {'executed', 'failed', 'skipped', 'expired', 'submitted', 'partially_filled', 'unknown'},
     'submitted': {'partially_filled', 'executed', 'failed', 'unknown'},
     'partially_filled': {'executed', 'failed', 'unknown'},
@@ -237,6 +240,23 @@ class ProposalStore:
         with self._lock:
             self._restore()
             return sum(1 for v in self._items.values() if v['status'] in ACTIVE_STATUSES)
+
+    def active_buys(self) -> List[Dict[str, Any]]:
+        """在途**买入**提案（按 `created_at` 升序 = 规则基线顺序）。
+
+        **必须按 `side` 过滤**：卖单与买单共用同一个 store（`chandelier_exit_manager` 的
+        退出提案也在里面），而卖单**释放**容量、不是竞争者。`active_count()` 不分方向，
+        所以它不能当作"在途买入数"用。
+
+        返回升序（与 `get_all()` 的降序相反）是刻意的：容量分配的口径是**先到先得**，
+        顺序本身是语义的一部分，不该让调用方各自再排一次。
+        """
+        with self._lock:
+            self._restore()
+            items = [copy.deepcopy(v) for v in self._items.values()
+                     if v.get('side') == 'buy' and v['status'] in ACTIVE_STATUSES]
+        items.sort(key=lambda v: (v.get('created_at') or 0, str(v.get('id') or '')))
+        return items
 
     # ==================== 内部 ====================
 

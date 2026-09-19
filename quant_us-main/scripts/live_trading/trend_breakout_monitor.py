@@ -411,6 +411,21 @@ class TrendBreakoutMonitor:
             logger.warning(f"[突破线] 持仓查询异常: {e}")
             return 0
 
+    def _reserved_slot_count(self) -> int:
+        """容量已占的格数：持仓 ∪ 在途买单 ∪ 在途买入提案（与 `submit` 同口径）。
+
+        与 `_get_position_count()` 的差别正是本方法存在的理由：后者**只数持仓**，
+        在途提案完全看不见 —— 于是一个代码挂一个提案、各自按"容量全空"定仓，
+        第 N 个要到提交时才被拒（**谁赢取决于轮询顺序，不是任何决策**）。
+        三处判断（提案前、批准后、提交时）必须用同一个集合。
+        """
+        from scripts.live_trading.execution import reserved_slots, service_for
+        # **事务外**取提案：`active_buys()` 自己会开事务，进了 registry.transaction() 再调会死锁。
+        active = self.approval_store.active_buys() if self.approval_store else []
+        service = service_for(self)
+        with service.registry.transaction() as book:
+            return len(reserved_slots(book, active))
+
     def _has_position(self, code: str) -> bool:
         """单代码一仓：dry-run 用共享模拟登记簿；实盘查券商。"""
         if self.dry_run:
@@ -479,9 +494,18 @@ class TrendBreakoutMonitor:
         if self._approval_reject_date != today:
             self._approval_rejected_codes.clear()
             self._approval_reject_date = today
-        from scripts.live_trading.execution import service_for
+        from scripts.live_trading.execution import reconcile_capacity, service_for
         service_for(self).reconcile()
         self.approval_store.expire_old()
+        # 容量对账：超出 max_positions 的在途买入提案按**规则序**标为 skipped（带位次与上限）。
+        # 必须在处理批准**之前**跑 —— 否则会先执行一批、再把剩下的判超容量。
+        try:
+            dropped = reconcile_capacity(self)
+            if dropped.get('skipped'):
+                logger.warning(f"[突破线] 容量未分配，已跳过: "
+                               f"{[d['code'] for d in dropped['skipped']]}")
+        except Exception:
+            logger.exception('[突破线] 容量对账失败（不影响已批准订单的执行）')
         for item in self.approval_store.rejected_items():
             if item.get('side', 'buy') != 'buy':
                 continue
@@ -528,7 +552,8 @@ class TrendBreakoutMonitor:
             sig = self._scan_signal(code)
             if not sig:
                 return
-            if self._get_position_count() >= self.max_positions:
+            if self._reserved_slot_count() >= self.max_positions:
+                logger.info(f"[突破线] {code} 容量已满（持仓/在途订单/在途提案），跳过")
                 return
             if self.one_position_per_code and self._has_position(code):
                 logger.info(f"[突破线] {code} 已持有（单代码一仓），跳过")

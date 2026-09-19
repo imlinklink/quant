@@ -17,7 +17,40 @@ def finite_positive(value):
         return False
 
 
-def risk_quantity(price, stop, equity, cash, positions, orders, cfg, group, cap):
+def proposal_reservations(proposals, *, code_groups=None, equity=None, per_trade=.0025):
+    """把在途**买入**提案折成容量预留项。
+
+    为什么需要：`risk_quantity`（风险预算）与 `submit` 的 `occupied`（槽位）都只认
+    `book['orders']`，而 `pending` 提案**不是订单** ⇒ 并发的待审提案互相看不见、各自按
+    "容量全空"定仓，第 N 个要到提交时才被拒。折成统一的预留形状之后，两处都能直接吃。
+
+    风险取值优先级：`risk_summary.budget_risk`（`workflow.risk_preview` 定的，货币口径，
+    与 `risk_quantity` 累加 `initial_risk` 同单位）→ 按 `trade_plan.initial_stop` 现算
+    `qty × (price − stop)` → `equity × per_trade` 兜底。**兜底是估计不是 0**：按 0 会让
+    预算看起来没被占用，正是这个缺陷本身。
+    """
+    out = []
+    for p in proposals:
+        summary = p.get('risk_summary') or {}
+        code = str(p.get('stock_code') or '')
+        qty = float(p.get('quantity') or 0)
+        price = float(p.get('price') or 0)
+        risk = summary.get('budget_risk')
+        if risk is None:
+            stop = (p.get('trade_plan') or {}).get('initial_stop')
+            if finite_positive(price) and finite_positive(stop) and float(stop) < price:
+                risk = qty * (price - float(stop))
+            elif equity:
+                risk = float(equity) * float(per_trade)
+            else:
+                risk = 0.0
+        group = summary.get('risk_group') or (code_groups or {}).get(code)
+        out.append({'code': code, 'qty': qty, 'price': price, 'risk': float(risk),
+                    'risk_group': group})
+    return out
+
+
+def risk_quantity(price, stop, equity, cash, positions, orders, cfg, group, cap, proposals=()):
     if not all(finite_positive(v) for v in (price, stop, equity, cash, cap)) or stop >= price:
         raise ValueError('入场价、初始止损或账户资金无效')
     if not group or group not in cfg.get('group_limits', {}):
@@ -44,6 +77,15 @@ def risk_quantity(price, stop, equity, cash, positions, orders, cfg, group, cap)
         if order['metadata']['risk_group'] == group:
             group_used += reserved
         reserved_cash += order['qty'] * fraction * order['price']
+    # 在途**买入提案**：它们不是订单，但已经占住了容量。不算进来的话，并发的待审提案
+    # 会各自按"容量全空"定仓（界面上的数量是假的），然后第 N 个在提交时才被拒。
+    # 已在 `active_buys()` 里按 side 过滤过，这里不再过滤。
+    for item in proposals:
+        reserved = float(item.get('risk') or 0)
+        used += reserved
+        if item.get('risk_group') == group:
+            group_used += reserved
+        reserved_cash += float(item.get('qty') or 0) * float(item.get('price') or 0)
     allowance = min(equity * float(cfg.get('per_trade', 0.0025)),
                     equity * float(cfg.get('total', 0.015)) - used,
                     equity * float(cfg['group_limits'][group]) - group_used)
@@ -543,6 +585,8 @@ class ExecutionService:
             raise ValueError('受约束买入数量无效')
         cfg = self.config.get('risk_budget', {})
         group = risk_group or cfg.get('code_groups', {}).get(code)
+        # 同上：`active_buys()` 会开自己的事务，必须在 `registry.transaction()` **之外**读。
+        active = self.store.active_buys() if self.store else []
         with self.registry.transaction() as book:
             if entry_id in book['orders']:
                 return book['orders'][entry_id]['status']
@@ -553,10 +597,14 @@ class ExecutionService:
             # 风险预算复核：模板数量不得超过程序当前风险上限
             equity = float(cfg.get('dry_run_equity', 100000))
             cash = equity - sum(p['qty'] * p['entry_price'] for p in book['positions'].values())
+            # 在途买入提案同样占预算（与 `submit` 一致）；本单自己不在提案里（它由决策直发）。
+            reservations = proposal_reservations(
+                active, code_groups=cfg.get('code_groups', {}), equity=equity)
             allowed, _ = risk_quantity(price, initial_stop, equity, cash,
                                        list(book['positions'].values()),
                                        list(book['orders'].values()), cfg, group,
-                                       float(cfg.get('max_position_fraction', .15)) * equity)
+                                       float(cfg.get('max_position_fraction', .15)) * equity,
+                                       proposals=reservations)
             if qty > allowed:
                 raise ValueError(f'受约束买入数量 {qty} 超过风险上限 {allowed}')
             meta = dict(direction='long', initial_stop=initial_stop, risk_group=group,
@@ -639,6 +687,9 @@ class ExecutionService:
                     equity = float(account.iloc[0]['total_assets'])
                     cash = float(account.iloc[0]['cash'])
         pid, code = item['id'], item['stock_code']
+        # **必须在事务外读**：`active_buys()` 自己会开一个事务，在 `registry.transaction()`
+        # 里再开同文件事务会直接死锁（`database is locked`）。规则序在这里一次性取定。
+        active = self.store.active_buys() if self.store else []
         with self.registry.transaction(approval=item if item.get('plan_id') else None) as book:
             if item.get('plan_id'):
                 if item['account_scope'] != self.registry.namespace:
@@ -665,17 +716,31 @@ class ExecutionService:
                         raise ValueError('券商持仓数量不一致')
                 if code in book['positions']:
                     raise ValueError('禁止重复买入及亏损摊平')
-                occupied = set(book['positions']) | {o['code'] for o in book['orders'].values()
-                                                     if o['side']=='buy' and o['status'] in ACTIVE}
+                # 在途买入提案也要占容量，但**只算排在本条前面的**（规则序 = created_at 升序）。
+                # 算上全部会互相阻塞：`max_positions=1` 且有 A、B 两个候选时，A 看见 B、B 看见 A
+                # ⇒ 双双被拒，一个都进不去。按规则序则 A 让 B 让位、恰好一个胜出 ——
+                # 这正是本次要的："谁赢由规则序决定，不由轮询顺序决定"。
+                earlier = []
+                for p in active:
+                    if p.get('id') == pid:
+                        break                 # 只取排在我前面的那些
+                    earlier.append(p)
+                reservations = proposal_reservations(
+                    earlier, code_groups=cfg.get('code_groups', {}), equity=equity)
+                occupied = (set(book['positions'])
+                            | {o['code'] for o in book['orders'].values()
+                               if o['side']=='buy' and o['status'] in ACTIVE}
+                            | {r['code'] for r in reservations})
                 if len(occupied) >= int(cfg.get('max_positions', 3)):
-                    raise ValueError('持仓及待成交买单已达到组合数量上限')
+                    raise ValueError('持仓、待成交买单及在途提案已达到组合数量上限')
                 if not meta or not finite_positive(meta.get('initial_stop')):
                     raise ValueError('缺少交易计划/初始止损')
                 group = cfg.get('code_groups', {}).get(code)
                 meta.update(risk_group=group, entry_mode=item.get('entry_mode'), signal_id=meta.get('signal_id') or f"{item.get('entry_mode')}:{code}:{meta.get('signal_time', pid)}")
                 qty, risk = risk_quantity(price, float(meta['initial_stop']), equity, cash,
                     list(book['positions'].values()), list(book['orders'].values()), cfg, group,
-                    min(float(cap or item.get('per_stock_capital') or 5000), float(item['quantity'])*price))
+                    min(float(cap or item.get('per_stock_capital') or 5000), float(item['quantity'])*price),
+                    proposals=reservations)
                 if day_volume is not None:
                     liquidity_qty = math.floor(day_volume * float(cfg.get('max_day_volume_fraction', .001)))
                     if liquidity_qty < 1:
@@ -787,6 +852,85 @@ def service_for(owner):
     return owner._execution_service
 
 
+def reserved_slots(book, active_proposals):
+    """容量预留的**格位集合**：持仓 ∪ 在途买单 ∪ 在途买入提案（按代码去重）。
+
+    与 `submit` 里的 `occupied` **同口径**。三处判断（提案前过滤、批准后执行、提交时）
+    必须用同一个集合 —— 不同环节用不同集合，就会出现"提案时说能买、执行时说没位置"
+    这种互相矛盾的结论，而用户只看到最后那句。
+
+    **`active_proposals` 要传已取好的列表，不传 store**：`store.active_buys()` 会自己开一个
+    事务，在 `registry.transaction()` 里调用它会嵌套同文件事务、直接死锁
+    （`database is locked`）。调用方先取列表、再进事务：
+
+        active = store.active_buys()          # 事务外
+        with registry.transaction() as book:
+            slots = reserved_slots(book, active)
+    """
+    codes = {str(c) for c in (book.get('positions') or {})}
+    codes |= {str(o.get('code')) for o in (book.get('orders') or {}).values()
+              if o.get('side') == 'buy' and o.get('status') in ACTIVE}
+    codes |= {str(p.get('stock_code')) for p in (active_proposals or ())
+              if p.get('stock_code')}
+    return codes
+
+
+def committed_slots(service, *codes) -> int:
+    """**已承诺**的格数：持仓 ∪ 在途买单，排除给定代码。
+
+    **刻意不含在途提案**，这与提案前的过滤不同，是有意的：人工批准是一个已经做出的决定，
+    不该被一个**还没被批准**的兄弟提案挡住 —— 那会让人批准的 B 一直等到 A 过期为止。
+    真正拿不准的情形由 `submit`（权威检查、持写锁）按规则序裁决。
+    """
+    with service.registry.transaction() as book:
+        slots = reserved_slots(book, ())          # 已承诺的只有持仓与订单
+    return len(slots - {str(c) for c in codes if c})
+
+
+def reconcile_capacity(owner) -> dict:
+    """容量对账：把**超出** `risk_budget.max_positions` 的在途买入提案按规则序标为 `skipped`。
+
+    **规则序 = 信号到达顺序**（`active_buys()` 的升序 = `created_at`）。这不是新规则 ——
+    它就是今天的实际行为（先到先得），只是从**隐式**变成**显式且可复核**，并让 Portfolio 的
+    `keep_rule_allocation` 有明确含义（采用这个序）。
+
+    为什么需要它、而不是只靠提案前的容量过滤：监控器各自独立判容量、可能在同一轮询周期里
+    并发创建 ⇒ 过滤**不足以**保证不超容量。这条对账是安全网。
+
+    **不打断进行中的评审**：评审已在飞（`review_requested_at` 已置且 `llm_ready` 未成立）
+    的超容量提案这一轮不动，留到下一轮 —— 否则等于从评审底下把提案抽走。
+
+    **不是静默取消**：`skipped` 是终态但提案仍在列表里可见，note 写清规则序位次与上限，
+    读的人能看到"它为什么没进"。
+    """
+    from .approval.proposal_store import ProposalStore
+    store = getattr(owner, 'approval_store', None)
+    if store is None:
+        return {'skipped': [], 'kept': [], 'room': 0}
+    cfg = owner.config.get('risk_budget', {})
+    max_positions = int(cfg.get('max_positions', 3))
+    service = service_for(owner)
+    with service.registry.transaction() as book:
+        occupied = reserved_slots(book, ())        # 持仓 ∪ 在途买单（提案另行计数）
+    active = store.active_buys()
+    # 已有持仓/订单的代码不再从提案里占名额 —— 它已经占了一格。
+    contesting = [p for p in active if str(p.get('stock_code')) not in occupied]
+    room = max(0, max_positions - len(occupied))
+    kept, skipped = [], []
+    for rank, p in enumerate(contesting, start=1):
+        if len(kept) < room:
+            kept.append(p.get('id'))
+        elif p.get('review_requested_at') and not ProposalStore.llm_ready(p):
+            continue                                # 评审在飞，下一轮再说
+        else:
+            note = f'容量未分配：规则序第 {rank} 位，超出 max_positions={max_positions}'
+            if store.mark(str(p.get('id')), 'skipped', note=note):
+                skipped.append({'id': p.get('id'), 'code': p.get('stock_code'),
+                                'rank': rank, 'note': note})
+    return {'skipped': skipped, 'kept': kept, 'room': room,
+            'occupied': len(occupied), 'max_positions': max_positions}
+
+
 def execute_approved_buy(owner, item):
     pid, code = item.get('id'), item.get('stock_code')
     if not pid or not code or not owner.approval_store:
@@ -801,8 +945,8 @@ def execute_approved_buy(owner, item):
         drift = abs(price-float(item['price'])) / float(item['price'])
         if drift > owner.approval_max_drift:
             raise ValueError('报价偏离审批价过大，需重新确认')
-        if owner._get_position_count() >= owner.max_positions:
-            raise ValueError('持仓数量已满')
+        if committed_slots(service, code) >= owner.max_positions:
+            raise ValueError('持仓及待成交买单已达到组合数量上限')
         service.submit(owner.approval_store.get(pid), price, owner._effective_position_size_usd())
     except Exception as exc:
         with service.registry.transaction() as book:

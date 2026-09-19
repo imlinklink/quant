@@ -93,8 +93,15 @@ def risk_preview(owner, code, price, stop, capital_cap, quantity_cap):
         orders = list(book['orders'].values())
     equity, cash = account_totals(owner, positions=positions)
     group = cfg.get('code_groups',{}).get(code)
+    # 在途买入提案也占容量 —— 不折算进来，这一单会按"容量全空"给出数量，
+    # 而那个数量是假的（同时挂着的其它提案并不会消失）。
+    from scripts.live_trading.execution import proposal_reservations
+    reservations = proposal_reservations(
+        [p for p in store.active_buys() if p.get('stock_code') != code],
+        code_groups=cfg.get('code_groups', {}), equity=equity)
     quantity, risk = risk_quantity(float(price),float(stop),equity,cash,positions,orders,cfg,group,
-                                   min(capital_cap,quantity_cap*price))
+                                   min(capital_cap,quantity_cap*price),
+                                   proposals=reservations)
     return dict(quantity=quantity, equity=equity, cash=cash, budget_risk=risk,
                 planned_r=quantity*abs(price-stop),nav_fraction=quantity*price/equity,
                 risk_nav_fraction=risk/equity,risk_group=group,

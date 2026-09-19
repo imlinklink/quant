@@ -402,9 +402,18 @@ class DipBuyMonitor:
             self._approval_rejected_codes.clear()
             self._approval_reject_date = today
 
-        from scripts.live_trading.execution import service_for
+        from scripts.live_trading.execution import reconcile_capacity, service_for
         service_for(self).reconcile()
         self.approval_store.expire_old()
+        # 容量对账（全局，按代码与规则序，不区分策略线）：超出 max_positions 的在途买入
+        # 提案标为 skipped 并写明位次。放在处理批准之前。幂等 —— 两个监控器都调用无妨。
+        try:
+            dropped = reconcile_capacity(self)
+            if dropped.get('skipped'):
+                logger.warning(f"[抄底] 容量未分配，已跳过: "
+                               f"{[d['code'] for d in dropped['skipped']]}")
+        except Exception:
+            logger.exception('[抄底] 容量对账失败（不影响已批准订单的执行）')
 
         # 只处理抄底线（entry_mode=dip_buy）的点击结果；
         # 突破线（donchian）提案由 TrendBreakoutMonitor 自己处理，互不误伤。
@@ -855,6 +864,20 @@ class DipBuyMonitor:
         item = self.approval_store.get(proposal_id)
         return service_for(self).submit(item, price, self._effective_position_size_usd()) == 'filled'
 
+    def _reserved_slot_count(self) -> int:
+        """容量已占的格数：持仓 ∪ 在途买单 ∪ 在途买入提案（与 `submit` 同口径）。
+
+        与 `_get_position_count()` 的差别正是本方法存在的理由：后者**只数持仓**，
+        在途提案完全看不见 —— 于是一个代码挂一个提案、各自按"容量全空"定仓，
+        第 N 个要到提交时才被拒（**谁赢取决于轮询顺序，不是任何决策**）。
+        """
+        from scripts.live_trading.execution import reserved_slots, service_for
+        # **事务外**取提案：`active_buys()` 自己会开事务，进了 registry.transaction() 再调会死锁。
+        active = self.approval_store.active_buys() if self.approval_store else []
+        service = service_for(self)
+        with service.registry.transaction() as book:
+            return len(reserved_slots(book, active))
+
     def _get_position_count(self) -> int:
         """持仓总数：dry-run 统计共享模拟登记簿；实盘用缓存的券商持仓。"""
         if self.dry_run:
@@ -1085,7 +1108,13 @@ class DipBuyMonitor:
 
                 self._log_scan(code, price, et_now, result, outcome='passed', env_score=env_score)
                 # Account/human occupancy must not erase the rule baseline opportunity.
-                if not self._check_cooldown(code) or self._get_position_count() >= self.max_positions:
+                if not self._check_cooldown(code):
+                    return
+                # 容量口径与 `submit` 一致：持仓 ∪ 在途买单 ∪ **在途买入提案**。
+                # 只数持仓（`_get_position_count`）会让在途提案完全看不见 ——
+                # 多个代码各自按"容量全空"挂提案，第 N 个到提交时才被拒。
+                if self._reserved_slot_count() >= self.max_positions:
+                    logger.info(f"[抄底] {code} 容量已满（持仓/在途订单/在途提案），跳过")
                     return
                 if self.one_position_per_code and self._has_position(code):
                     return
