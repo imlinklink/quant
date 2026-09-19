@@ -594,6 +594,13 @@ class ExecutionService:
                 raise ValueError('禁止重复买入及亏损摊平')
             if any(o['code'] == code and o['status'] in ACTIVE for o in book['orders'].values()):
                 raise ValueError('该股票已有活跃订单，禁止重复')
+            # 账户容量：持仓 ∪ 在途买单 ∪ **全部**在途买入提案。
+            # 决策直发的入场**不在提案队列里** ⇒ 没有规则序位次，按"排在最后"处理、被所有
+            # 在途提案挡。原先这里**根本没有 `max_positions` 检查** —— docstring 声称校验
+            # "持仓数量"，实际只查了风险预算；补齐后它与 `submit` 同口径。
+            occupied = reserved_slots(book, active)
+            if len(occupied) >= int(cfg.get('max_positions', 3)):
+                raise ValueError('持仓、待成交买单及在途提案已达到组合数量上限')
             # 风险预算复核：模板数量不得超过程序当前风险上限
             equity = float(cfg.get('dry_run_equity', 100000))
             cash = equity - sum(p['qty'] * p['entry_price'] for p in book['positions'].values())

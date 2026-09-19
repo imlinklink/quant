@@ -86,6 +86,29 @@ class ConstrainedEntryTests(unittest.TestCase):
             self.execution.submit_constrained_entry(
                 decision_id=decision.decision_id, template_id='p1:standard', qty=999)
 
+    def _seed_positions(self, n):
+        with self.registry.transaction() as book:
+            for i in range(n):
+                book['positions'][f'US.X{i}'] = {
+                    'qty': 5, 'entry_price': 100.0, 'initial_risk': 100.0,
+                    'risk_group': 'semis'}
+
+    def test_capacity_limit_blocks_a_direct_entry(self):
+        """决策直发的入场也要受 `max_positions` 约束。
+
+        原先这条路径**根本没有 `max_positions` 检查**（docstring 却声称校验"持仓数量"），
+        只查了风险预算 —— 于是账户已满时一个程序模板入场仍能照常买入。
+        """
+        self._seed_positions(3)                      # `risk_budget.max_positions` 默认 3
+        with self.assertRaises(ValueError) as ctx:
+            self._submit('cap1', qty=10)
+        self.assertIn('组合数量上限', str(ctx.exception))
+
+    def test_capacity_does_not_block_when_there_is_room(self):
+        """反证：没满时必须能成交 —— 否则"接上了"与"一直拒绝"分不开。"""
+        self._seed_positions(2)
+        self.assertEqual(self._submit('cap2', qty=10), 'filled')
+
 
 if __name__ == '__main__':
     unittest.main()
