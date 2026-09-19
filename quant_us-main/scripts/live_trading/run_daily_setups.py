@@ -78,7 +78,24 @@ def main(argv=None):
     finally:
         fetcher.disconnect()
     print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
-    return 0 if result and all(r.get('quality', {}).get('status') == 'pass' for r in result) else 1
+    # **退出码只表示"这次运行有没有做完"，不表示"每个标的都过了质量门"。**
+    #
+    # 原先是 `0 if all(quality == 'pass') else 1`：只要有一个标的不是 pass 就 exit 1，
+    # 而出口 `ShadowJobs` 把非零当**作业失败** ⇒ 重试 3 次（同一标的、同一原因，必然
+    # 同样失败）⇒ **之后永久不再补**。2026-09-19 实测 `US.RAM` 就是这样把
+    # `daily_setup_shadow` 钉死的，而且它的"失败原因"根本不是数据质量 ——
+    # 是 `SetupScanner.scan` 对 `不可覆盖历史快照` 的**正当拒绝**
+    # （`IMMUTABLE_SNAPSHOT_CONFLICT`：重跑过去 session 时不能覆盖已冻结的快照）。
+    #
+    # 每个标的的质量门结果与拒绝原因都在输出的 `quality` / `reason_codes` 里，
+    # 那是**数据**，不是进程状态。真正的进程级故障（连不上 OpenD、配置不对、
+    # `run()` 抛异常）仍然走 return 1/2 或异常退出，不受此影响。
+    failed = [str(r.get('code')) for r in (result or [])
+              if (r.get('quality') or {}).get('status') != 'pass']
+    if failed:
+        # 只作提示；`_run_subprocess` 会把它连同 stdout 一起落日志。
+        print(f'# 质量门未通过（不影响退出码）：{failed}')
+    return 0
 
 
 if __name__ == '__main__':
