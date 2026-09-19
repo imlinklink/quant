@@ -41,12 +41,12 @@ def build_block() -> str:
         f'0 10 * * 6 cd {ROOT} && '
         f'{PY} ops/pipeline.py --mode weekly --markets us '
         f'>> {log_dir}/cron_weekly.log 2>&1',
-        '# 美东收盘后(北京 08:35)：抄底扫描回填 + 归因（美股 P2 评估闭环）',
-        f'35 8 * * 1-6 cd {ROOT}/quant_us-main && '
-        f'{PY} scripts/live_trading/decision_ledger/backfill_scan_outcomes.py --days 3 '
-        f'>> {log_dir}/cron_scan_backfill.log 2>&1 && '
-        f'{PY} scripts/live_trading/decision_ledger/scan_attribution.py --horizon 24 '
-        f'>> {log_dir}/cron_scan_backfill.log 2>&1',
+        '# 抄底扫描回填 + 归因（08:35）**已移除**（2026-09-19）：那条线服务的是 `dip_buy`，',
+        '#   而 `run_all.py` 已明写「买入主链不再启动 15m dip_buy 监控器」、config 里',
+        '#   `standalone_dip_buy: false` ⇒ **写入方不存在了**。`scan_ledger.record_scan` 只有',
+        '#   `dip_buy_monitor` 一个调用方，所以扫描流水自 2026-09-13 起就没再增长 ——',
+        '#   而那对命令只回看 3 天，于是**永远报「0 条」**，与"今天没事"长得一模一样。',
+        '#   留着它等于每个交易日生产两条恒为 0 的日志。新买入主链有自己的评估闭环（sqlite）。',
         '# 港股收盘后(17:35)的扫描回填 + 归因**已移除**（2026-09-19：港股线未恢复）。',
         '#   要恢复就加回来，并同时把 ops_config.yaml 的 markets.hk.enabled 打开，',
         '#   否则看护会每 5 分钟报一次"港股简报不是今天的"。',

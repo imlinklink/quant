@@ -272,10 +272,15 @@ def build_report(events, days):
     ap('')
 
     ap('## 9. 最近提案样例')
-    for e in proposals[-5:]:
+    recent = proposals[-5:]
+    for e in recent:
         code = e.get('stock_code', '?')
         verdict = (e.get('llm') or {}).get('verdict', '无')
         ap(f'- {e.get("ts")} {code} | LLM={verdict} | 理由: {str(e.get("reason", ""))[:80]}')
+    if not recent:
+        # 空小节**必须显式说明**：标题后面什么都没有，读者分不清"本窗口确实没有提案"
+        # 与"报告生成坏了"。与 §8 的 `- 暂无记录（…）` 同一惯例。
+        ap('- 本窗口内没有提案（确实没有，不是生成失败）')
 
     return '\n'.join(lines)
 
