@@ -39,6 +39,26 @@ def _candidate_risk(candidate: dict, limits: dict) -> int:
     return min(risk, int(limits.get('max_name_risk_bp', risk)))
 
 
+def _group_cap(max_group, group: str):
+    """把 `max_group_risk_bp` 解析成**该组**的上限；`None` = 未声明（不检查）。
+
+    两种形态都要支持：
+    - `int`：对所有组一视同仁（单一标量上限）；
+    - `dict`：**按组**给上限 —— 实盘层就是这个形态（`config.yaml` 的 `risk_budget.group_limits`：
+      `semis: 0.0075`、`china: 0.005`、`speculative: 0.0025` …，各组不同）。
+
+    只支持标量的话，实盘层要么算错（拿一组的限额去管所有组），要么只能传 `None` 而让
+    §6.3 最想要的 `reduce_same_group_concentration` **永远生成不出来**（那正是影子实验里
+    因为"没声明组上限"而做不到的模板）。
+    """
+    if max_group is None:
+        return None
+    if isinstance(max_group, dict):
+        cap = max_group.get(group)
+        return None if cap is None else int(cap)
+    return int(max_group)
+
+
 def _allocate(order: List[dict], *, positions: List[dict], limits: dict) -> dict:
     """按给定顺序在限额内取候选。**限额在这里被强制**，模板生成器是唯一的分配者。"""
     max_positions = int(limits.get('max_positions', 0))
@@ -73,7 +93,8 @@ def _allocate(order: List[dict], *, positions: List[dict], limits: dict) -> dict
         if total_risk + risk > max_total:
             rejected.append((code, 'TOTAL_RISK_BUDGET'))
             continue
-        if group and max_group is not None and group_risk.get(group, 0) + risk > int(max_group):
+        cap = _group_cap(max_group, group)
+        if group and cap is not None and group_risk.get(group, 0) + risk > cap:
             rejected.append((code, 'GROUP_LIMIT'))
             continue
         if spent + cost > cash:
@@ -132,17 +153,24 @@ def build_portfolio_templates(*, candidates: List[dict], positions: List[dict],
 
     # 集中度模板：仅当规则序确实撞上风险组上限时才有意义
     if any(r['reason'] == 'GROUP_LIMIT' for r in rule_alloc['rejected']):
-        group_cap = int(limits['max_group_risk_bp'])   # 能走到这里必然已声明
+        max_group = limits.get('max_group_risk_bp')     # 能走到这里必然已声明
         held_groups: Dict[str, int] = {}
         for pos in positions or []:
             group = str(pos.get('risk_group') or '')
             held_groups[group] = held_groups.get(group, 0) + int(pos.get('risk_bp') or 0)
-        # 把会被组上限挡下的候选挪到后面：优先取组内还未超限的候选
-        within_ids = {c.get('security_id') for c in by_rule
-                      if held_groups.get(str(c.get('risk_group') or ''), 0)
-                      + _candidate_risk(c, limits) <= group_cap}
-        within = [c for c in by_rule if c.get('security_id') in within_ids]
-        outside = [c for c in by_rule if c.get('security_id') not in within_ids]
+
+        # 把会被组上限挡下的候选挪到后面：优先取组内还未超限的候选。
+        # 逐候选用 `_group_cap` 解析，而不是拿一个标量套所有组 —— 实盘层的组上限是**按组**的
+        # （semis/china/…各不相同），用标量会把某一组的候选错误地挪到后面。
+        def _within_group_limit(c) -> bool:
+            group = str(c.get('risk_group') or '')
+            cap = _group_cap(max_group, group)
+            if cap is None:
+                return True          # 该组未声明上限 ⇒ 不会被组上限挡下
+            return held_groups.get(group, 0) + _candidate_risk(c, limits) <= cap
+
+        within = [c for c in by_rule if _within_group_limit(c)]
+        outside = [c for c in by_rule if not _within_group_limit(c)]
         templates.append({'template_id': 'reduce_same_group_concentration',
                           'action': 'reduce_same_group_concentration',
                           **_allocate(within + outside, positions=positions, limits=limits)})
@@ -270,6 +298,12 @@ def validate_portfolio_v1(raw: Dict[str, Any], packet: Dict[str, Any],
              if e.get('evidence_id')}
     identity = packet.get('identity') or {}
     allowed_subjects = {v for v in (identity.get('sector'), identity.get('risk_group')) if v}
+    # Portfolio 是**多证券**角色：它的"当前证券"就是候选集合里的每一只。
+    # 少了这一条，任何候选自己的证据都会被判「跨股票引用」—— 而改变分配的模板**必须**
+    # 引用至少一条证据（§7.2），两条合起来让"改变分配"变成本角色**结构上不可达**。
+    # （影子实验里包内 `new_evidence` 恒为空，所以从没暴露过；实盘接入时才撞上。）
+    allowed_subjects |= {str(c.get('security_id')) for c in packet.get('candidates') or []
+                         if c.get('security_id')}
     for claims_field in ('facts', 'inferences', 'counterevidence'):
         errors.extend(validate_claims(raw.get(claims_field, []), index,
                                       str(packet.get('subject_code') or ''), 'portfolio',

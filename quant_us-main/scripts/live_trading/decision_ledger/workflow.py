@@ -58,26 +58,40 @@ def news_evidence(context, subject_code=None):
     return result
 
 
+def account_totals(owner, positions=None):
+    """账户权益与可用现金。dry-run 用配置里的虚拟权益，live 走 Futu。
+
+    从 `risk_preview` 里抽出来共用：Portfolio 咨询（`_consult_portfolio`）也要这两个数，
+    抄第二份就会漂移。
+    """
+    from scripts.live_trading.execution import service_for
+    cfg = owner.config.get('risk_budget', {})
+    if owner.dry_run:
+        equity = float(cfg.get('dry_run_equity', 100000))
+        held = positions
+        if held is None:
+            with prepare(owner).registry.transaction() as book:
+                held = list(book['positions'].values())
+        return equity, equity - sum(float(p['qty']) * float(p['entry_price']) for p in held)
+    from futu import RET_OK, Currency
+    service = service_for(owner)
+    with owner.pool.get_trade_ctx() as ctx:
+        args = service.account(ctx)
+        ret, rows = ctx.accinfo_query(currency=Currency.USD, refresh_cache=True, **args)
+        if ret != RET_OK or rows.empty:
+            raise ValueError('无法取得账户权益/现金')
+        return float(rows.iloc[0]['total_assets']), float(rows.iloc[0]['cash'])
+
+
 def risk_preview(owner, code, price, stop, capital_cap, quantity_cap):
     """Read-only indicative sizing. Execution repeats every check using fresh data."""
-    from scripts.live_trading.execution import risk_quantity, service_for
+    from scripts.live_trading.execution import risk_quantity
     store = prepare(owner)
-    service = service_for(owner)
     cfg = owner.config.get('risk_budget', {})
     with store.registry.transaction() as book:
         positions = list(book['positions'].values())
         orders = list(book['orders'].values())
-    if owner.dry_run:
-        equity = float(cfg.get('dry_run_equity',100000))
-        cash = equity-sum(p['qty']*p['entry_price'] for p in positions)
-    else:
-        from futu import RET_OK, Currency
-        with owner.pool.get_trade_ctx() as ctx:
-            args = service.account(ctx)
-            ret, rows = ctx.accinfo_query(currency=Currency.USD, refresh_cache=True, **args)
-            if ret != RET_OK or rows.empty:
-                raise ValueError('无法取得账户风险预览')
-            equity, cash = float(rows.iloc[0]['total_assets']), float(rows.iloc[0]['cash'])
+    equity, cash = account_totals(owner, positions=positions)
     group = cfg.get('code_groups',{}).get(code)
     quantity, risk = risk_quantity(float(price),float(stop),equity,cash,positions,orders,cfg,group,
                                    min(capital_cap,quantity_cap*price))
@@ -150,6 +164,32 @@ def review_queue(cfg):
     return _queue
 
 
+def _consult_portfolio(owner, item):
+    """提案评审时的一次 Portfolio 容量咨询（设计 §6.3）。**失败不影响提案与 Entry 主链。**
+
+    为什么放在这里：在途提案对 `risk_quantity` **不可见**（`pending` 不是订单），并发的待审
+    提案互相看不见、各自独立通过定仓；真正的容量约束要到 `execution.py` 提交时以**拒绝**的
+    形式出现，而那里一次只看得到一条。**提案评审时是唯一能看到竞争全貌的位置。**
+    详见 `scripts/live_trading/portfolio_allocation.py` 的模块说明。
+    """
+    cfg = (owner.config.get('llm_decision') or {}).get('portfolio_review') or {}
+    if not cfg.get('enabled', True):
+        return None
+    advisor = getattr(owner, 'llm_advisor', None)
+    if advisor is None:
+        return None            # 没有可用模型：不建包、不认领、不记决策
+    try:
+        from scripts.live_trading import portfolio_allocation
+        equity, cash = account_totals(owner)
+        return portfolio_allocation.consult(
+            prepare(owner).registry, owner.approval_store, owner.config,
+            equity=equity, cash=cash, advisor=advisor, as_of=utc(),
+            session=datetime.now(ZoneInfo('America/New_York')).date().isoformat())
+    except Exception:
+        logger.exception('Portfolio 容量咨询失败（不影响提案与 Entry 主链）')
+        return None
+
+
 def start_review(owner, item):
     if not enabled(owner) or not item.get('plan_id'):
         return
@@ -162,6 +202,10 @@ def start_review(owner, item):
 
     def run():
         raw, metadata = None, {}
+        if item.get('side', 'buy') == 'buy':
+            # 放在 try **之外**是刻意的：它自己吞掉全部异常。放进 try 里一旦抛错就会落到
+            # 下面的 legacy 分支，把 Entry 主链带偏 —— 容量咨询绝不能有那种能力。
+            _consult_portfolio(owner, item)
         try:
             if time.time() < request['expires_at'] and advisor is not None:
                 snapshot = store.events.get_snapshot('input', request['input_snapshot_id'])

@@ -389,7 +389,6 @@ class RoleWiringTests(unittest.TestCase):
         self.assertEqual(tuple(STORE_ROLES), tuple(ENGINE_ROLES))
         self.assertEqual(set(STORE_ROLES), set(ROLE_CONTRACTS))
 
-
 class EngineRoutingTests(unittest.TestCase):
     """两个新角色必须真正走通 `DecisionEngine._decide`。
 
@@ -607,3 +606,52 @@ class ConsultRequiredTests(unittest.TestCase):
     def test_a_used_up_risk_budget_still_triggers(self):
         self.assertTrue(self.consult([{'security_id': 'US.X', 'risk_bp': 150,
                                        'risk_group': 'china'}]))
+
+
+class PerGroupLimitTests(unittest.TestCase):
+    """组上限要支持**按组**的字典形态 —— 实盘层就是这个形状。
+
+    `config.yaml` 的 `risk_budget.group_limits` 是 `semis: 0.0075 / china: 0.005 /
+    speculative: 0.0025 / space: 0.0025`，**各组不同**。只支持单一标量的话，实盘层要么算错
+    （拿一组的限额去管所有组），要么只能传 `None` —— 而让 §6.3 最想要的那个模板
+    `reduce_same_group_concentration` **永远生成不出来**（那正是影子实验里因为组上限
+    "未声明"而做不到的事）。标量形态由本文件既有的 `LIMITS` 覆盖，这里钉字典形态。
+    """
+
+    LIMITS = {'max_positions': 5, 'max_total_risk_bp': 500, 'max_name_risk_bp': 100,
+              'cash_available_micro': 100_000_000,
+              'max_group_risk_bp': {'semis': 150, 'china': 100}}
+
+    @staticmethod
+    def _c(code, rank, group):
+        return {'security_id': code, 'rank': rank, 'risk_bp': 100,
+                'risk_group': group, 'estimated_cost_micro': 1000}
+
+    def test_each_group_is_capped_by_its_own_limit(self):
+        out = build_portfolio_templates(
+            candidates=[self._c('US.A', 1, 'semis'), self._c('US.B', 2, 'semis'),
+                        self._c('US.C', 3, 'china')],
+            positions=[], limits=self.LIMITS)
+        rule = out['templates'][0]
+        # 按顺序：A 进（semis 100 ≤ 150）；B 会把 semis 推到 200 > 150 ⇒ 拒；
+        # C 进（china 100 ≤ 100）。**不是**拿 semis 的 150 去管 china。
+        self.assertEqual([a['security_id'] for a in rule['allocations']], ['US.A', 'US.C'])
+        self.assertEqual([(r['security_id'], r['reason']) for r in rule['rejected']],
+                         [('US.B', 'GROUP_LIMIT')])
+
+    def test_a_group_without_a_declared_cap_is_not_checked(self):
+        """字典里没有的组 = 未声明 ⇒ 不检查。与 `None` 的语义一致（不是按 0 处理）。"""
+        limits = dict(self.LIMITS, max_group_risk_bp={'semis': 150})
+        out = build_portfolio_templates(candidates=[self._c('US.C', 1, 'china')],
+                                        positions=[], limits=limits)
+        self.assertEqual([a['security_id'] for a in out['templates'][0]['allocations']],
+                         ['US.C'])
+
+    def test_group_limit_produces_the_concentration_template(self):
+        """组上限撞上时必须生成 `reduce_same_group_concentration` —— 这正是实盘层能做到、
+        而影子实验做不到的那个模板。"""
+        out = build_portfolio_templates(
+            candidates=[self._c('US.A', 1, 'semis'), self._c('US.B', 2, 'semis')],
+            positions=[], limits=self.LIMITS)
+        self.assertIn('reduce_same_group_concentration',
+                      [t['action'] for t in out['templates']])
