@@ -105,11 +105,53 @@ def remove():
     return p.returncode
 
 
+def installed_block() -> str:
+    """当前 crontab 里 quant-ops 块的内容（不含起止标记行）。取不到返回 ''。"""
+    lines = current_crontab().splitlines()
+    out, inside = [], False
+    for ln in lines:
+        if ln.strip() == MARK_START:
+            inside = True
+            continue
+        if ln.strip() == MARK_END:
+            inside = False
+            continue
+        if inside:
+            out.append(ln)
+    return '\n'.join(out).strip()
+
+
+def check() -> int:
+    """核对**已安装的** crontab 块与 `build_block()` 是否一致。不一致返回 1。
+
+    为什么需要它：本仓库的失效形态是「代码是对的、**装上去的是旧的**」——
+    迁移到 `~/quant` 之后没人重跑 `--install`，于是整块仍指向 `~/Documents`、
+    六条任务全在报 `Operation not permitted`，而**代码本身一直是对的**
+    （`ROOT = parents[1]` 生成的路径从来没错）。单元测试抓不住这类漂移：
+    它测的是"生成器生成什么"，而坏的是"盘上装的是什么"。
+    """
+    expected = '\n'.join(build_block().splitlines()[1:-1]).strip()   # 去掉起止标记行
+    actual = installed_block()
+    if actual == expected:
+        return 0
+    print('❌ 已安装的 crontab 与生成结果不一致（漂移）：')
+    if not actual:
+        print('   盘上完全没有 quant-ops 块 —— 跑 `--install`')
+    else:
+        import difflib
+        for line in difflib.unified_diff(actual.splitlines(), expected.splitlines(),
+                                         fromfile='已安装', tofile='应为', lineterm=''):
+            print('   ' + line)
+    return 1
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--print', action='store_true')
     parser.add_argument('--install', action='store_true')
     parser.add_argument('--remove', action='store_true')
+    parser.add_argument('--check', action='store_true',
+                        help='核对已安装的是否与生成结果一致（漂移检测）')
     args = parser.parse_args()
 
     if args.print:
@@ -121,6 +163,10 @@ def main():
         return install()
     if args.remove:
         return remove()
+    if args.check:
+        rc = check()
+        print('✅ 已安装的 crontab 与生成结果一致' if rc == 0 else '')
+        return rc
     parser.print_help()
     return 1
 

@@ -171,6 +171,32 @@ def run_now(job: str = 'shadow-daily') -> dict:
             'stderr': proc.stderr.strip()}
 
 
+def check(job: str) -> int:
+    """核对**已安装的** plist 与 `build_plist(job)` 是否一致。不一致返回 1。
+
+    与 `install_cron.check` 同一理由：本仓库的失效形态是「代码是对的、**装上去的是旧的**」。
+    单元测试测的是"生成器生成什么"，而坏的是"盘上装的是什么"—— 这类漂移只有比对才看得见。
+    """
+    path = plist_path(job)
+    if not path.exists():
+        print(f'❌ {job}: {path} 不存在 —— 跑 `--install --job {job}`')
+        return 1
+    with path.open('rb') as fh:
+        actual = plistlib.load(fh)
+    expected = build_plist(job)
+    if actual == expected:
+        return 0
+    print(f'❌ {job}: 已安装的 plist 与生成结果不一致（漂移）：')
+    for key in sorted(set(actual) | set(expected)):
+        if actual.get(key) != expected.get(key):
+            print(f'   {key}:\n     已安装 = {actual.get(key)!r}\n     应为   = {expected.get(key)!r}')
+    return 1
+
+
+def check_all() -> int:
+    return max((check(job) for job in sorted(JOBS)), default=0)
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description='安装本项目的 LaunchAgent 作业')
     g = p.add_mutually_exclusive_group(required=True)
@@ -178,14 +204,21 @@ def main(argv=None):
     g.add_argument('--install', action='store_true')
     g.add_argument('--remove', action='store_true')
     g.add_argument('--run-now', action='store_true')
-    # 默认 shadow-daily：加 --job 之前只有这一个作业，旧命令行必须继续照原样工作
-    p.add_argument('--job', choices=sorted(JOBS), default='shadow-daily')
+    g.add_argument('--check', action='store_true',
+                   help='核对已安装的是否与生成结果一致（不给 --job 就全查）')
+    # 默认 shadow-daily：加 --job 之前只有这一个作业，旧命令行必须继续照原样工作。
+    p.add_argument('--job', choices=sorted(JOBS), default=None)
     args = p.parse_args(argv)
+    job = args.job or 'shadow-daily'
     if args.print:
-        print(plistlib.dumps(build_plist(args.job)).decode())
+        print(plistlib.dumps(build_plist(job)).decode())
         return 0
-    result = (install(args.job) if args.install
-              else remove(args.job) if args.remove else run_now(args.job))
+    if args.check:
+        rc = check(args.job) if args.job else check_all()
+        print('✅ 已安装的 plist 与生成结果一致' if rc == 0 else '')
+        return rc
+    result = (install(job) if args.install
+              else remove(job) if args.remove else run_now(job))
     print(json.dumps(result, ensure_ascii=False))
     return 0 if not (args.install and not result.get('loaded')) else 1
 
