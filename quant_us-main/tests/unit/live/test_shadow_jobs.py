@@ -188,3 +188,28 @@ class IncompleteJobsTests(ShadowJobTests):
                 c = self.jobs.claim(job, session, now=0)
                 self.jobs.finish(c, 0)
         self.assertEqual(incomplete_jobs(self.events, self.SESSIONS, jobs=self.JOBS), [])
+
+
+class CurrentSessionTests(unittest.TestCase):
+    """`current_session()`：三个 runner **现在**会算的那个 session。
+
+    它是补跑护栏的依据 —— 补历史 session 会算出今天的东西却把那天的 claim 记成成功，
+    **账本会说谎**。所以"当前 session"的判定必须准。
+    """
+
+    def _at(self, y, m, d, hh):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        return datetime(y, m, d, hh, 0, tzinfo=ZoneInfo('America/New_York'))
+
+    def test_uses_the_latest_session_whose_close_has_passed(self):
+        from scripts.live_trading.retry_shadow_job import current_session
+        # 周五 12:00 纽约：周五还没收盘 ⇒ 最新"已收盘"是周四
+        self.assertEqual(current_session(self._at(2026, 9, 18, 12)), '2026-09-17')
+        # 周五 18:00 纽约：已过 16:00 ⇒ 就是周五
+        self.assertEqual(current_session(self._at(2026, 9, 18, 18)), '2026-09-18')
+
+    def test_weekend_falls_back_to_friday(self):
+        from scripts.live_trading.retry_shadow_job import current_session
+        self.assertEqual(current_session(self._at(2026, 9, 19, 12)), '2026-09-18')   # 周六
+        self.assertEqual(current_session(self._at(2026, 9, 20, 12)), '2026-09-18')   # 周日

@@ -82,7 +82,12 @@ def main(argv=None) -> int:
     print(f'❌ {len(gaps)} 个缺口：')
     for session, job, status in gaps:
         print(f'   {session}  {job:<26} {status or "无记录（服务当时没在跑？）"}')
-    print('\n补跑：python3 scripts/live_trading/retry_shadow_job.py --job <job> --session <session>')
+    # **指向补跑时必须说清限制**：三个 runner 都是"现在"锚定的（`run_daily_selection.py`
+    # 根本没有 session 参数、`run_daily_setups.py` 的 `--as-of` 作业不传），
+    # 所以**只有当前 session 能补**；对历史 session 补跑只会算出今天的东西却把那天记成成功。
+    from scripts.live_trading.retry_shadow_job import current_session
+    print(f'\n只有**当前 session（{current_session()}）**能补 —— 三个 runner 都是"现在"锚定的，'
+          f'补历史会写出一份"用今天的活儿冒充那天"的账目。历史缺口需用当时的输入重算，本工具做不到。')
     return 1
 
 

@@ -24,6 +24,28 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(BASE_DIR))
 
 
+def current_session(now=None):
+    """三个 runner **现在**会算的那个 session：纽约时间下**收盘已过**的最新交易日。
+
+    为什么需要它：`run_daily_selection.py` **没有 session 参数**、`run_daily_setups.py`
+    的 `--as-of` **作业也不传**、`run_outcomes.py` 是全局结算 —— 三个 runner 都是
+    **"现在"锚定**的，而作业的 claim 是**按 session 键**的。
+    ⇒ 对**过去的 session** 补跑，只会算出"今天"的东西，然后把 claim 记成"那天成功"：
+    **账本会说谎**。所以这里只允许补**当前 session**，不允许补历史。
+    """
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    import pandas as pd
+    from scripts.data.trading_calendar import sessions
+
+    local = (now or datetime.now(ZoneInfo('UTC'))).astimezone(ZoneInfo('America/New_York'))
+    dates = sessions(local.date() - timedelta(days=14), local.date()).session_date
+    completed = [d for d in dates
+                 if d.tz_localize('America/New_York') + pd.Timedelta(hours=16) <= local]
+    return str(completed[-1].date()) if completed else None
+
+
 def main(argv=None) -> int:
     from scripts.live_trading.outcome_scheduler import OutcomeSchedulerThread
     from scripts.live_trading.shadow_jobs import EXPECTED_JOBS
@@ -43,6 +65,16 @@ def main(argv=None) -> int:
 
     if not args.job or not args.session:
         parser.error('需要 --job 与 --session（或 --list-gaps）')
+
+    # **只允许补当前 session**：见 `current_session` 的说明 —— 补历史会写出一份
+    # "用今天的活儿冒充那天"的账目，那比留着缺口更糟。
+    current = current_session()
+    if args.session != current:
+        print(f'❌ 拒绝：--session {args.session} 不是当前 session（{current}）。\n'
+              f'   三个 runner（selection / setups / outcomes）都是"现在"锚定的，\n'
+              f'   对历史 session 补跑只会算出今天的东西、却把那天记成"成功" —— 账本会说谎。\n'
+              f'   历史缺口只能用当时的输入重算，本工具做不到。')
+        return 1
 
     # 复用服务那条路径的 runner：**不另写一套子进程调用** ——
     # 两套调用一旦不同，"补跑"与"正常跑"的结果就不是同一件事了。
