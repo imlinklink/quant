@@ -3,8 +3,9 @@ import unittest
 
 from scripts.portfolio_shadow.evidence import build_entry_packet
 from scripts.portfolio_shadow.llm_overlay import (ENTRY_VETO_SYSTEM, FakeModel,
-                                                  OverlayDecision, is_program_abstain,
-                                                  resolve_overlay, validate_model_output)
+                                                  OverlayDecision, citation_subjects,
+                                                  is_program_abstain, resolve_overlay,
+                                                  validate_model_output)
 from scripts.portfolio_shadow.schema import Opportunity, to_micro
 
 
@@ -144,12 +145,12 @@ def market_only_packet():
     return build_entry_packet(opp(), QUOTE, [MARKET_EVENT], {}, AS_OF)
 
 
-class CompanySpecificVetoTests(unittest.TestCase):
-    """VETO 只能靠**本证券自己**的证据（审计 §4.2）。
+class CitationAttributionTests(unittest.TestCase):
+    """归属**不拦截、但要披露**（2026-09-19 放宽，取代此前的严格口径）。
 
-    市场级日报对每个候选都可见、且排在证券事件之前 —— 那是背景。市场事实规则计划已经用
-    市场门（MARKET_GATE_OPEN）算过了，所以拿它取消一笔交易等于让模型复述规则已经编码的东西。
-    用户选定的口径是**严格**：两个 VETO 原因都要求本证券证据，不按原因区分。
+    此前 `VETO_NO_COMPANY_EVIDENCE` 要求至少一条本证券证据（用户在 2026-09 选定）。实测证据
+    供给只有市场级日报 ⇒ 该守卫使 VETO **结构上不可达**、L 恒等于 R。现放宽到设计 §7.1/§7.2
+    与审计 §4.2 的原始要求：要求 ≥1 条有效引用，归属构成由 `citation_subjects` 如实披露。
     """
 
     def output(self, p, *, reason='MATERIAL_COMPANY_EVENT_RISK', contrast='规则计划漏看了 X',
@@ -160,28 +161,40 @@ class CompanySpecificVetoTests(unittest.TestCase):
                 'evidence_ids': list(evidence_ids if evidence_ids is not None
                                      else [e['evidence_id'] for e in p['events']])}
 
-    def test_只有市场级证据不能否决(self):
+    def test_只有市场级证据也能否决(self):
+        """不再是 INVALID_OUTPUT：动作可达，归属由披露承担。"""
         p = market_only_packet()
         ok, errors = validate_model_output(self.output(p), p)
-        self.assertFalse(ok)
-        self.assertIn('VETO_NO_COMPANY_EVIDENCE', errors)
+        self.assertTrue(ok, errors)
 
-    def test_两个VETO原因都要求本证券证据(self):
+    def test_两个VETO原因都只受引用存在性约束(self):
         p = market_only_packet()
         for reason in ('MATERIAL_COMPANY_EVENT_RISK', 'MATERIAL_THESIS_CONTRADICTION'):
             with self.subTest(reason=reason):
                 ok, errors = validate_model_output(self.output(p, reason=reason), p)
-                self.assertIn('VETO_NO_COMPANY_EVIDENCE', errors)
+                self.assertTrue(ok, errors)
 
-    def test_市场证据可以一起引用只是不能单独(self):
+    def test_无引用仍然被拒(self):
+        p = market_only_packet()
+        _, errors = validate_model_output(self.output(p, evidence_ids=[]), p)
+        self.assertIn('VETO_NO_EVIDENCE', errors)
+
+    def test_引用不存在仍然被拒(self):
+        p = build_entry_packet(opp(), QUOTE, [MARKET_EVENT, EVENT], {}, AS_OF)
+        _, errors = validate_model_output(self.output(p, evidence_ids=['ev-never-existed']), p)
+        self.assertIn('EVIDENCE_NOT_IN_PACKET', errors)
+
+    def test_归属构成可披露(self):
+        """放宽的配套：必须能看出这次判断是否仅由市场级证据支撑。"""
         p = build_entry_packet(opp(), QUOTE, [MARKET_EVENT, EVENT], {}, AS_OF)
         market_id, company_id = (p['events'][0]['evidence_id'], p['events'][1]['evidence_id'])
-        self.assertEqual(p['events'][0]['security_id'], 'MARKET')     # 生产顺序：市场在前
-        ok, errors = validate_model_output(
-            self.output(p, evidence_ids=[market_id, company_id]), p)
-        self.assertTrue(ok, errors)
-        _, errors = validate_model_output(self.output(p, evidence_ids=[market_id]), p)
-        self.assertIn('VETO_NO_COMPANY_EVIDENCE', errors)
+        self.assertEqual(p['events'][0]['security_id'], 'MARKET')   # 生产顺序：市场在前
+        sid = p['security_id']
+        self.assertEqual(citation_subjects([market_id], p['events'], subject_id=sid),
+                         {'MARKET': 1})
+        self.assertEqual(citation_subjects([market_id, company_id], p['events'],
+                                           subject_id=sid),
+                         {'MARKET': 1, 'self': 1})
 
     def test_缺thesis_contrast被拒(self):
         p = build_entry_packet(opp(), QUOTE, [MARKET_EVENT, EVENT], {}, AS_OF)
@@ -201,27 +214,20 @@ class CompanySpecificVetoTests(unittest.TestCase):
                 ok, errors = validate_model_output(out, p)
                 self.assertTrue(ok, errors)
 
-    def test_包缺证券身份时否决不成立(self):
-        """身份核不了就不放行（fail closed），而不是默认通过。"""
-        p = {**market_only_packet(), 'security_id': ''}
-        _, errors = validate_model_output(self.output(p), p)
-        self.assertIn('VETO_PACKET_HAS_NO_SECURITY', errors)
-
-    def test_市场级否决被明确降级而不是静默通过(self):
-        """端到端：单靠市场背景的否决 → ABSTAIN/INVALID_OUTPUT，并计入**故障降级**
-        （§4.3 的口径）—— 而不是被当成模型的一次表态。"""
+    def test_市场级否决端到端被接受(self):
+        """端到端：单靠市场背景的否决现在是一次**有效表态**，不再是故障降级。"""
         p = market_only_packet()
         mr = {'status': 'OK', 'completed_at': '2026-01-04T13:10:00+00:00', 'cost_micro': 5,
               'output': self.output(p)}
         d = resolve_overlay(p, mr, DEADLINE)
-        self.assertEqual(d.action, 'ABSTAIN')
-        self.assertEqual(d.reason_code, 'INVALID_OUTPUT')
-        self.assertTrue(is_program_abstain(d.reason_code))
+        self.assertEqual(d.action, 'VETO')
+        self.assertFalse(is_program_abstain(d.reason_code))
 
     def test_system_prompt说明了这两条规则(self):
         """模型必须被告知它将被据以评判的规则 —— 否则是在罚它没读心术。"""
         self.assertIn('thesis_contrast', ENTRY_VETO_SYSTEM)
-        self.assertIn('至少有一条属于本证券自己', ENTRY_VETO_SYSTEM)
+        self.assertIn('市场级日报（security_id=MARKET）是**允许的依据**',
+                      ENTRY_VETO_SYSTEM)
 
     def test_夹具模型优先引用本证券证据(self):
         """生产包市场事件在前，直接取第一条会拿到 MARKET —— 夹具必须优先取本证券的。"""

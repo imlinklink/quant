@@ -16,11 +16,18 @@ from .event_store import EventStore, digest, utc
 
 logger = logging.getLogger(__name__)
 
-VALID_ROLES = ('selection', 'entry', 'position')
+from scripts.live_trading.decision_contracts import ROLE_CONTRACTS
+
+# **从契约表派生，绝不另抄一份**：这里原先是硬编码的 ('selection','entry','position')，
+# 于是新增角色时引擎能路由、快照层却报「非法 role」—— 两处定义漂移不会报错，只会让新
+# 角色静默不可用。单一来源由测试钉死。
+VALID_ROLES = tuple(ROLE_CONTRACTS)
 SNAPSHOT_KIND_INPUT = {
     'selection': 'selection_input',
     'entry': 'entry_input',
     'position': 'position_input',
+    'portfolio': 'portfolio_input',
+    'review': 'review_input',
 }
 
 

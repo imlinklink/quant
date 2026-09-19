@@ -99,12 +99,33 @@ def check_config(r: PreflightResult) -> dict:
         cfg_key = str(llm_cfg.get('api_key', '') or '')
         if not api_key and (not cfg_key or cfg_key.startswith('${')):
             r.warn('llm.enabled=true 但 DEEPSEEK_API_KEY 未设置/未展开，确认页将显示"大模型无判定"')
+        elif cfg_key and not cfg_key.startswith('${') and not api_key:
+            # 设计 §17 明令「API key 必须迁移到环境变量，禁止继续保存在仓库配置」。
+            # 明文 key 仍在工作区 config.yaml 里（未进 git，但已暴露）→ 必须看得见。
+            r.warn('llm.api_key 仍是 config.yaml 里的明文（设计 §17 要求迁移到环境变量）：'
+                   '请轮换该 key 并改为 api_key: ${DEEPSEEK_API_KEY}')
         else:
             r.ok(f'LLM 配置就绪: {llm_cfg.get("model", "deepseek-chat")}')
     else:
         r.info('llm.enabled=false：确认页不会显示大模型判定（如需接入，开 enabled 并设置 DEEPSEEK_API_KEY）')
 
     return cfg
+
+
+def check_llm_permissions(cfg: dict, r: PreflightResult):
+    """§8 权限等级配置的严格校验。
+
+    **没人调用的门就是名义上的门**：等级配置里拼错一个权限名或等级名，会被 `level_for`
+    的 `dict.get` 静默忽略并回落到默认值 —— 而回落方向是"更松"还是"更紧"不可控。
+    这里让它在启动时就报出来，而不是等某天发现某个安全门其实一直没生效。
+    """
+    from scripts.live_trading.llm_permission import validate_permissions
+    errors = validate_permissions(cfg)
+    if errors:
+        for error in errors:
+            r.fail(f'LLM 权限配置: {error}')
+    else:
+        r.ok('LLM 权限等级配置合法（全部 shadow：模型建议被记录，不改变执行行为）')
 
 
 def check_dip_config(cfg: dict, r: PreflightResult):
@@ -268,6 +289,7 @@ def main():
     cfg = check_config(r)
     if cfg:
         check_dip_config(cfg, r)
+        check_llm_permissions(cfg, r)
         check_approval_dir(r, cfg)
         check_web(args.web, cfg, r)
 

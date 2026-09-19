@@ -112,17 +112,31 @@ def validate_model_output(output, packet: dict) -> tuple[bool, list[str]]:
             unknown = [eid for eid in evidence_ids if eid not in by_id]
             if unknown:
                 errors.append('EVIDENCE_NOT_IN_PACKET')
-            else:
-                # 必须至少有**一条本证券自己**的证据。市场级日报对每个候选都可见（它是背景，
-                # 排在证券事件前），但它撑不起一次否决：市场事实规则计划已经用市场门算过了，
-                # 拿它取消一笔交易等于让模型复述规则已经编码的东西（审计 §4.2）。
-                sid = packet.get('security_id')
-                if not sid:
-                    # 身份都核不了 → 不放行，宁可弃权
-                    errors.append('VETO_PACKET_HAS_NO_SECURITY')
-                elif not any(by_id[eid].get('security_id') == sid for eid in evidence_ids):
-                    errors.append('VETO_NO_COMPANY_EVIDENCE')
+            # 归属**不在这里拦截**：设计 §7.1 把 MARKET 列为允许的归属，§7.2 对排除类动作
+            # 只要求"至少一条支持排除的有效证据"；审计 §4.2 的原话是"要求至少一条有效引用，
+            # 并在报告中分开统计同证券与市场/板块证据"。此处曾有一道更严的守卫
+            # （`VETO_NO_COMPANY_EVIDENCE`，要求至少一条本证券证据，由用户在 2026-09 选定），
+            # 但当前证据供给只有市场级日报 ⇒ 该守卫使 VETO **结构上不可达**，L 恒等于 R。
+            # 现已放宽到设计与审计的原始要求，归属构成改由 `citation_subjects` 如实披露。
     return (not errors), errors
+
+
+def citation_subjects(evidence_ids, events, *, subject_id: str = '') -> dict:
+    """被引用证据的**归属构成**（同证券 / 各市场级 / 未知），用于披露而非拦截。
+
+    这是放宽 `VETO_NO_COMPANY_EVIDENCE` 那一类守卫的配套：不再禁止市场证据驱动决策，
+    但必须让「这次判断仅由市场级证据支撑」在账本与报告里看得见。
+    """
+    by_id = {e.get('evidence_id'): e for e in (events or [])}
+    counts: dict = {}
+    for eid in evidence_ids or ():
+        event = by_id.get(eid)
+        if event is None:
+            continue
+        owner = str(event.get('security_id') or '')
+        key = 'self' if owner and owner == str(subject_id) else (owner or 'UNKNOWN')
+        counts[key] = counts.get(key, 0) + 1
+    return counts
 
 
 @dataclass(frozen=True)
@@ -166,14 +180,21 @@ def resolve_overlay(packet: dict, model_result: dict, deadline: str) -> OverlayD
                            False, uncertain)
 
 
-def _gate(packet: dict) -> tuple[str, str] | None:
-    """数据质量门。返回 (action, reason) 表示短路；None 表示可以发起模型调用。"""
+def gate(packet: dict) -> tuple[str, str] | None:
+    """数据质量门。返回 (action, reason) 表示短路；None 表示可以发起模型调用。
+
+    与角色无关（只读 `packet['data_quality']['level']`），故入场与持仓共用。
+    """
     level = (packet.get('data_quality') or {}).get('level')
     if level == 'BLOCK':
         return 'BLOCK', 'DATA_BLOCKED_QUOTE'
     if level == 'LLM_INSUFFICIENT':
         return 'ABSTAIN', 'INSUFFICIENT_EVIDENCE'
     return None
+
+
+def _gate(packet: dict) -> tuple[str, str] | None:  # 兼容旧调用点
+    return gate(packet)
 
 
 def model_call_expected(packet: dict) -> bool:
@@ -252,11 +273,11 @@ ENTRY_VETO_SYSTEM = (
     '- MATERIAL_THESIS_CONTRADICTION：重大指引/经营逻辑反证\n'
     '- MATERIAL_COMPANY_EVENT_RISK：重大公司事件风险\n'
     'VETO 的额外要求（任一不满足即视为无效输出，会被降级为 ABSTAIN）：\n'
-    '- evidence_ids 里必须**至少有一条属于本证券自己**（其 security_id 与本次机会一致）。\n'
-    '  市场级日报（security_id=MARKET）对每个候选都可见，那是背景；市场事实规则计划已经用\n'
-    '  市场门考虑过了，所以它**单独撑不起一次否决**。若包里没有本证券的证据，只能 PASS 或 ABSTAIN。\n'
-    '- 必须给出 thesis_contrast：说明规则计划漏看了什么事实、它如何改变本次机会。\n'
-    '  不要复述包里的指标，也不要只说「存在不确定性」。\n'
+    '- 必须反驳规则计划本身（说明规则漏看了什么、它如何改变本次机会），\n'
+    '  而不是复述包里的指标或规则已经编码过的市场事实。\n'
+    '- evidence_ids 只能从给定证据包里逐字选取，不得编造。\n'
+    '  市场级日报（security_id=MARKET）是**允许的依据**；但它撑不起「本证券基本面已恶化」\n'
+    '  这类论断 —— 若你的反证只来自市场级背景，请在 thesis_contrast 里明确说明这是市场层面的判断。\n'
     '只依据给定证据推理，不编造；不得以「资金不足」等程序理由否决。输出严格 JSON，遵循 output_schema。'
 )
 
@@ -314,25 +335,37 @@ class RealModel:
         # 这个开关不得用于正式运行路径。
         self.allow_historical = allow_historical
 
+    def _refusal(self, packet: dict, deadline: str, now) -> dict | None:
+        """发起调用前的程序侧拒绝；返回 None 表示可以调用。角色无关，故可被子类复用。"""
+        deadline_dt = _parse(deadline)
+        if self.allow_historical:
+            return None
+        if (deadline_dt is None
+                or (now - deadline_dt).total_seconds() > self.max_staleness_seconds):
+            return {'status': 'HISTORICAL_AS_OF', 'output': None,
+                    'completed_at': now.isoformat(), 'cost_micro': 0,
+                    'cost_uncertain': False}
+        cutoff = _parse(self.knowledge_cutoff)
+        as_of = _parse(packet.get('as_of'))
+        if cutoff is not None and as_of is not None and as_of < cutoff:
+            return {'status': 'MODEL_KNOWLEDGE_CUTOFF', 'output': None,
+                    'completed_at': now.isoformat(), 'cost_micro': 0,
+                    'cost_uncertain': False}
+        return None
+
+    def _system(self) -> str:
+        return ENTRY_VETO_SYSTEM
+
+    def _prompt(self, packet: dict) -> str:
+        return json.dumps({'decision_type': 'entry_veto', 'evidence_packet': packet,
+                           'output_schema': ENTRY_VETO_SCHEMA}, ensure_ascii=False)
+
     def call(self, packet: dict, deadline: str) -> dict:
         now = self._now()
-        deadline_dt = _parse(deadline)
-        if not self.allow_historical:
-            if (deadline_dt is None
-                    or (now - deadline_dt).total_seconds() > self.max_staleness_seconds):
-                return {'status': 'HISTORICAL_AS_OF', 'output': None,
-                        'completed_at': now.isoformat(), 'cost_micro': 0,
-                        'cost_uncertain': False}
-            cutoff = _parse(self.knowledge_cutoff)
-            as_of = _parse(packet.get('as_of'))
-            if cutoff is not None and as_of is not None and as_of < cutoff:
-                return {'status': 'MODEL_KNOWLEDGE_CUTOFF', 'output': None,
-                        'completed_at': now.isoformat(), 'cost_micro': 0,
-                        'cost_uncertain': False}
-        prompt = json.dumps({'decision_type': 'entry_veto',
-                             'evidence_packet': packet,
-                             'output_schema': ENTRY_VETO_SCHEMA}, ensure_ascii=False)
-        output = self.advisor.chat(prompt, system=ENTRY_VETO_SYSTEM)
+        refusal = self._refusal(packet, deadline, now)
+        if refusal is not None:
+            return refusal
+        output = self.advisor.chat(self._prompt(packet), system=self._system())
         completed_at = self._now().isoformat()
         meta = dict(getattr(self.advisor, 'last_metadata', None) or {})
         cost_usd = meta.get('cost_usd')

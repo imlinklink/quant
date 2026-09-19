@@ -8,7 +8,9 @@ import pandas as pd
 from scripts.live_trading.decision_ledger.outcome_jobs import OutcomeSettlement
 from scripts.live_trading.position_registry import PositionRegistry
 from scripts.live_trading.run_outcomes import (
-    code_close_series, run, settle_entry_signal, settle_position_decision,
+    code_close_series, position_future_bars, run, settle_entry_signal,
+    settle_entry_counterfactuals, settle_position_counterfactuals,
+    settle_position_decision, settle_selection_counterfactuals,
 )
 
 
@@ -58,14 +60,21 @@ class RunOutcomesTests(unittest.TestCase):
                  'research_batch_id': 'batch1'}
         first = run(self.registry, [batch], self.bars)
         second = run(self.registry, [batch], self.bars)
-        self.assertEqual(first, second)
+        # 首次结算 2 只 × 5 期限；重跑**一条也不写**。
+        # `settled` 的语义是"真写入了多少"，不是"算出了多少" —— 旧口径下重跑也报 10，
+        # 于是"每天报 10 条、实际一条没写"看起来正常，把已结算不再重算这件事盖住了。
         self.assertEqual(first, {'settled': 10, 'pending': 0})
+        self.assertEqual(second, {'settled': 0, 'pending': 0})
         settlement = OutcomeSettlement(self.registry)
         with settlement.events.transaction() as con:
             count = con.execute(
                 "SELECT COUNT(*) FROM decision_outcomes_v2 WHERE decision_id='batch1'"
             ).fetchone()[0]
-        self.assertEqual(count, 10)  # 重复运行不重复记账
+            observed = con.execute(
+                "SELECT COUNT(*) FROM decision_events WHERE event_type='outcome_observed'"
+            ).fetchone()[0]
+        self.assertEqual(count, 10)      # 重复运行不重复记账
+        self.assertEqual(observed, 10)   # 也不重复写事件（重跑不新增结算事件）
 
     def test_v2_decision_id_and_pending_horizons(self):
         short = self.bars[self.bars['date'] <= pd.Timestamp('2026-01-12', tz='UTC')]
@@ -97,6 +106,68 @@ class RunOutcomesTests(unittest.TestCase):
                  'protection': {'active_stop': 90.0}}
         n2 = settle_position_decision('dec_pos', trade, 95.0, 92.0, 93.0, closes, settlement)
         self.assertEqual(n2, 1)
+
+    def test_position_counterfactual_starts_after_decision_market_day(self):
+        frozen = {'code': 'US.A', 'as_of': '2026-01-10T14:00:00+00:00'}
+        future = position_future_bars(self.bars, frozen)
+        # Jan 10 当日即使尚未收盘，也不能拿已经发生的日线开盘作为成交价。
+        self.assertEqual(pd.Timestamp(future[0]['date']).date().isoformat(), '2026-01-11')
+
+    def test_position_counterfactual_batch_settlement(self):
+        frozen = {
+            'counterfactual_id': 'cf1', 'experiment_version': 'position-counterfactual-v1',
+            'decision_id': 'd1', 'trade_id': 't1', 'code': 'US.A',
+            'as_of': '2026-01-10T14:00:00+00:00', 'starting_quantity': 10,
+            'reference_price': 109, 'active_stop': 90, 'hard_exit_authoritative': True,
+            'fee_rate': 0, 'l_path': {'action': 'reduce', 'quantity': 5},
+        }
+        result = settle_position_counterfactuals(self.registry, [frozen], self.bars)
+        self.assertEqual(result, {'experiments': 1, 'settled_horizons': 4, 'pending': 1})
+        # 同一批数据重复结算保持幂等；补足第 20 根后只新增 20d 投影。
+        self.assertEqual(settle_position_counterfactuals(
+            self.registry, [frozen], self.bars), result)
+        extra = _bars('US.A', ['2026-01-30'], [129])
+        completed = settle_position_counterfactuals(
+            self.registry, [frozen], pd.concat([self.bars, extra], ignore_index=True))
+        self.assertEqual(completed, {'experiments': 1, 'settled_horizons': 5, 'pending': 0})
+        with OutcomeSettlement(self.registry).events.transaction() as con:
+            count = con.execute(
+                "SELECT COUNT(*) FROM decision_outcomes_v2 WHERE subject_key='t1:position_cf'"
+            ).fetchone()[0]
+        self.assertEqual(count, 5)
+
+    def test_entry_counterfactual_batch_settlement(self):
+        frozen = {
+            'counterfactual_id': 'ecf1', 'experiment_version': 'entry-counterfactual-v1',
+            'decision_id': 'ed1', 'signal_id': 's1', 'code': 'US.A',
+            'as_of': '2026-01-10T14:00:00+00:00',
+            'rule_path': {'action': 'execute_now', 'template': {
+                'kind': 'standard', 'quantity': 10, 'initial_stop': 90}},
+            'llm_path': {'action': 'reject', 'template': {
+                'kind': 'reject', 'quantity': 0, 'initial_stop': 90}},
+        }
+        result = settle_entry_counterfactuals(self.registry, [frozen], self.bars)
+        self.assertEqual(result, {'experiments': 1, 'settled_horizons': 4, 'pending': 1})
+        with OutcomeSettlement(self.registry).events.transaction() as con:
+            count = con.execute(
+                "SELECT COUNT(*) FROM decision_outcomes_v2 WHERE subject_key='s1:entry_cf'"
+            ).fetchone()[0]
+        self.assertEqual(count, 4)
+
+    def test_selection_counterfactual_batch_settlement(self):
+        frozen = {
+            'counterfactual_id': 'scf1', 'experiment_version': 'selection-capacity-counterfactual-v1',
+            'decision_id': 'sd1', 'batch_id': 'b1', 'as_of': '2026-01-10T14:00:00+00:00',
+            'rule_selected': ['US.A'], 'llm_selected': ['US.B'],
+            'replaced_out': ['US.A'], 'replaced_in': ['US.B'],
+        }
+        result = settle_selection_counterfactuals(self.registry, [frozen], self.bars)
+        self.assertEqual(result, {'experiments': 1, 'settled_horizons': 4, 'pending': 1})
+        with OutcomeSettlement(self.registry).events.transaction() as con:
+            row = con.execute(
+                "SELECT excess_return_pct FROM decision_outcomes_v2 WHERE subject_key='b1:selection_cf' "
+                "AND horizon='3d'").fetchone()
+        self.assertLess(row[0], 0.0)
 
 
 if __name__ == '__main__':

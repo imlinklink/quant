@@ -4,7 +4,7 @@ import unittest
 from scripts.portfolio_shadow.paper_engine import (initial_stop_micro, new_account_state,
                                                    risk_sized_shares_micro, step)
 from scripts.portfolio_shadow.replay import replay
-from scripts.portfolio_shadow.schema import Manifest, Opportunity, to_micro
+from scripts.portfolio_shadow.schema import Manifest, Opportunity, Position, to_micro
 
 
 def make_manifest(horizon=60, risk_bp=100, max_weight_bp=2000, max_positions=5):
@@ -407,6 +407,178 @@ class ModelCostUncertaintyTests(unittest.TestCase):
         replayed = replay(scope, to_micro(100000), r1.events + r2.events)
         self.assertEqual(replayed.model_cost, 700)
         self.assertEqual(replayed.model_cost_unsettled, ('a2',))
+        self.assertEqual(replayed.state_hash(), r2.state.state_hash())
+
+
+class PositionActionTests(unittest.TestCase):
+    """持仓评审动作阶段（设计 §6.4）：硬退出优先、tier 相对、减到 0 必须 del、可重放。"""
+
+    def state_with_position(self, shares, scope='SHADOW:x:L', entry=100.0, stop=92.0,
+                            session='2026-01-05'):
+        st = new_account_state(scope, to_micro(100000))
+        st.positions['SEC-A'] = Position(
+            security_id='SEC-A', shares=shares, entry_price_micro=to_micro(entry),
+            entry_session=session, initial_stop_micro=to_micro(stop),
+            stop_micro=to_micro(stop), exit_policy_id='H60', opportunity_id='opp1')
+        return st
+
+    def sells(self, res):
+        return [e for e in res.events if e['type'] == 'fill' and e['side'] == 'SELL']
+
+    def test_none_and_empty_actions_are_noops(self):
+        # R 侧不传（None）与传空 dict 都必须与不启用该阶段逐字节相同。
+        m = make_manifest(horizon=60)
+        base = step(self.state_with_position(125), session='2026-01-06',
+                    bars=bars1(100, 100.5), corporate_actions=[], intents=[], manifest=m)
+        none_ = step(self.state_with_position(125), session='2026-01-06',
+                     bars=bars1(100, 100.5), corporate_actions=[], intents=[], manifest=m,
+                     position_actions=None)
+        empty = step(self.state_with_position(125), session='2026-01-06',
+                     bars=bars1(100, 100.5), corporate_actions=[], intents=[], manifest=m,
+                     position_actions={})
+        self.assertEqual(base.state.state_hash(), none_.state.state_hash())
+        self.assertEqual(base.state.state_hash(), empty.state.state_hash())
+
+    def test_partial_reduce_keeps_position_and_settles_t_plus_1(self):
+        m = make_manifest(horizon=60)
+        res = step(self.state_with_position(125), session='2026-01-06',
+                   bars=bars1(100, 100.5), corporate_actions=[], intents=[], manifest=m,
+                   position_actions={'SEC-A': {'action': 'reduce', 'tier': 0.25,
+                                               'decision_id': 'd1'}})
+        sells = self.sells(res)
+        self.assertEqual(len(sells), 1)
+        self.assertEqual(sells[0]['reason'], 'REVIEW_REDUCE')
+        self.assertEqual(sells[0]['shares'], 31)          # int(125 × 0.25)
+        self.assertEqual(sells[0]['decision_id'], 'd1')
+        # 持仓保留且数量递减（不得整仓删除）
+        self.assertIn('SEC-A', res.state.positions)
+        self.assertEqual(res.state.positions['SEC-A'].shares, 94)
+        # 卖出款进 unsettled_cash（T+1），当日不进可用现金
+        self.assertEqual(res.state.unsettled_cash, 31 * to_micro(100) - 3_100_000)
+        self.assertEqual(res.state.invariants(), [])
+
+    def test_exit_deletes_position(self):
+        m = make_manifest(horizon=60)
+        res = step(self.state_with_position(125), session='2026-01-06',
+                   bars=bars1(100, 100.5), corporate_actions=[], intents=[], manifest=m,
+                   position_actions={'SEC-A': {'action': 'exit', 'decision_id': 'd2'}})
+        sells = self.sells(res)
+        self.assertEqual(sells[0]['reason'], 'REVIEW_EXIT')
+        self.assertEqual(sells[0]['shares'], 125)
+        self.assertNotIn('SEC-A', res.state.positions)
+        self.assertEqual(res.state.invariants(), [])
+
+    def test_reduce_to_zero_deletes_position(self):
+        # tier=1.0 → 卖出量等于持仓 → 必须 del（invariants 要求 shares > 0）
+        m = make_manifest(horizon=60)
+        res = step(self.state_with_position(40), session='2026-01-06',
+                   bars=bars1(100, 100.5), corporate_actions=[], intents=[], manifest=m,
+                   position_actions={'SEC-A': {'action': 'reduce', 'tier': 1.0,
+                                               'decision_id': 'd3'}})
+        self.assertNotIn('SEC-A', res.state.positions)
+        self.assertEqual(self.sells(res)[0]['reason'], 'REVIEW_EXIT')
+        self.assertEqual(res.state.invariants(), [])
+
+    def test_tier_is_relative_to_account_remaining(self):
+        # 评审主体是 R 的持仓，冻结的绝对量按 R 的剩余算；应用到 L 必须按 L 自身剩余量。
+        # R 持 100 股时 reduce:25 的模板量是 25，而 L 只持 40 股 → 应卖 10 股，不是 25 股。
+        m = make_manifest(horizon=60)
+        res = step(self.state_with_position(40), session='2026-01-06',
+                   bars=bars1(100, 100.5), corporate_actions=[], intents=[], manifest=m,
+                   position_actions={'SEC-A': {'action': 'reduce', 'tier': 0.25,
+                                               'decision_id': 'd4'}})
+        self.assertEqual(self.sells(res)[0]['shares'], 10)
+        self.assertEqual(res.state.positions['SEC-A'].shares, 30)
+
+    def test_tier_below_one_share_does_not_trade(self):
+        m = make_manifest(horizon=60)
+        res = step(self.state_with_position(2), session='2026-01-06',
+                   bars=bars1(100, 100.5), corporate_actions=[], intents=[], manifest=m,
+                   position_actions={'SEC-A': {'action': 'reduce', 'tier': 0.25,
+                                               'decision_id': 'd5'}})
+        self.assertEqual(self.sells(res), [])
+        self.assertEqual(res.state.positions['SEC-A'].shares, 2)
+        # 「为什么没应用」必须入账，不能静默丢弃
+        missed = [e for e in res.events if e['type'] == 'missed']
+        self.assertEqual([e['reason'] for e in missed], ['POSITION_SIZE_ZERO'])
+
+    def test_gap_stop_precedes_position_action(self):
+        # 硬退出优先：开盘已跳空穿过止损 → GAP_STOP 清仓，评审动作不执行。
+        m = make_manifest(horizon=60)
+        res = step(self.state_with_position(125), session='2026-01-06',
+                   bars=bars1(90, 89, low=88, high=90), corporate_actions=[], intents=[],
+                   manifest=m,
+                   position_actions={'SEC-A': {'action': 'exit', 'decision_id': 'd6'}})
+        sells = self.sells(res)
+        self.assertEqual(len(sells), 1)
+        self.assertEqual(sells[0]['reason'], 'GAP_STOP')
+
+    def test_reduced_remainder_still_stopped_intraday(self):
+        # 减仓在阶段 2.5、日内硬止损在阶段 4 → 剩余持仓仍须被止损。
+        m = make_manifest(horizon=60)
+        res = step(self.state_with_position(125), session='2026-01-06',
+                   bars=bars1(100, 95, low=90, high=101), corporate_actions=[], intents=[],
+                   manifest=m,
+                   position_actions={'SEC-A': {'action': 'reduce', 'tier': 0.5,
+                                               'decision_id': 'd7'}})
+        reasons = [e['reason'] for e in self.sells(res)]
+        self.assertEqual(reasons, ['REVIEW_REDUCE', 'STOP'])
+        self.assertEqual(self.sells(res)[0]['shares'], 62)
+        self.assertNotIn('SEC-A', res.state.positions)
+
+    def test_missing_bars_skips_action(self):
+        m = make_manifest(horizon=60)
+        res = step(self.state_with_position(125), session='2026-01-06',
+                   bars={'SEC-B': bar(50, 51, 49, 50)}, corporate_actions=[], intents=[],
+                   manifest=m,
+                   position_actions={'SEC-A': {'action': 'exit', 'decision_id': 'd8'}})
+        self.assertEqual(self.sells(res), [])
+        self.assertEqual(res.state.positions['SEC-A'].shares, 125)
+        self.assertEqual(res.state.valuation_status, 'PROVISIONAL')
+        missed = [e for e in res.events if e['type'] == 'missed']
+        self.assertEqual([e['reason'] for e in missed], ['POSITION_NO_BARS'])
+
+    def test_action_applied_after_split_uses_adjusted_shares(self):
+        # 公司行动在阶段 1、评审动作在 2.5 → 拆股后按调整后的数量算档位。
+        m = make_manifest(horizon=60)
+        res = step(self.state_with_position(100), session='2026-01-06',
+                   bars=bars1(50, 50.5), corporate_actions=[
+                       {'ex_date': '2026-01-06', 'security_id': 'SEC-A',
+                        'action_type': 'split', 'ratio': 2}],
+                   intents=[], manifest=m,
+                   position_actions={'SEC-A': {'action': 'reduce', 'tier': 0.25,
+                                               'decision_id': 'd9'}})
+        self.assertEqual(self.sells(res)[0]['shares'], 50)   # 拆股后 200 股的 25%
+        self.assertEqual(res.state.positions['SEC-A'].shares, 150)
+
+    def test_replay_consistency_with_position_actions(self):
+        # 重放从空账户起算，故持仓必须由真实 ENTRY 事件产生，不能直接构造。
+        m = make_manifest(horizon=60)
+        scope = 'SHADOW:x:L'
+        r1 = step(new_account_state(scope, to_micro(100000)), session='2026-01-05',
+                  bars=bars1(100, 100.5), corporate_actions=[],
+                  intents=[opp('SEC-A', '2026-01-05')], manifest=m)
+        r2 = step(r1.state, session='2026-01-06', bars=bars1(100, 100.5),
+                  corporate_actions=[], intents=[], manifest=m,
+                  position_actions={'SEC-A': {'action': 'reduce', 'tier': 0.25,
+                                              'decision_id': 'd10'}})
+        r3 = step(r2.state, session='2026-01-07', bars=bars1(101, 102),
+                  corporate_actions=[], intents=[], manifest=m,
+                  position_actions={'SEC-A': {'action': 'exit', 'decision_id': 'd11'}})
+        replayed = replay(scope, to_micro(100000), r1.events + r2.events + r3.events)
+        self.assertEqual(replayed.state_hash(), r3.state.state_hash())
+
+    def test_replay_full_sell_still_removes_position(self):
+        # 回归：部分卖出分支不得改变既有全量卖出的重放行为。
+        m = make_manifest(horizon=60)
+        scope = 'SHADOW:x:R'
+        r1 = step(new_account_state(scope, to_micro(100000)), session='2026-01-05',
+                  bars=bars1(100, 100.5), corporate_actions=[],
+                  intents=[opp('SEC-A', '2026-01-05')], manifest=m)
+        r2 = step(r1.state, session='2026-01-06', bars=bars1(90, 89, low=88, high=90),
+                  corporate_actions=[], intents=[], manifest=m)
+        replayed = replay(scope, to_micro(100000), r1.events + r2.events)
+        self.assertEqual(replayed.positions, {})
         self.assertEqual(replayed.state_hash(), r2.state.state_hash())
 
 

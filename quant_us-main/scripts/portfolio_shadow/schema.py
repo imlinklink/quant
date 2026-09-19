@@ -31,6 +31,14 @@ ATTEMPT_TERMINAL = ('COMPLETED', 'FAILED', 'TIMED_OUT', 'UNKNOWN')
 # published_at 过滤。诊断级证据上的 VETO 与严格级上的不是同一个东西，故必须冻结进实验。
 EVIDENCE_MODES = ('strict', 'diagnostic')
 
+# 持仓 overlay 开关。默认关闭（键缺省即 off）：这样已有的冻结实验继续通过校验与哈希比对
+# —— 开启会改变 manifest_hash，必须新建 experiment_id，不能顶着旧身份改尺子。
+POSITION_OVERLAYS = ('off', 'position_action')
+
+# 容量分配（Portfolio）开关。同样默认关闭：开启会引入一次模型评审；且由于 Portfolio
+# 的权限等级是 shadow，其 effective_action 是父策略，结果与不开启相同。
+PORTFOLIO_OVERLAYS = ('off', 'portfolio_action')
+
 # 各策略字典的已知键。未知键必须报错：拼错一个字母（如 use_real_modle/knowledge_cutof）
 # 会被 `dict.get` 静默忽略，让本该生效的安全门无声失效 —— 然后 freeze 门报「缺失」，
 # 操作者按提示补上另一个拼写，漏洞就这么留下了。
@@ -39,7 +47,8 @@ POLICY_KEYS = {
                     'drawdown_ladder'),
     'execution_policy': ('entry_rule', 'exit_policy_id', 'horizon', 'max_wait_sessions'),
     'llm_policy': ('overlay', 'use_real_model', 'knowledge_cutoff', 'evidence_mode',
-                   'evidence_window_days', 'evidence_max_events'),
+                   'evidence_window_days', 'evidence_max_events', 'position_overlay',
+                   'portfolio_review'),
     'evaluation_protocol': ('main_metric', 'enrollment_window', 'review_date',
                             'cost_allocation'),
 }
@@ -115,19 +124,31 @@ class Manifest:
             # 确实未知就填 'unknown'，让它在评审里可见，而不是留空悄悄跳过。
             errors.append('llm_policy.knowledge_cutoff 缺失（use_real_model=true 时必填；'
                           '未知请填 "unknown"）')
-        if self.llm_policy.get('overlay') == 'entry_veto':
-            # 证据等级必须冻结进实验：诊断级证据上的 VETO 与严格级上的不是同一个东西，
-            # 结论的适用范围完全不同，不能靠运行时默认值悄悄决定。
+        position_overlay = self.llm_policy.get('position_overlay', 'off')
+        if position_overlay not in POSITION_OVERLAYS:
+            errors.append(f'llm_policy.position_overlay 非法：{position_overlay!r}'
+                          f'（允许：{list(POSITION_OVERLAYS)}；缺省即 off）')
+        portfolio_review = self.llm_policy.get('portfolio_review', 'off')
+        if portfolio_review not in PORTFOLIO_OVERLAYS:
+            errors.append(f'llm_policy.portfolio_review 非法：{portfolio_review!r}'
+                          f'（允许：{list(PORTFOLIO_OVERLAYS)}；缺省即 off）')
+        # 只要有一个角色真正调用模型判断，证据等级与窗口容量就必须冻结 ——
+        # 两者都不靠运行时默认值决定：等级决定结论的适用范围，窗口决定取样范围。
+        needs_evidence = (self.llm_policy.get('overlay') == 'entry_veto'
+                          or position_overlay == 'position_action'
+                          or portfolio_review == 'portfolio_action')
+        if needs_evidence:
             mode = self.llm_policy.get('evidence_mode')
             if mode not in EVIDENCE_MODES:
                 errors.append(f'llm_policy.evidence_mode 非法或缺省：{mode!r}'
-                              f'（entry_veto 必填，允许：{list(EVIDENCE_MODES)}）')
+                              f'（需要模型判断的角色必填，允许：{list(EVIDENCE_MODES)}）')
             # 事件窗口与容量固定在 manifest（设计 §5.2）：不冻结就能在看不到更多证据时
             # 悄悄放宽窗口，把「扩大了取样」伪装成「发现了风险」。
             for key in ('evidence_window_days', 'evidence_max_events'):
                 value = self.llm_policy.get(key)
                 if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
-                    errors.append(f'llm_policy.{key} 缺失或非法：{value!r}（entry_veto 必填正整数）')
+                    errors.append(f'llm_policy.{key} 缺失或非法：{value!r}'
+                                  f'（需要模型判断的角色必填正整数）')
         if not self.calendar_version:
             errors.append('calendar_version 缺失')
         # 未知键：拼错的键会被 `dict.get` 静默忽略，让安全门无声失效

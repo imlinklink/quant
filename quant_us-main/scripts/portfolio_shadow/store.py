@@ -368,6 +368,39 @@ class ShadowStore:
                               (self.experiment_id, opportunity_id)).fetchone()
             return json.loads(row[0]) if row else None
 
+    def raw_events(self, event_type: str) -> list:
+        """按类型读**任意实验级事件的 payload**。
+
+        `events()` 只返回 `shadow:step`（引擎步进事件）；反事实、机会终态等由
+        `EventStore.record` 写的实验级事件不在其中，需要这个方法才能读到。
+        """
+        with self.transaction(immediate=False) as con:
+            rows = con.execute(
+                'SELECT body FROM decision_events WHERE account_scope LIKE ? '
+                'AND event_type=? ORDER BY observed_at',
+                (f'SHADOW:{self.experiment_id}%', event_type)).fetchall()
+        return [json.loads(row[0])['payload'] for row in rows]
+
+    def packets_matching(self, fragment: str) -> list[tuple[str, dict]]:
+        """按主体键**片段**取冻结包，返回 [(主体键, 包)]，按键排序。
+
+        持仓评审的主体键是 `{opportunity_id}@pos:{执行日}`：评审命令按执行日取回本日
+        待评审的仓位，不需要重放行情去反推「昨天收盘时持有什么」—— 冻结包本身就是那份
+        记录，重推反而可能因为复权/数据修订而算出不同的一组主体。
+
+        用包含匹配而非严格后缀：按执行日取时片段是 `@pos:{ISO 会话日}`（本身就是键的后缀），
+        统计时片段是 `@pos:`。键的格式固定为 `{id}@pos:{ISO 日期}`，故 `@pos:{某日期}`
+        不可能出现在另一个日期的键里，包含匹配不会误取。
+        """
+        if not fragment:
+            raise ValueError('FRAGMENT_REQUIRED')
+        with self.transaction(immediate=False) as con:
+            rows = con.execute(
+                'SELECT opportunity_id, body FROM shadow_packets WHERE experiment_id=? '
+                'AND opportunity_id LIKE ? ORDER BY opportunity_id',
+                (self.experiment_id, f'%{fragment}%')).fetchall()
+            return [(r[0], json.loads(r[1])) for r in rows]
+
     # ---- model attempts（设计 §7：原子领取 + 尝试状态机 + 租约）----
     def prepare_job_run(self, job_key: str, attempt: int = 1,
                         body: dict | None = None) -> None:

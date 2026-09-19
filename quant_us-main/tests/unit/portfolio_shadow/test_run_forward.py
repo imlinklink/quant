@@ -661,24 +661,40 @@ class DailyRunnerTests(unittest.TestCase):
         self.store = ShadowStore(Path(self.tmp) / 'ledger.sqlite3', 'exp1')
         self.store.save_experiment(manifest())
 
-    def test_only_sessions_with_scheduled_opportunities_are_settled(self):
-        """回归：按全部历史 session 扫会让首次运行卡死（~2900 个日子各重载一次行情）。"""
-        self.store.put_opportunity(opp('SEC-A', '2026-01-06'))
-        self.store.put_opportunity(opp('SEC-C', '2026-01-08'))
-        self.assertEqual(sessions_to_settle(self.store, '2026-01-10', None),
-                         ['2026-01-06', '2026-01-08'])
+    def test_settles_every_trading_session_not_just_entry_days(self):
+        """回归：不能只结算「有机会排期」的日子。
+
+        `step` 每会话才推进一次持有计数并检查跳空止损/拆股/分红/时间退出。原实现取
+        `{o.planned_execution_session}`，于是没有入场排期的交易日永远不推进 ——
+        2026-09-19 实测：生产实验 R/L 都停在 09-17 持有 LITE，而 09-18 已收盘且数据就绪，
+        那天没有入场排期，整个交易日没人处理它。
+        """
+        sessions = ['2026-01-05', '2026-01-06', '2026-01-07', '2026-01-08', '2026-01-09']
+        # 只在 01-06 与 01-08 排过入场，但 01-05..01-08 的每个交易日都必须结算
+        self.assertEqual(
+            sessions_to_settle('2026-01-08', None, data_sessions=sessions,
+                               floor='2026-01-05'),
+            ['2026-01-05', '2026-01-06', '2026-01-07', '2026-01-08'])
 
     def test_settle_scope_excludes_future_and_already_settled(self):
-        self.store.put_opportunity(opp('SEC-A', '2026-01-06'))
-        self.store.put_opportunity(opp('SEC-B', '2026-01-09'))
-        # 只结算 <= target 且晚于上次已结算的
-        self.assertEqual(sessions_to_settle(self.store, '2026-01-07', None), ['2026-01-06'])
-        self.assertEqual(sessions_to_settle(self.store, '2026-01-10', '2026-01-06'),
-                         ['2026-01-09'])
-        self.assertEqual(sessions_to_settle(self.store, '2026-01-10', '2026-01-09'), [])
+        sessions = ['2026-01-05', '2026-01-06', '2026-01-07', '2026-01-09', '2026-01-10']
+        # 只结算 <= target，且严格晚于上次已结算的
+        self.assertEqual(sessions_to_settle('2026-01-07', None, data_sessions=sessions),
+                         ['2026-01-05', '2026-01-06', '2026-01-07'])
+        self.assertEqual(sessions_to_settle('2026-01-10', '2026-01-07',
+                                            data_sessions=sessions),
+                         ['2026-01-09', '2026-01-10'])
+        self.assertEqual(sessions_to_settle('2026-01-10', '2026-01-10',
+                                            data_sessions=sessions), [])
 
-    def test_no_opportunities_means_nothing_to_settle(self):
-        self.assertEqual(sessions_to_settle(self.store, '2026-01-10', None), [])
+    def test_floor_bounds_the_first_run(self):
+        """首次运行（无已结算记录）必须由 floor 收住，否则会把全部历史各扫一遍。"""
+        sessions = [f'2015-01-{d:02d}' for d in range(1, 32)] + ['2026-01-05', '2026-01-06']
+        self.assertEqual(sessions_to_settle('2026-01-06', None, data_sessions=sessions,
+                                            floor='2026-01-05'),
+                         ['2026-01-05', '2026-01-06'])
+        self.assertEqual(sessions_to_settle('2026-01-06', None, data_sessions=sessions),
+                         sessions)
 
     def test_last_settled_session_takes_the_max_across_scopes(self):
         self.assertIsNone(last_settled_session(self.store, ('SHADOW:exp1:R',)))

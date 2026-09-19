@@ -1,9 +1,9 @@
 """R/L 双影子账户增量 EOD 模拟引擎（PR3 核心）。
 
-纯逻辑、无网络、确定性（整数微美元运算）。逐日顺序（设计 §6.2）：
-公司行动（拆股/除息记应收）→ 资金结算（T+1 卖出款 + 支付日分红）→ 已有持仓开盘
-风险退出（跳空止损）→ 候选按序开盘入场（风险定仓 + 五仓）→ 日内硬止损 → 时间退出
-（收盘）→ 收盘估值与高水位。
+纯逻辑、无网络、确定性（整数微美元运算）。逐日顺序（与代码一致，设计 §6.2）：
+资金结算（T+1 卖出款 + 支付日分红）→ 公司行动（拆股/除息记应收）→ 已有持仓开盘
+风险退出（跳空止损）→ 持仓评审动作（仅 L 账户）→ 候选按序开盘入场（风险定仓 +
+五仓）→ 日内硬止损 → 时间退出（收盘）→ 收盘估值与高水位。
 
 只消费当日已知信息（bars/公司行动/intents），不读未来 exit_matrix；重放一致。
 """
@@ -54,8 +54,13 @@ def _fee(gross_micro: int, fee_bp: int) -> int:
 
 def step(state: AccountState, *, session: str, bars: dict, corporate_actions: list,
          intents: list, manifest, fee_bp: int = 10, model_cost: int = 0,
-         model_cost_uncertain: tuple = (), model_cost_settlements: dict | None = None) -> StepResult:
-    """执行一个交易日。bars={sid:{open,high,low,close}}（微美元/股）；公司行动用微美元。"""
+         model_cost_uncertain: tuple = (), model_cost_settlements: dict | None = None,
+         position_actions: dict | None = None) -> StepResult:
+    """执行一个交易日。bars={sid:{open,high,low,close}}（微美元/股）；公司行动用微美元。
+
+    position_actions 形如 {security_id: {'action': 'reduce'|'exit', 'tier': float,
+    'decision_id': str}}，只传给 L 账户；R 传 None 时本阶段完全不生效。
+    """
     # 执行日守卫：整批校验必须先于任何状态变更，避免处理一半才报错；一次报全部违规。
     # 计划执行日 ≠ 当前 session 属调度/数据错误，绝不按历史开盘价补成交。
     violations = [(intent.opportunity_id(),
@@ -158,6 +163,49 @@ def step(state: AccountState, *, session: str, bars: dict, corporate_actions: li
             del s.positions[sid]
             events.append(_fill(session, 'SELL', sid, pos.shares, o, fee, 'GAP_STOP',
                                 pos.opportunity_id))
+
+    # 2.5 持仓评审动作（仅 L 账户；R 传 None 时整段不生效）
+    # 位置在跳空止损之后、开盘入场之前：此时公司行动已调整完 shares/stop（否则评审日
+    # 拆股会把减仓数量算错），且释放的仓位槽与现金当日可用，与跳空止损一致。
+    # 硬退出优先由此保证：阶段 2 已清仓则本段跳过，阶段 4/5 仍作用于减仓后的剩余。
+    for sid in sorted(s.positions):
+        act = (position_actions or {}).get(sid)
+        if act is None:
+            continue
+        # 主体键（`{opportunity_id}@pos:{执行日}`）随动作传入，供「为什么没应用」入账。
+        # 该键与入场机会 id 不同，故不会与 `_mark_applied`/`_settle_marks` 的 missed 匹配
+        # 逻辑相撞（那两处只遍历入场 intents）。
+        key = act.get('subject_key') or ''
+        if sid not in bars:
+            events.append({'type': 'missed', 'session': session, 'security_id': sid,
+                           'opportunity_id': key, 'reason': 'POSITION_NO_BARS'})
+            continue  # 缺行情不动手；账户在阶段 6 记 PROVISIONAL
+        pos = s.positions[sid]
+        if act.get('action') == 'exit':
+            shares, reason = pos.shares, 'REVIEW_EXIT'
+        else:
+            # tier 相对：模板里的绝对数量按「评审主体剩余量」算，而本账户剩余量可能更小
+            # （已减过仓/曾否决入场），故必须按档位作用于本账户当前剩余量。
+            tier = float(act.get('tier') or 0.0)
+            shares = int(pos.shares * tier) if tier > 0 else 0
+            reason = 'REVIEW_REDUCE'
+        if shares <= 0:
+            events.append({'type': 'missed', 'session': session, 'security_id': sid,
+                           'opportunity_id': key, 'reason': 'POSITION_SIZE_ZERO'})
+            continue
+        px = bars[sid]['open']
+        gross = shares * px
+        fee = _fee(gross, fee_bp)
+        s.unsettled_cash += gross - fee  # T+1 结算，与既有三条出场路径一致
+        s.fees += fee
+        if shares >= pos.shares:
+            del s.positions[sid]  # 必须 del：invariants() 要求 shares > 0
+            reason = 'REVIEW_EXIT'
+        else:
+            s.positions[sid] = replace(pos, shares=pos.shares - shares)
+        events.append({**_fill(session, 'SELL', sid, shares, px, fee, reason,
+                               pos.opportunity_id),
+                       'decision_id': act.get('decision_id') or ''})
 
     # 3. 开盘入场（风险定仓 + 五仓 + 去重）
     missing_held = [sid for sid in s.positions if sid not in bars]

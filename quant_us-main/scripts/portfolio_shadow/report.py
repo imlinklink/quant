@@ -5,9 +5,14 @@
 """
 from __future__ import annotations
 
+import json
+
 import pandas as pd
 
-from .llm_overlay import is_program_abstain, model_call_expected, program_abstain_class
+from .llm_overlay import (citation_subjects, is_program_abstain, model_call_expected,
+                          program_abstain_class)
+from .position_overlay import (PATH_CHANGING_ACTIONS, POSITION_HOLD,
+                               POSITION_TIGHTEN_NOT_APPLIED)
 from .store import SHADOW_SCHEMA_VERSION, ShadowStore, state_from_dict
 
 
@@ -25,6 +30,35 @@ def _max_drawdown(navs: list[dict], key: str = 'equity', initial: int | None = N
         peak = max(peak, n[key])
         mdd = min(mdd, (n[key] - peak) / peak)
     return mdd
+
+
+def _cited_subjects(store, scope, key, packet, subject_id) -> dict:
+    """这次决策**实际引用**的证据归属构成（同证券 / 各市场级 / 未知）。
+
+    放宽 `VETO_NO_COMPANY_EVIDENCE` / `POSITION_NO_COMPANY_EVIDENCE` 的配套：不再禁止
+    市场级证据驱动决策，但必须让「这次判断仅由市场级证据支撑」看得见。数据取自冻结包
+    （可用证据）与尝试记录的原始输出（实际引用），不落新字段，故不需要账本 schema 变更。
+    """
+    app = store.application(scope, key)
+    if not app or not app.get('decision_id'):
+        return {}
+    attempt = store.job_run(app['decision_id']) or {}
+    try:
+        raw = json.loads(attempt.get('raw_output') or '{}')
+    except ValueError:
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    ids = list(raw.get('evidence_ids') or [])
+    for field in ('facts', 'inferences', 'counterevidence'):
+        for claim in raw.get(field) or []:
+            ids.extend(claim.get('evidence_ids') or [])
+    return citation_subjects(ids, packet.get('events') or [], subject_id=subject_id)
+
+
+def _market_only(composition: dict) -> bool:
+    """引用非空且**全部**来自市场级。空引用不算 —— 那是没引，不是只引了市场。"""
+    return bool(composition) and set(composition) == {'MARKET'}
 
 
 def daily_report(store: ShadowStore, manifest) -> dict:
@@ -75,6 +109,7 @@ def daily_report(store: ShadowStore, manifest) -> dict:
         by_reason[a.get('reason_code', '')] = by_reason.get(a.get('reason_code', ''), 0) + 1
     report['applications'] = {'by_scope_action': by_scope_action, 'by_reason': by_reason}
     report['entry_metrics'] = entry_metrics(store, manifest)
+    report['position_metrics'] = position_metrics(store, manifest)
     return report
 
 
@@ -231,6 +266,32 @@ def render_markdown(report: dict, paired: dict) -> str:
                          f"（账户照样买入）—— 否决必须兑现，否则等于没发生")
         if metrics.get('note'):
             lines.append(f"- {metrics['note']}")
+    pos = report.get('position_metrics')
+    if pos:
+        lines.append('')
+        lines.append('## 持仓评审（设计 §13 P1）')
+        lines.append(f"- 路径改变率={_pct(pos.get('path_change_rate'))} "
+                     f"（改变 {pos.get('path_changed')} / 模型知情 "
+                     f"{pos.get('model_informed')}）")
+        lines.append(f"- 动作应用率={_pct(pos.get('apply_rate'))} "
+                     f"（已应用 {pos.get('path_applied')} / 改变 "
+                     f"{pos.get('path_changed')}）")
+        lines.append(f"- 漏斗：应评审 {pos.get('eligible')} = 数据拦截 "
+                     f"{pos.get('data_blocked')} + 质量弃权 {pos.get('quality_abstain')} "
+                     f"+ 可评审 {pos.get('callable')}；已评审 {pos.get('reviewed')}"
+                     f"（故障降级 {pos.get('failure_abstains')}）")
+        lines.append(f"- 动作分布：持有 {pos.get('holds')}、收紧不受理 "
+                     f"{pos.get('tighten_not_applied')}；未应用的原因（引擎记的 missed）："
+                     f"缺行情 {pos.get('ignored_no_bars')}、档位不足 1 股 "
+                     f"{pos.get('ignored_size_zero')}")
+        if pos.get('market_only_applications'):
+            lines.append(f"- **依据归属**：{pos['market_only_applications']} 次判断**仅由市场级证据**"
+                         f"支撑（当前证据供给只有市场日报）。这类动作的结论适用范围是"
+                         f"「市场证据驱动的决策」，不得外推为公司基本面判断")
+        lines.append(f"- **归因边界**：R/L 净值差同时包含入场否决与持仓管理两个角色的贡献；"
+                     f"分角色归因需要角色隔离实验（设计 §12），不得把它当作持仓管理的净贡献")
+        if pos.get('note'):
+            lines.append(f"- {pos['note']}")
     return '\n'.join(lines)
 
 
@@ -319,7 +380,7 @@ def entry_metrics(store, manifest) -> dict:
     n = dict(eligible=0, data_blocked=0, quality_abstain=0, callable=0, reviewed=0,
              calls=0, real_reviews=0, fixture_reviews=0, failure_abstains=0,
              model_informed=0, changed=0, veto_applied=0, veto_unapplied=0,
-             approved=0, completed=0, failed_terminal=0)
+             approved=0, completed=0, failed_terminal=0, market_only=0)
     for oid, _body in store.opportunity_rows():
         packet = store.packet_for_opportunity(oid)
         if packet is None:
@@ -328,6 +389,11 @@ def entry_metrics(store, manifest) -> dict:
         app = store.application(l_scope, oid) if l_scope else None
         reason = (app or {}).get('reason_code') or ''
         kind = program_abstain_class(reason)
+        if kind is None and app is not None:
+            # 与 position_metrics 同一披露口径：判断是否仅由市场级证据支撑
+            if _market_only(_cited_subjects(store, l_scope, oid, packet,
+                                            packet.get('security_id') or '')):
+                n['market_only'] += 1
         level = (packet.get('data_quality') or {}).get('level')
         # 机会级分类：包的质量门是「模型能不能被调用」的权威，与账户级 reason 取并集且不重复计
         if level == 'BLOCK' or kind == 'data_blocked':
@@ -388,12 +454,89 @@ def entry_metrics(store, manifest) -> dict:
         'approved_applications': n['approved'],
         'veto_applied': n['veto_applied'],
         'veto_unapplied': n['veto_unapplied'],
+        # 放宽容忍的配套披露：这些判断**只**由市场级证据支撑
+        'market_only_applications': n['market_only'],
         'execution_completed': n['completed'],
         'execution_failed_terminal': n['failed_terminal'],
         'trackable_completion_rate': (((n['completed'] + n['failed_terminal']) / n['approved'])
                                       if n['approved'] else None),
         'note': ('无候选或全部为夹具评审：这不构成失败，也不能冒充已观察到真实 VETO 价值'
                  if n['real_reviews'] == 0 else ''),
+    }
+
+
+def position_metrics(store, manifest) -> dict:
+    """持仓评审指标（设计 §11.3 的 Position 行、§13 P1 验收）。
+
+    口径纪律与 `entry_metrics` 一致：分母一律是「该有判断的对象」，且把**模型有没有参与**
+    与**执行上发生了什么**分成两套数。分母为 0 时返回 None 而不是 0 —— 当前工作区没有任何
+    影子持仓，把「没有对象可评」读成「评了但全部选择持有」会凭空造出结论。
+
+    评审主体是 R 的持仓；动作应用到 L 时按档位相对计算（`paper_engine.step` 的 2.5 阶段），
+    所以这里**不重算数量**，只统计动作级事实与「为什么没应用」。
+    """
+    l_scope = next((s for s in manifest.account_scopes if s.endswith(':L')), None)
+    packets = store.packets_matching('@pos:') if l_scope else []
+    ignored = {}
+    if l_scope:
+        for event in store.events(l_scope):
+            reason = str(event.get('reason') or '')
+            if event.get('type') == 'missed' and reason.startswith('POSITION_'):
+                ignored[reason] = ignored.get(reason, 0) + 1
+    n = dict(eligible=0, reviewed=0, data_blocked=0, quality_abstain=0, callable=0,
+             failure_abstain=0, model_informed=0, changed=0, applied=0, hold=0,
+             tighten_not_applied=0, market_only=0)
+    for key, packet in packets:
+        n['eligible'] += 1
+        app = store.application(l_scope, key) if l_scope else None
+        if app is None:
+            continue                       # 冻结了包但还没有动作，不算已评审
+        n['reviewed'] += 1
+        kind = program_abstain_class(app.get('reason_code') or '')
+        level = (packet.get('data_quality') or {}).get('level')
+        if level == 'BLOCK' or kind == 'data_blocked':
+            n['data_blocked'] += 1
+        elif level == 'LLM_INSUFFICIENT' or kind == 'quality_abstain':
+            n['quality_abstain'] += 1
+        else:
+            n['callable'] += 1
+        if kind == 'failure':
+            n['failure_abstain'] += 1
+        else:
+            # 模型确实参与过判断（不是程序侧弃权）
+            n['model_informed'] += 1
+        if kind is None:
+            # 只有模型**真表过态**时才谈依据归属（程序侧弃权不是表态）：
+            # 披露这次判断是不是仅由市场级证据支撑。
+            code = (packet.get('trade') or {}).get('code') or ''
+            if _market_only(_cited_subjects(store, l_scope, key, packet, code)):
+                n['market_only'] += 1
+        action = app.get('action') or ''
+        if action in PATH_CHANGING_ACTIONS:
+            n['changed'] += 1
+            n['applied'] += app.get('execution_applied') and 1 or 0
+        elif action == POSITION_HOLD:
+            n['hold'] += 1
+        elif action == POSITION_TIGHTEN_NOT_APPLIED:
+            n['tighten_not_applied'] += 1
+    return {
+        'eligible': n['eligible'], 'reviewed': n['reviewed'],
+        'callable': n['callable'], 'data_blocked': n['data_blocked'],
+        'quality_abstain': n['quality_abstain'], 'failure_abstains': n['failure_abstain'],
+        'model_informed': n['model_informed'],
+        'path_changed': n['changed'], 'path_applied': n['applied'],
+        'holds': n['hold'], 'tighten_not_applied': n['tighten_not_applied'],
+        # 放宽容忍的配套披露：这些动作**只**由市场级证据支撑（当前证据供给下的常态）
+        'market_only_applications': n['market_only'],
+        # 执行侧「为什么没应用」：引擎记的 missed 事件，不重算
+        'ignored_no_bars': ignored.get('POSITION_NO_BARS', 0),
+        'ignored_size_zero': ignored.get('POSITION_SIZE_ZERO', 0),
+        'data_block_rate': (n['data_blocked'] / n['eligible']) if n['eligible'] else None,
+        'path_change_rate': ((n['changed'] / n['model_informed'])
+                             if n['model_informed'] else None),
+        'apply_rate': ((n['applied'] / n['changed']) if n['changed'] else None),
+        'note': ('当前没有可评审的持仓：分母为 0 不是失败，也不等于「模型全部选择持有」'
+                 if n['eligible'] == 0 else ''),
     }
 
 

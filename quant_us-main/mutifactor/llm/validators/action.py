@@ -18,6 +18,9 @@ EFFECTIVE_BASELINE = {
     'selection': 'rule_ranking',
     'entry': 'rule_baseline',
     'position': 'hold',
+    # Portfolio 的父策略是规则分配；Review 的父策略是"不改动"
+    'portfolio': 'keep_rule_allocation',
+    'review': 'no_change',
 }
 
 # 伞级权限（决定「LLM 动作是否影响流程」）
@@ -25,6 +28,8 @@ UMBRELLA = {
     'selection': 'selection_rank',
     'entry': 'entry_review',
     'position': 'exit_review',
+    'portfolio': 'portfolio_allocation',
+    'review': 'protocol_review',
 }
 
 # 具体子权限（决定「特定动作能否自动执行」）
@@ -44,6 +49,11 @@ PERMISSION_ACTION_SCOPE = {
     'protection_tighten': ('tighten_protection',),
     'thesis_reduce': ('reduce',),
     'auto_exit_thesis': ('exit',),
+    # Portfolio：四个模板动作都在伞级范围内（具体模板由程序生成，模型只能选）
+    'portfolio_allocation': ('keep_rule_allocation', 'select_ranked_subset',
+                             'reduce_same_group_concentration', 'hold_cash_buffer'),
+    # Review：只能"提出候选/不改动"。**没有**任何能改动配置或权限的动作可被放行。
+    'protocol_review': ('propose_change', 'no_change'),
 }
 
 LEVELS = ('shadow', 'recommend', 'constrained_action', 'disabled')

@@ -29,6 +29,11 @@ from .evidence import (build_entry_packet, entry_collection_time, entry_market_c
 from .entry_review import EntryReviewer
 from .llm_overlay import FakeModel, RealModel
 from .paper_engine import new_account_state, step
+from .position_overlay import (PATH_CHANGING_ACTIONS, POSITION_ABSTAIN,
+                               POSITION_ACTION_SCHEMA_VERSION, FakePositionModel,
+                               PositionRealModel, reduce_tier, subject_key_for)
+from .position_packet import build_position_packet
+from .position_review import PositionReviewer, PositionSubject
 from .replay import replay
 from .schema import Application, Manifest, to_micro
 from .store import ShadowStore, state_from_dict
@@ -264,12 +269,13 @@ def _evidence_source(m, path):
         max_events=int(m.llm_policy['evidence_max_events']))
 
 
-def _make_real_model(m, *, allow_historical=False):
+def _make_real_model(m, *, allow_historical=False, cls=None):
     """构造真实模型客户端。
 
     设计 §7：模型总超时 60 秒，且**关闭客户端隐藏重试** —— 本层只发一次请求，
     重试策略由我们的领取/租约机制决定，不能让客户端在背后悄悄重发。
     `allow_historical` 仅供 `historical_debug`（§9）使用。
+    `cls` 换角色契约（持仓评审用 `PositionRealModel`），前置门与成本语义共用。
     """
     import yaml
     from mutifactor.llm import LLMAdvisor
@@ -277,8 +283,9 @@ def _make_real_model(m, *, allow_historical=False):
     advisor = LLMAdvisor((yaml.safe_load(cfg_path.read_text()) or {}).get('llm', {}))
     advisor.max_retries = 1
     advisor.timeout = 60
-    return RealModel(advisor, knowledge_cutoff=m.llm_policy.get('knowledge_cutoff'),
-                     allow_historical=allow_historical)
+    return (cls or RealModel)(advisor,
+                              knowledge_cutoff=m.llm_policy.get('knowledge_cutoff'),
+                              allow_historical=allow_historical)
 
 
 def drop_from_schedule(schedule: dict, exec_session: str, dropped: set) -> None:
@@ -697,6 +704,381 @@ def _settle_marks(store, scope, res, intents, session) -> list:
     return marks
 
 
+# ---- 持仓评审（影子侧；设计 §13 P1 的连续持仓路径）----
+#
+# 三者与入场三段式同构，分开的理由也相同：结算命令里**没有模型**，评审命令也不读
+# 执行日的结果 —— 让「看到当天结果后补作决策」在结构上不可能。
+#
+# 评审主体是 **R 账户**的持仓：规则决定的，与 L 的历史无关。若主体取 L 自己，模型每次
+# 看到的是「上一次自己决策的结果」，动作序列互相叠加，就无法独立统计了。L 已平掉的
+# 代码在应用时按档位相对计算（见 `paper_engine.step` 的 2.5 阶段），持仓不足 1 股则
+# 由引擎记 `POSITION_SIZE_ZERO` 的 missed 事件 —— 「为什么没应用」必须入账，不得静默丢弃。
+
+def position_overlay_on(m) -> bool:
+    return m.llm_policy.get('position_overlay') == 'position_action'
+
+
+def reviewable_positions(store, m) -> tuple:
+    """R 账户在最近一个已结算 session 的持仓，以及那个 session。
+
+    返回 `({security_id: Position}, last_session)`。`last_session` 由 `settle` 推进；
+    `run-daily` 必须先结算 T 再来准备 T 的评审，否则拿出来的是更早状态的仓位。
+    """
+    r_scope = next(s for s in m.account_scopes if s.endswith(':R'))
+    row = store.latest_state(r_scope)
+    if not row:
+        return {}, None
+    state = state_from_dict(row[1])
+    return dict(state.positions), state.last_session
+
+
+def freeze_position_reviews(store, m, *, session, execution_session, closes, source,
+                            market_cutoff, as_of, evidence_mode, knowledge_cutoff):
+    """为 R 账户每只持仓冻结一个评审包（首次写入即冻结，重跑原样复用）。
+
+    返回 `(frozen, blocked)`；`blocked` 是质量门判为 BLOCK 的条数。BLOCK 的包**照样评审**
+    —— 门会在调用模型之前短路成 `POSITION_ABSTAIN`（零成本，采用父策略），那正是关键数据
+    不可用时应有的安全结果；真正不放行的是「照常持仓」，而弃权恰好就是照常持仓。
+    """
+    positions, _ = reviewable_positions(store, m)
+    l_scope = next(s for s in m.account_scopes if s.endswith(':L'))
+    frozen, blocked = [], 0
+    for sid, pos in sorted(positions.items()):
+        key = subject_key_for(pos.opportunity_id, execution_session)
+        packet = store.packet_for_opportunity(key)
+        if packet is None:
+            fetch = (None if source is None
+                     else source.load_events(sid, as_of, evidence_mode=evidence_mode))
+            events, meta, status = ((list(fetch.events), dict(fetch.meta), fetch.status)
+                                    if fetch is not None
+                                    else ([], {'evidence_mode': evidence_mode},
+                                          'NOT_CONFIGURED'))
+            packet = build_position_packet(
+                security_id=sid, trade={'entry_session': pos.entry_session},
+                protection={'active_stop': pos.stop_micro,
+                            'initial_stop': pos.initial_stop_micro,
+                            'hard_exit_authoritative': True},
+                events=events, as_of=as_of, execution_session=execution_session,
+                account_scope=l_scope, experiment_id=m.experiment_id,
+                opportunity_id=pos.opportunity_id, reviewed_session=session,
+                shares=pos.shares, entry_price_micro=pos.entry_price_micro,
+                mark_price_micro=closes.get(sid), evidence=meta,
+                model_knowledge_cutoff=knowledge_cutoff, fetch_status=status,
+                market_context={'observed_at': market_cutoff})
+            store.put_packet(key, packet)
+        frozen.append((key, packet))
+        if packet['data_quality']['level'] == 'BLOCK':
+            blocked += 1
+    return frozen, blocked
+
+
+def make_position_reviewer(store, m, *, scope, model, real_model=None, debug=False,
+                           model_id=''):
+    """构造 L 侧持仓评审编排者。与入场共用同一条编排路径（设计 §7）。"""
+    if real_model is not None or model == 'real' or debug:
+        factory = (lambda: real_model) if real_model is not None else None
+    else:
+        model_id = model_id or 'fixture'
+        factory = (lambda: FakePositionModel(action=model_parts(model)[0],
+                                             template_id=model_parts(model)[1],
+                                             cost_micro=0, evidence_from_packet=True))
+    return PositionReviewer(store, scope=scope, model_factory=factory, model_id=model_id,
+                            debug=debug)
+
+
+def model_parts(action: str) -> tuple:
+    """fixture 动作 → (Position v2 动作, 模板档位后缀)。"""
+    return {'hold': ('hold', ''), 'exit': ('exit', ''),
+            'reduce_25': ('reduce', ':25'), 'reduce_50': ('reduce', ':50')}.get(
+        action, ('hold', ''))
+
+
+def _subject_from_packet(key: str, packet: dict) -> PositionSubject:
+    """从冻结包还原评审主体。主体键自带执行日，包内 provenance 留了评审日。"""
+    return PositionSubject(
+        opportunity_id=(packet.get('trade') or {}).get('opportunity_id') or '',
+        security_id=(packet.get('identity') or {}).get('security_id') or '',
+        reviewed_session=(packet.get('provenance') or {}).get('reviewed_session') or '',
+        execution_session=(packet.get('provenance') or {}).get('execution_session') or '')
+
+
+def cmd_prepare_position_reviews(args):
+    """`prepare-position-reviews --session T`：冻结 T 收盘时 R 账户每个持仓的评审包。
+
+    只消费截至 T 的输入（**不要求已有 T+1 行情**，设计 §3.1）。执行日 T+1 在此确定，
+    主体键按它定，结算时按执行日直接取回。
+    """
+    import pandas as pd
+    m = manifest_from_dict(json.loads(Path(args.manifest).read_text()))
+    store = ShadowStore(Path(args.output) / m.experiment_id / 'ledger.sqlite3', m.experiment_id)
+    verify_manifest_frozen(store, m)
+    if not position_overlay_on(m):
+        print(json.dumps({'session': args.session, 'positions': 0, 'frozen': 0,
+                          'note': 'position_overlay 未开启'}, ensure_ascii=False))
+        return 0
+    positions, held_session = reviewable_positions(store, m)
+    if held_session != args.session:
+        # 结算没跑到 T，R 的持仓状态不在 T 收盘 —— 按更早的状态冻结评审包，等于用
+        # 当时看不到的仓位做决策。如实报出，不猜。
+        print(json.dumps({'session': args.session, 'positions': len(positions),
+                          'frozen': 0, 'held_session': held_session,
+                          'skipped': 'POSITION_STATE_LAG'}, ensure_ascii=False))
+        return 0
+    if not positions:
+        print(json.dumps({'session': args.session, 'positions': 0, 'frozen': 0,
+                          'execution_session': None}, ensure_ascii=False))
+        return 0
+    prices, _, _, etf_raw = _market_data(getattr(args, 'etf_raw', None))
+    cal = _forward_calendar(sorted(pd.DatetimeIndex(prices.session.unique())), args.session)
+    exec_session = _next_session(cal, args.session)
+    market_cutoff = entry_market_cutoff(args.session)
+    deadline = entry_response_deadline(exec_session or args.session)
+    as_of = entry_collection_time(market_cutoff, deadline)
+    closes = {str(r.security_id): to_micro(r.raw_close)
+              for r in prices[prices.session.eq(pd.Timestamp(args.session))].itertuples(
+                  index=False)}
+    frozen, blocked = freeze_position_reviews(
+        store, m, session=args.session, execution_session=exec_session or args.session,
+        closes=closes, source=_evidence_source(m, getattr(args, 'evidence', None)),
+        market_cutoff=market_cutoff, as_of=as_of,
+        evidence_mode=m.llm_policy.get('evidence_mode', 'strict'),
+        knowledge_cutoff=m.llm_policy.get('knowledge_cutoff'))
+    print(json.dumps({'session': args.session, 'execution_session': exec_session,
+                      'positions': len(frozen), 'frozen': len(frozen),
+                      'data_blocked': blocked}, ensure_ascii=False))
+    return 0
+
+
+def cmd_review_positions(args):
+    """`review-positions --execution-session T1 --model ...`：持仓评审唯一调模型处。"""
+    m = manifest_from_dict(json.loads(Path(args.manifest).read_text()))
+    store = ShadowStore(Path(args.output) / m.experiment_id / 'ledger.sqlite3', m.experiment_id)
+    verify_manifest_frozen(store, m)
+    if not position_overlay_on(m):
+        print(json.dumps({'execution_session': args.execution_session, 'due': 0,
+                          'note': 'position_overlay 未开启'}, ensure_ascii=False))
+        return 0
+    debug = args.model == 'historical_debug'
+    use_real = args.model == 'real'
+    if use_real and not m.llm_policy.get('use_real_model'):
+        raise ValueError('MANIFEST_DOES_NOT_ALLOW_REAL_MODEL:'
+                         'manifest.llm_policy.use_real_model 未开启')
+    real_model = (_make_real_model(m, allow_historical=debug, cls=PositionRealModel)
+                  if (use_real or debug) else None)
+    scope = next(s for s in m.account_scopes if s.endswith(':L'))
+    deadline = entry_response_deadline(args.execution_session)
+    reviewer = make_position_reviewer(
+        store, m, scope=scope, model=getattr(args, 'fixture_action', 'hold'),
+        real_model=real_model, debug=debug,
+        model_id=(m.llm_policy.get('model_id')
+                  or ('real' if use_real else ('historical_debug' if debug else 'fixture'))))
+    due = store.packets_matching(f'@pos:{args.execution_session}')
+    reviewed, in_flight, changed, blocked, insufficient = 0, 0, 0, 0, 0
+    traces = []
+    for key, packet in due:
+        level = (packet.get('data_quality') or {}).get('level')
+        blocked += level == 'BLOCK'
+        insufficient += level == 'LLM_INSUFFICIENT'
+        outcome = reviewer.review(_subject_from_packet(key, packet), packet, deadline)
+        reviewed += 1
+        if not outcome.frozen:
+            in_flight += 1
+        elif outcome.decision.action in PATH_CHANGING_ACTIONS:
+            changed += 1
+        if debug:
+            attempt = store.job_run(outcome.decision_id) or {}
+            traces.append({'subject_key': key, 'decision_id': outcome.decision_id,
+                           'attempt_status': attempt.get('status'),
+                           'raw_output': attempt.get('raw_output'),
+                           'validation_errors': attempt.get('validation_errors'),
+                           'resolved_action': outcome.decision.action,
+                           'resolved_reason': outcome.decision.reason_code,
+                           'model_cost_usd': (None if outcome.decision.cost_uncertain
+                                              else outcome.decision.model_cost / 1e6),
+                           'cost_uncertain': outcome.decision.cost_uncertain})
+    summary = {'execution_session': args.execution_session, 'due': len(due),
+               'reviewed': reviewed, 'in_flight': in_flight,
+               'path_changed': changed, 'data_blocked': blocked,
+               'llm_insufficient': insufficient, 'model': args.model}
+    if debug:
+        summary['historical_debug'] = True
+        summary['applications_written'] = 0
+        summary['traces'] = traces
+    print(json.dumps(summary, ensure_ascii=False, indent=2 if debug else None))
+    return 0
+
+
+def _ensure_position_reviewed(store, scope, subject, deadline, now):
+    """L 侧到期持仓主体必须有已冻结动作；没有时按截止是否已过分别处理。
+
+    与入场的 `_ensure_reviewed` 同一纪律：**绝不静默跳过**。一次调度失败若不留记录，
+    在账户结果上就表现成一次没有记录的「持有」，而 R 也没有对应的动作可以对比。
+    """
+    app = store.application(scope, subject.key())
+    if app is not None:
+        return app
+    if str(now) <= str(deadline):
+        raise ValueError(f'SETTLEMENT_BLOCKED_POSITION_PENDING:{subject.key()}:'
+                         f'deadline={deadline}:now={now}')
+    store.put_application(Application(
+        scope=scope, opportunity_id=subject.key(), action=POSITION_ABSTAIN,
+        reason_code='DECISION_DEADLINE_MISSED', decision_id='', as_of=deadline,
+        decision_frozen=True, execution_applied=False))
+    return store.application(scope, subject.key())
+
+
+def settle_position_intents(store, scope, session, deadline, now) -> dict:
+    """把为 `session` 冻结的持仓动作解析成引擎参数 `{security_id: {...}}`。
+
+    只有真正改变路径的动作（`POSITION_REDUCE_*` / `POSITION_EXIT`）才进入引擎；弃权、
+    HOLD、以及空操作的 tighten 都不改变 L 的持仓（采用父策略）。档位从动作名解析 ——
+    冻结的绝对数量是按**评审主体**（R）的剩余量算的，拿它去卖 L 会过量。
+    """
+    intents, suppressed = {}, {}
+    for key, packet in store.packets_matching(f'@pos:{session}'):
+        subject = _subject_from_packet(key, packet)
+        app = _ensure_position_reviewed(store, scope, subject, deadline, now)
+        action = (app or {}).get('action') or ''
+        if action not in PATH_CHANGING_ACTIONS:
+            suppressed[subject.security_id] = action or 'NO_ACTION'
+            continue
+        intents[subject.security_id] = {
+            'action': 'exit' if action == 'POSITION_EXIT' else 'reduce',
+            'tier': reduce_tier(action),
+            'decision_id': (app or {}).get('decision_id') or '',
+            'subject_key': key}
+    return {'intents': intents, 'suppressed': suppressed}
+
+
+def position_marks(store, scope, res, session) -> list:
+    """结算后要标记为已应用的持仓主体键（设计 §7：动作冻结 ≠ 成交）。
+
+    判据是**已落库的成交事件**里有没有这次决策对应的 `fill` —— 引擎拒掉的那些（缺行情、
+    档位不足 1 股）带有各自的 `missed` 事件，不算成交。冻结了但没成交，正是要区分的两件事。
+    """
+    applied = {e.get('decision_id') for e in res.events
+               if e.get('type') == 'fill' and e.get('side') == 'SELL'
+               and e.get('decision_id')}
+    marks = []
+    for key, _packet in store.packets_matching(f'@pos:{session}'):
+        app = store.application(scope, key)
+        if app and app.get('decision_id') and app['decision_id'] in applied:
+            marks.append({'opportunity_id': key, 'create': None})
+    return marks
+
+
+# ---- 容量分配评审（Portfolio，设计 §6.3）----
+#
+# 三段式与入场/持仓相同，**调用模型不能放进 settle** —— 那条命令的性质是"没有模型"，
+# §9 靠它保证"看到当天结果后补作决策在结构上不可能"。
+
+def portfolio_review_on(m) -> bool:
+    return m.llm_policy.get('portfolio_review') == 'portfolio_action'
+
+
+def portfolio_subject_key(execution_session: str) -> str:
+    from .portfolio_review import subject_key
+    return subject_key(execution_session)
+
+
+def cmd_prepare_portfolio_review(args):
+    """`prepare-portfolio-review --session T`：冻结 T 的容量分配评审包（**不调模型**）。
+
+    只消费截至 T 的输入（不要求已有 T+1 行情）。执行日 T+1 在此确定，主体键按它定，
+    结算时按执行日直接取回。
+    """
+    import pandas as pd
+    m = manifest_from_dict(json.loads(Path(args.manifest).read_text()))
+    store = ShadowStore(Path(args.output) / m.experiment_id / 'ledger.sqlite3', m.experiment_id)
+    verify_manifest_frozen(store, m)
+    if not portfolio_review_on(m):
+        print(json.dumps({'session': args.session, 'consult_required': False,
+                          'note': 'portfolio_review 未开启'}, ensure_ascii=False))
+        return 0
+    prices, _, _, etf_raw = _market_data(getattr(args, 'etf_raw', None))
+    cal = _forward_calendar(sorted(pd.DatetimeIndex(prices.session.unique())), args.session)
+    exec_session = _next_session(cal, args.session)
+    if exec_session is None:
+        print(json.dumps({'session': args.session, 'execution_session': None,
+                          'skipped': 'NO_NEXT_SESSION'}, ensure_ascii=False))
+        return 0
+    rows = prices[prices.session.eq(pd.Timestamp(args.session))]
+    bars = {str(r.security_id): {'open': to_micro(r.raw_open), 'high': to_micro(r.raw_high),
+                                 'low': to_micro(r.raw_low), 'close': to_micro(r.raw_close)}
+            for r in rows.itertuples(index=False)}
+    l_scope = next(s for s in m.account_scopes if s.endswith(':L'))
+    row = store.latest_state(l_scope)
+    state = state_from_dict(row[1]) if row else new_account_state(l_scope, m.initial_cash)
+    from .portfolio_review import prepare
+    packet = prepare(store, m, session=args.session, execution_session=exec_session,
+                     bars=bars, state=state)
+    print(json.dumps({'session': args.session, 'execution_session': exec_session,
+                      'candidates': len(packet['candidates']),
+                      'templates': [t['template_id'] for t in packet['templates']],
+                      'consult_required': packet['consult_required'],
+                      'limits_unavailable': sorted(packet.get('limits_unavailable') or {})},
+                     ensure_ascii=False))
+    return 0
+
+
+def cmd_review_portfolio(args):
+    """`review-portfolio --execution-session T1 --model ...`：容量分配的唯一调模型处。"""
+    m = manifest_from_dict(json.loads(Path(args.manifest).read_text()))
+    store = ShadowStore(Path(args.output) / m.experiment_id / 'ledger.sqlite3', m.experiment_id)
+    verify_manifest_frozen(store, m)
+    if not portfolio_review_on(m):
+        print(json.dumps({'execution_session': args.execution_session, 'reviewed': 0,
+                          'note': 'portfolio_review 未开启'}, ensure_ascii=False))
+        return 0
+    key = portfolio_subject_key(args.execution_session)
+    packet = store.packet_for_opportunity(key)
+    if packet is None:
+        raise ValueError(f'PACKET_NOT_PREPARED:{key}（先跑 prepare-portfolio-review）')
+    if not packet.get('consult_required'):
+        # §6.3：没有容量冲突时默认不调用，避免制造无意义决策。
+        print(json.dumps({'execution_session': args.execution_session, 'reviewed': 0,
+                          'skipped': 'NO_CAPACITY_CONFLICT'}, ensure_ascii=False))
+        return 0
+    l_scope = next(s for s in m.account_scopes if s.endswith(':L'))
+    use_real = args.model == 'real'
+    if use_real and not m.llm_policy.get('use_real_model'):
+        raise ValueError('MANIFEST_DOES_NOT_ALLOW_REAL_MODEL:'
+                         'manifest.llm_policy.use_real_model 未开启')
+    from scripts.live_trading.decision_engine import DecisionEngine
+    engine_kwargs = {}
+    if use_real:
+        import yaml
+        from mutifactor.llm import LLMAdvisor
+        cfg_path = Path(__file__).resolve().parents[2] / 'config.yaml'
+        advisor = LLMAdvisor((yaml.safe_load(cfg_path.read_text()) or {}).get('llm', {}))
+        advisor.max_retries = 1
+        advisor.timeout = 60
+        engine_kwargs['advisor'] = advisor
+    else:
+        def fixture(_contract, packet_inner):
+            return {'schema_version': 'portfolio-v1',
+                    'packet_id': packet_inner.get('packet_id'), 'status': 'complete',
+                    'chosen_template_id': 'keep_rule_allocation', 'reason_codes': [],
+                    'facts': [], 'inferences': [], 'counterevidence': [],
+                    'missing_information': ['夹具模型：采用规则分配']}
+        engine_kwargs['call_model'] = fixture
+    result = DecisionEngine(store.registry, config={}, **engine_kwargs).decide_portfolio(packet)
+    applied = result.effective_action
+    if result.status == 'validated' and applied:
+        store.put_application(Application(
+            scope=l_scope, opportunity_id=key, action=applied,
+            reason_code='PORTFOLIO_ALLOCATION', decision_id=result.decision_id,
+            as_of=packet['context']['as_of'], decision_frozen=True,
+            execution_applied=False, raw_action=result.model_action or '',
+            attempt_id=result.attempt_id or ''))
+    summary = {'execution_session': args.execution_session, 'reviewed': 1,
+               'status': result.status, 'model_action': result.model_action,
+               'effective_action': applied, 'permission_level': result.permission_level,
+               'validation_errors': list(result.validation_errors or ()), 'model': args.model}
+    print(json.dumps(summary, ensure_ascii=False))
+    return 0
+
+
 def cmd_settle_session(args):
     """`settle-session --session T1`：消费已冻结动作与当日行情，推进 R/L 并出报告（§9）。
 
@@ -720,11 +1102,14 @@ def cmd_settle_session(args):
     due = [_opportunity_from_dict(o) for o in store.opportunities()
            if o.get('planned_execution_session') == session]
     executed = 0
+    portfolio_dropped_total = 0
     for scope in m.account_scopes:
         row = store.latest_state(scope)
         saved = row[1] if row else None
         state = state_from_dict(saved) if saved else new_account_state(scope, m.initial_cash)
         is_l = scope.endswith(':L') and m.llm_policy.get('overlay') == 'entry_veto'
+        # 持仓 overlay 与入场 overlay 是两个独立开关（角色级权限，设计 §12）
+        pos_overlay = scope.endswith(':L') and position_overlay_on(m)
         # 1) 先解析每个到期机会的最终动作：L 侧缺动作时按截止冻结 ABSTAIN 或阻塞结算
         resolved = {
             opp.opportunity_id(): (
@@ -735,39 +1120,68 @@ def cmd_settle_session(args):
         cost, uncertain = _settle_cost(resolved) if is_l else (0, [])
         # 3) 计划进入引擎的机会
         intents = _settle_intents(due, resolved)
+        # 3.5) 容量分配：按已冻结的 Portfolio 分配筛选 L 侧 intents。
+        #      **没有冻结分配时原样放行**（未启用/无冲突/窗口错过）—— 那不该表现成
+        #      "模型选择少买"。Portfolio 权限为 shadow 时 effective_action 是父策略，
+        #      与不开启逐字节相同（由测试钉死）。
+        portfolio_dropped = 0
+        if scope.endswith(':L') and portfolio_review_on(m):
+            from .portfolio_review import filter_intents
+            intents, dropped = filter_intents(store, scope, session, intents)
+            portfolio_dropped = len(dropped)
+            portfolio_dropped_total += portfolio_dropped
+        # 4) 持仓评审动作：同样先确保「到期必须有已冻结动作」，再交给引擎按档位应用。
+        #    必须在 step 之前解析（阻塞/冻结纪律与入场一致：绝不静默跳过）。
+        position_actions = (settle_position_intents(store, scope, session, deadline,
+                                                    now)['intents']
+                            if pos_overlay else {})
         res = step(state, session=session, bars=bars, corporate_actions=acts,
                    intents=intents, manifest=m, model_cost=cost,
-                   model_cost_uncertain=tuple(uncertain))
+                   model_cost_uncertain=tuple(uncertain),
+                   position_actions=position_actions or None)
+        pos_marks = (position_marks(store, scope, res, session) if pos_overlay else [])
         if res.nav is None:
             # 已处理过：账户不重复推进，但**补做归因**（上次可能崩在状态与标记之间）。
             # 用**已落库的成交事件**判断谁真的成交了，而不是拿内存里的 intents 猜。
             done = store.executed_opportunities(scope, session)
             executed += len(done)
-            if done:
+            if done or pos_marks:
                 store.save_state(scope, res.state, None, [], session=session,
                                  applied_marks=[{'opportunity_id': oid, 'create': None}
-                                                for oid in sorted(done)])
+                                                for oid in sorted(done)] + pos_marks)
             continue
         # 状态、事件与归因标记**同事务**提交，不留「已成交但未标记」的窗口
         store.save_state(scope, res.state, res.nav, res.events, session=session,
-                         applied_marks=_settle_marks(store, scope, res, intents, session))
+                         applied_marks=(_settle_marks(store, scope, res, intents, session)
+                                        + pos_marks))
         executed += len(intents)
     # 机会终态在结算时收口（run-forward 有，settle 原先漏了）
     _settle_terminals(store, m.account_scopes, due, session)
-    print(json.dumps({'session': session, 'due': len(due), 'intents_applied': executed},
+    print(json.dumps({'session': session, 'due': len(due), 'intents_applied': executed,
+                      'portfolio_dropped': portfolio_dropped_total},
                      ensure_ascii=False))
     return 0
 
 
-def sessions_to_settle(store, target: str, last_settled: str | None) -> list:
-    """该由本次运行结算的 session：**只取有机会排期**的日子，且晚于上次已结算的。
+def sessions_to_settle(target: str, last_settled: str | None, *, data_sessions,
+                       floor: str | None = None) -> list:
+    """该由本次运行结算的 session：`(max(last_settled, floor), target]` 内的**全部**交易日。
 
-    按全部历史 session 扫会把 ~2900 个交易日各跑一遍（每个都要重载行情），首次运行直接
-    卡死；没有排期的日子本来也无事可做。
+    **不能只取「有机会排期」的日子**（原实现取 `{o.planned_execution_session}`）：`step`
+    每会话才推进一次持有计数，并检查跳空止损/拆股/分红/时间退出。漏掉的日子会让 60 会话
+    时间退出整体推迟，并把那些日子里本该触发的退出整段丢掉。
+
+    2026-09-19 实测的形态：生产实验的 R/L 都停在 `last_session=2026-09-17` 且持有 LITE，
+    而 09-18 已收盘、数据就绪门也是 READY —— 那天没有入场排期，于是整个交易日没人处理它。
+
+    下界有两个，语义不同：`last_settled` 是**已结算**（严格晚于它才做），`floor` 是
+    「不要早于这里」（**含**端点 —— 传实验的 `start_session`，它的账户就是从那天起算的，
+    排在当天的机会必须能被结算）。首次运行时由 `floor` 收住，不会把全部历史各扫一遍。
     """
-    due = sorted({(o or {}).get('planned_execution_session')
-                  for o in store.opportunities()} - {None})
-    return [d for d in due if d <= target and (last_settled is None or d > last_settled)]
+    return [s for s in data_sessions
+            if s <= target
+            and (last_settled is None or s > last_settled)
+            and (floor is None or s >= floor)]
 
 
 def last_settled_session(store, scopes) -> str | None:
@@ -832,8 +1246,10 @@ def cmd_run_daily(args):
               'now': now, 'phase_deadline': deadline, 'steps': {}}
 
     # ① 结算：补做上次运行以来所有有行情但未结算的 session（settle 本身幂等）
-    to_settle = sessions_to_settle(store, target,
-                                   last_settled_session(store, m.account_scopes))
+    #    必须是**全部交易日**而非仅有入场排期的日子 —— 每个 session 都要推进持有计数并
+    #    检查跳空止损/拆股/分红/时间退出，漏掉的日子会让这些全部错位。
+    to_settle = sessions_to_settle(target, last_settled_session(store, m.account_scopes),
+                                   data_sessions=data_sessions, floor=m.start_session)
     for day in to_settle:
         _capture(cmd_settle_session, manifest=args.manifest, output=args.output,
                  session=day, etf_raw=etf_raw)
@@ -857,6 +1273,45 @@ def cmd_run_daily(args):
     if prepared.get('opportunities') == 0:
         # 无候选不是失败，但必须如实记录，不能制造候选或强行调用模型（设计 §4）
         result['steps']['no_opportunities'] = True
+
+    # ③.5 持仓评审：与入场共用同一决策窗口与截止。动作同样在 T 收盘冻结、T+1 开盘应用；
+    #      错过截止不补，留给 settle 按 §3.3 冻结 POSITION_ABSTAIN/DECISION_DEADLINE_MISSED。
+    if not position_overlay_on(m):
+        result['steps']['position_review'] = {'skipped': 'OVERLAY_OFF'}
+    elif exec_session is None:
+        result['steps']['position_review'] = {'skipped': 'NO_NEXT_SESSION'}
+    elif now > deadline:
+        result['steps']['position_review'] = {
+            'skipped': 'DECISION_WINDOW_MISSED', 'deadline': deadline,
+            'note': 'settle 会按 §3.3 冻结 POSITION_ABSTAIN/DECISION_DEADLINE_MISSED'}
+    else:
+        result['steps']['position_review'] = {
+            'prepare': _capture(cmd_prepare_position_reviews, manifest=args.manifest,
+                                output=args.output, session=target,
+                                evidence=getattr(args, 'evidence', None), etf_raw=etf_raw),
+            'review': _capture(cmd_review_positions, manifest=args.manifest,
+                               output=args.output, execution_session=exec_session,
+                               model=args.model,
+                               fixture_action=getattr(args, 'position_fixture_action',
+                                                      'hold'))}
+
+    # ③.6 容量分配评审：与入场/持仓共用同一决策窗口与截止。三层顺序有意义 ——
+    #      先由 prepare-entry-reviews(T) 落好 T+1 的机会，Portfolio 才有候选可分。
+    if not portfolio_review_on(m):
+        result['steps']['portfolio_review'] = {'skipped': 'OVERLAY_OFF'}
+    elif exec_session is None:
+        result['steps']['portfolio_review'] = {'skipped': 'NO_NEXT_SESSION'}
+    elif now > deadline:
+        result['steps']['portfolio_review'] = {
+            'skipped': 'DECISION_WINDOW_MISSED', 'deadline': deadline,
+            'note': 'Portfolio 无冻结分配时 settle 原样放行（不改变 L 的行为）'}
+    else:
+        result['steps']['portfolio_review'] = {
+            'prepare': _capture(cmd_prepare_portfolio_review, manifest=args.manifest,
+                                output=args.output, session=target, etf_raw=etf_raw),
+            'review': _capture(cmd_review_portfolio, manifest=args.manifest,
+                               output=args.output, execution_session=exec_session,
+                               model=args.model)}
 
     # ④ 评审 T+1：只在截止之前做；错过就留给 settle 按规则冻结 ABSTAIN
     if exec_session is None:
@@ -1041,6 +1496,10 @@ def main(argv=None):
                      ('run-daily', cmd_run_daily),
                      ('prepare-entry-reviews', cmd_prepare_entry_reviews),
                      ('review-entries', cmd_review_entries),
+                     ('prepare-position-reviews', cmd_prepare_position_reviews),
+                     ('review-positions', cmd_review_positions),
+                     ('prepare-portfolio-review', cmd_prepare_portfolio_review),
+                     ('review-portfolio', cmd_review_portfolio),
                      ('settle-session', cmd_settle_session)):
         p = sub.add_parser(name)
         if name == 'import-evidence':
@@ -1070,9 +1529,26 @@ def main(argv=None):
             p.add_argument('--fixture-action', choices=('PASS', 'VETO', 'ABSTAIN'),
                            default='PASS',
                            help='fixture 模型的动作（设计 §11 的确定性 VETO 验收用）')
+        if name == 'prepare-position-reviews':
+            p.add_argument('--session', required=True)
+            p.add_argument('--evidence', help='已导入的规范证据存储')
+        if name == 'review-positions':
+            p.add_argument('--execution-session', required=True)
+            p.add_argument('--model', choices=('real', 'fixture', 'historical_debug'),
+                           default='fixture')
+            p.add_argument('--fixture-action',
+                           choices=('hold', 'reduce_25', 'reduce_50', 'exit'),
+                           default='hold',
+                           help='fixture 模型的持仓动作（确定性验收用）')
+        if name == 'prepare-portfolio-review':
+            p.add_argument('--session', required=True)
+        if name == 'review-portfolio':
+            p.add_argument('--execution-session', required=True)
+            p.add_argument('--model', choices=('real', 'fixture'), default='fixture')
         if name == 'settle-session':
             p.add_argument('--session', required=True)
-        if name in ('prepare-entry-reviews', 'settle-session', 'run-daily'):
+        if name in ('prepare-entry-reviews', 'prepare-position-reviews',
+                    'prepare-portfolio-review', 'settle-session', 'run-daily'):
             p.add_argument('--etf-raw', help='活的 ETF 快照（交易日历与市场门来源）')
         if name == 'run-daily':
             p.add_argument('--session', help='默认取最新有行情的 session')
@@ -1080,6 +1556,9 @@ def main(argv=None):
             p.add_argument('--model', choices=('real', 'fixture'), default='real')
             p.add_argument('--fixture-action', choices=('PASS', 'VETO', 'ABSTAIN'),
                            default='PASS')
+            p.add_argument('--position-fixture-action',
+                           choices=('hold', 'reduce_25', 'reduce_50', 'exit'),
+                           default='hold', help='持仓评审的 fixture 动作')
         if name == 'report':
             p.add_argument('--trace', action='append',
                            help='要展开的 opportunity_id（可重复）')

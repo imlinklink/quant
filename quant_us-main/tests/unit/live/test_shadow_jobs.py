@@ -57,6 +57,7 @@ class ShadowJobTests(unittest.TestCase):
     def test_scheduler_runs_setup_after_selection_failure(self):
         from datetime import datetime
         from scripts.live_trading.outcome_scheduler import OutcomeSchedulerThread
+        from scripts.live_trading.protocol_review import ProtocolReviewScheduler
         from scripts.live_trading.review_scheduler import ReviewScheduler
         registry = self.events.registry
         config = {'buy_strategy_v2': {'enabled': True, 'mode': 'shadow'},
@@ -64,6 +65,10 @@ class ShadowJobTests(unittest.TestCase):
         worker = OutcomeSchedulerThread.__new__(OutcomeSchedulerThread)
         worker.scheduler = ReviewScheduler(registry, config)
         worker.jobs = self.jobs
+        # `__new__` 绕过了 `__init__`，协作者要显式给全 —— 缺一个就会在 tick 里
+        # AttributeError，而不是"安静地跳过"（后者更糟）。
+        worker.config = config
+        worker.protocol_reviewer = ProtocolReviewScheduler(registry, config)
         calls = []
         worker._selection = lambda day: calls.append('selection') or 1
         worker.setup_runner = lambda: calls.append('setup') or 0
@@ -83,6 +88,7 @@ class ShadowJobTests(unittest.TestCase):
     def test_scheduler_isolates_selection_exception(self):
         from datetime import datetime
         from scripts.live_trading.outcome_scheduler import OutcomeSchedulerThread
+        from scripts.live_trading.protocol_review import ProtocolReviewScheduler
         from scripts.live_trading.review_scheduler import ReviewScheduler
         registry = self.events.registry
         config = {'buy_strategy_v2': {'enabled': True, 'mode': 'shadow'},
@@ -90,6 +96,10 @@ class ShadowJobTests(unittest.TestCase):
         worker = OutcomeSchedulerThread.__new__(OutcomeSchedulerThread)
         worker.scheduler = ReviewScheduler(registry, config)
         worker.jobs = self.jobs
+        # `__new__` 绕过了 `__init__`，协作者要显式给全 —— 缺一个就会在 tick 里
+        # AttributeError，而不是"安静地跳过"（后者更糟）。
+        worker.config = config
+        worker.protocol_reviewer = ProtocolReviewScheduler(registry, config)
         calls = []
         worker._selection = lambda day: (_ for _ in ()).throw(RuntimeError('boom'))
         worker.setup_runner = lambda: calls.append('setup') or 0

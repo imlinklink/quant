@@ -10,7 +10,11 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from scripts.portfolio_shadow.cli import (cmd_prepare_entry_reviews, cmd_review_entries,
+from scripts.portfolio_shadow.cli import (cmd_prepare_entry_reviews,
+                                          cmd_prepare_portfolio_review,
+                                          cmd_prepare_position_reviews,
+                                          cmd_review_entries, cmd_review_portfolio,
+                                          cmd_review_positions,
                                           cmd_run_daily, cmd_run_forward, cmd_run_session,
                                           cmd_settle_session, manifest_from_dict)
 from scripts.portfolio_shadow.store import ShadowStore
@@ -79,6 +83,15 @@ class FreezeIntegrityTests(unittest.TestCase):
             'review': lambda: cmd_review_entries(SimpleNamespace(
                 **base, execution_session='2026-01-06', model='fixture',
                 fixture_action='PASS')),
+            'prepare-position': lambda: cmd_prepare_position_reviews(SimpleNamespace(
+                **base, session='2026-01-06', evidence=None, etf_raw=None)),
+            'review-position': lambda: cmd_review_positions(SimpleNamespace(
+                **base, execution_session='2026-01-06', model='fixture',
+                fixture_action='hold')),
+            'prepare-portfolio': lambda: cmd_prepare_portfolio_review(SimpleNamespace(
+                **base, session='2026-01-06', etf_raw=None)),
+            'review-portfolio': lambda: cmd_review_portfolio(SimpleNamespace(
+                **base, execution_session='2026-01-06', model='fixture')),
             'settle': lambda: cmd_settle_session(SimpleNamespace(
                 **base, session='2026-01-06', etf_raw=None)),
             'run-session': lambda: cmd_run_session(SimpleNamespace(

@@ -222,11 +222,17 @@ class RunDailyGateTests(unittest.TestCase):
             calls.append(ns)
             print(json.dumps(prepare_result))
 
+        def fake_settle(ns):
+            # 结算现在会覆盖**每个交易日**（不再只跑有入场排期的日子），假实现照
+            # `_capture` 的契约打印一行 JSON。
+            print(json.dumps({'session': ns.session, 'due': 0, 'intents_applied': 0}))
+
         buf = io.StringIO()
         with patch('scripts.portfolio_shadow.cli._market_data',
                    return_value=(self.prices, None, None, None)), \
              patch('scripts.portfolio_shadow.cli._data_gate', return_value=gate_verdict), \
              patch('scripts.portfolio_shadow.cli.cmd_prepare_entry_reviews', fake_prepare), \
+             patch('scripts.portfolio_shadow.cli.cmd_settle_session', fake_settle), \
              redirect_stdout(buf):
             rc = cmd_run_daily(args)
         return rc, json.loads(buf.getvalue()), calls

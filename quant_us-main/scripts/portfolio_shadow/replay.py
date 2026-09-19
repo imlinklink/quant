@@ -73,7 +73,13 @@ def apply_event(state: AccountState, event: dict) -> AccountState:
             gross = event['shares'] * event['price_micro']
             s.unsettled_cash += gross - event['fee_micro']
             s.fees += event['fee_micro']
-            s.positions.pop(sid, None)
+            pos = s.positions.get(sid)
+            if pos is not None and event['shares'] < pos.shares:
+                # 部分卖出（持仓评审减仓）：保留剩余持仓，与 paper_engine.step 一致。
+                # 全量卖出行为不变——仍是删除持仓。
+                s.positions[sid] = replace(pos, shares=pos.shares - event['shares'])
+            else:
+                s.positions.pop(sid, None)
     return s
 
 

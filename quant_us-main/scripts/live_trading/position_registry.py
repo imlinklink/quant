@@ -16,6 +16,7 @@ class PositionRegistry:
             raise RuntimeError('禁止同一进程混用交易账户/环境')
         self.namespace = namespace
 
+
     @contextmanager
     def transaction(self, approval=None):
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -84,3 +85,22 @@ class PositionRegistry:
 
 
 REGISTRY = PositionRegistry()
+
+
+def registry_for(config, path=None, scope=None):
+    """按配置解析出账本的 namespace 再开注册表。
+
+    **默认 namespace 是 `'unconfigured'`**，而事件实际写在
+    `llm_decision.engine_v2.account_scope`（通常是 `DRY-RUN`）下。命令行工具若用默认值
+    打开同一份 sqlite，会按错的 scope 过滤 —— 结果是**空清单，且看不出原因**。
+
+    定义在**模块末尾**：放在类中间会把其后的方法变成它的嵌套函数（缩进恰好接得上，
+    不报语法错，只表现为属性凭空消失）。
+    """
+    resolved = (scope
+                or (((config or {}).get('llm_decision') or {}).get('engine_v2') or {}
+                    ).get('account_scope'))
+    if not resolved:
+        raise ValueError('ACCOUNT_SCOPE_UNRESOLVED:'
+                         '配置里没有 llm_decision.engine_v2.account_scope，请用 --scope 指定')
+    return PositionRegistry(path, resolved)

@@ -150,9 +150,13 @@ def validate_selection_v4(raw: Dict[str, Any], universe: List[str],
         packet = by_code.get(code)
         if packet is not None:
             index = _evidence_index(packet)
+            identity = packet.get('identity') or {}
+            allowed_subjects = {v for v in (identity.get('sector'),
+                                             identity.get('risk_group')) if v}
             for claims_field in ('thesis', 'counterevidence'):
                 errs = validate_claims(item.get(claims_field, []), index, code, 'selection',
-                                       as_of or '2999-01-01T00:00:00+00:00')
+                                       as_of or '2999-01-01T00:00:00+00:00',
+                                       allowed_subjects)
                 errors.extend(f'{code} {claims_field}: {e}' for e in errs)
             # high confidence 需 ≥2 独立 cluster
             if item.get('confidence') == 'high':
@@ -197,9 +201,43 @@ evidence_ids 至少一个，只能复制当前股票输入 evidence 中存在的
 
 
 def build_selection_prompt(packet: Dict[str, Any]) -> str:
-    """把冻结输入包序列化为模型 user prompt。"""
+    """把冻结输入包序列化为模型 user prompt。
+
+    JSON Schema 在 prompt 层约束为本次 packet 中实际存在的 ID；**并且按股票分别约束**。
+
+    之前只给了一个**全部股票扁平合并**的 `enum`，而校验层是按每只股票独立索引检查的
+    （`validate_claims(..., _evidence_index(by_code[code]), code, ...)`，且 `evidence_id`
+    由 `stable_id('evidence', code, source_id)` 按代码做了命名空间）。两者矛盾：系统提示
+    写着"只能复制当前股票 evidence 中的 evidence_id"，schema 却把别的股票的 ID 一并列为合法。
+    实测生产里正是这样失败的：US.SNDK 的证据被用在 US.MU 的 counterevidence 上 → 逐条拒为
+    「引用不存在」。校验是 fail-closed，**一条这样的引用就足以让整批决策失败**。
+    """
+    import copy
+    schema = copy.deepcopy(SELECTION_V4_SCHEMA)
+    per_code = {s.get('code'): sorted({e.get('evidence_id') for e in s.get('evidence', [])
+                                       if e.get('evidence_id')})
+                for s in packet.get('stocks', []) if s.get('code')}
+    all_ids = sorted({eid for ids in per_code.values() for eid in ids})
+    claim_schemas = [
+        schema['properties']['market_view']['properties']['claims']['items'],
+        schema['properties']['ranked']['items']['properties']['thesis']['items'],
+        schema['properties']['ranked']['items']['properties']['counterevidence']['items'],
+    ]
+    for claim_schema in claim_schemas:
+        claim_schema['properties']['evidence_ids']['items'] = {'enum': all_ids}
+    # 每只 ranked 条目再按自己的 code 收紧到本股票的证据集合。与上面的全局 enum 是 allOf
+    # 关系（取交集），故合起来即"只能用本股票的 ID"；不在映射里的 code 仍受全局闭集约束。
+    ranked_item = schema['properties']['ranked']['items']
+    ranked_item['allOf'] = [
+        {'if': {'properties': {'code': {'const': code}}, 'required': ['code']},
+         'then': {'properties': {
+             'thesis': {'items': {'properties': {
+                 'evidence_ids': {'items': {'enum': ids}}}}},
+             'counterevidence': {'items': {'properties': {
+                 'evidence_ids': {'items': {'enum': ids}}}}}}}}
+        for code, ids in sorted(per_code.items())]
     return json.dumps({'decision_type': 'selection_decision', 'input': packet,
-                       'output_schema': SELECTION_V4_SCHEMA}, ensure_ascii=False)
+                       'output_schema': schema}, ensure_ascii=False)
 
 
 def validate_selection_packet(raw: Dict[str, Any], packet: Dict[str, Any]) -> List[str]:
