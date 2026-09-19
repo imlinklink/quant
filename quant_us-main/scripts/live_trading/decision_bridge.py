@@ -433,6 +433,12 @@ def build_review_packet(*, sample_groups: List[Dict[str, Any]],
         'sample_groups': [dict(g) for g in sample_groups],
         'role_stats': dict(role_stats),
         'changeable_variables': sorted(set(_changeable_variables())),
+        # 每个变量**允许的方向**也得给模型：校验器强制它（如 `single_position_risk_bp`
+        # 只允许 `decrease`），而系统提示只说"取自白名单" —— 模型提一个方向非法的合理改动
+        # （"单笔风险太低，调高"）就会让**整条决策失败**。与 entry/position 的原因码闭集
+        # 是同一形态：校验器强制的，提示词没说。派生自同一常量，不另抄一份。
+        'changeable_variable_directions': {k: list(v) for k, v in
+                                           sorted(_changeable_variables().items())},
     }
     # 内容寻址：校验器按 packet_id 绑包。**只有一处定义** —— 调用方不得再算第二份，
     # 两份算法一旦不同，绑定就会静默错位。

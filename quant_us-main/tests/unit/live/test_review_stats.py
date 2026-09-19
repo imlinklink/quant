@@ -233,6 +233,23 @@ class PacketContractTests(StatsBase):
                                      as_of='2026-09-19T00:00:00+00:00')
         self.assertNotEqual(first['packet_id'], second['packet_id'])
 
+    def test_packet_carries_the_allowed_direction_per_variable(self):
+        """每个变量的**允许方向**必须进包。
+
+        校验器强制方向（`single_position_risk_bp` 只允许 `decrease`），而系统提示原先只说
+        "取自白名单" —— 模型提一个方向非法的合理改动（"单笔风险太低，调高"）会让**整条决策
+        失败**。与 entry/position 的原因码闭集是同一形态：**校验器强制的，提示词没说**。
+        派生自同一常量，所以这里同时钉死"不另抄一份"。
+        """
+        from mutifactor.llm.contracts.review_v1 import CHANGEABLE_VARIABLES
+        packet = build_review_packet(self.registry, protocol_version='v1',
+                                     account_scope='DRY-RUN', subject_id='r-dir',
+                                     as_of='2026-09-19T00:00:00+00:00')
+        directions = packet['changeable_variable_directions']
+        self.assertEqual(set(directions), set(CHANGEABLE_VARIABLES))
+        for variable, allowed in CHANGEABLE_VARIABLES.items():
+            self.assertEqual(list(directions[variable]), list(allowed))
+
 
 if __name__ == '__main__':
     unittest.main()

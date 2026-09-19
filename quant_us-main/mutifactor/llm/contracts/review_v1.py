@@ -113,6 +113,8 @@ REVIEW_SYSTEM = (
     '硬性要求：\n'
     '- `proposed_change.variable` 只能取给定的可变更白名单里的**一个**变量；'
     '改多个变量会让效果无法归因，一律视为无效输出。\n'
+    '- `proposed_change.direction` 必须落在该变量在 `changeable_variable_directions` 里'
+    '允许的方向内 —— 方向非法的改动（例如提案调高单笔风险）一律无效。\n'
     '- 必须给出 `validation_plan`：观察窗口（会话数）、最低样本数、**停止条件**。'
     '没有停止条件的假设不算假设。\n'
     '- 必须给出 `possible_regression`：这个改动可能让哪个指标变差。只讲好处的建议是无效的。\n'
