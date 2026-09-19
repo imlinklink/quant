@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from typing import Optional
 
 from mutifactor.llm.contracts.position_v2 import (POSITION_DECISION_SCHEMA,
                                                   POSITION_SYSTEM,
@@ -200,12 +201,16 @@ class PositionRealModel(RealModel):
 class FakePositionModel:
     """确定性测试模型：可注入动作与成本，无网络。"""
 
-    def __init__(self, action='hold', *, template_id='', reason_code='',
+    def __init__(self, action='hold', *, template_id='', tier=None, reason_code='',
                  evidence_from_packet=False, cost_micro=100, status='OK',
                  completed_at='2026-01-02T00:00:00+00:00', cost_uncertain=False,
                  thesis_state='CONFIRMED'):
         self.action = action
         self.template_id = template_id
+        # 减仓档位：由夹具在**包里**解析出真实模板 id。模板 id 形如
+        # `US.AAPL@2026-01-05:reduce:25`，把后缀 `':25'` 当 id 传会被校验器判
+        # 「模板不存在」⇒ 整个决策降级 ABSTAIN，夹具动作静默失效。
+        self.tier = tier
         # 默认空：原因码必须是 position 角色的合法取值（`reason_codes.valid_for_role`），
         # 给一个像 'POSITION_REVIEW' 这样的自造值会被校验器拒，让测试看起来像别的问题。
         self.reason_code = reason_code
@@ -215,6 +220,17 @@ class FakePositionModel:
         self.completed_at = completed_at
         self.cost_uncertain = cost_uncertain
         self.thesis_state = thesis_state
+
+    def _resolve_template(self, packet: dict) -> Optional[str]:
+        """按 action（+ 档位）从包的 `allowed_actions` 里解析出真实模板 id。"""
+        for template in packet.get('allowed_actions') or []:
+            if template.get('action') != self.action:
+                continue
+            if self.tier is not None and (template.get('constraints') or {}).get(
+                    'tier') != self.tier:
+                continue
+            return template.get('template_id')
+        return None
 
     def call(self, packet: dict, deadline: str) -> dict:
         evidence_ids = []
@@ -237,7 +253,8 @@ class FakePositionModel:
             'status': 'complete',
             'thesis_state': self.thesis_state,
             'action': self.action,
-            'action_template_id': self.template_id or None,
+            'action_template_id': (self.template_id
+                                   or self._resolve_template(packet) or None),
             'confidence': 'medium',
             'reason_codes': [self.reason_code] if self.reason_code else [],
             'facts': [claim] if evidence_ids else [],

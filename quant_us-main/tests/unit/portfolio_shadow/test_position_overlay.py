@@ -351,3 +351,45 @@ class ReviewerTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class FixtureTemplateResolutionTests(unittest.TestCase):
+    """夹具必须**从包里解析出真实模板 id**，不能用后缀冒充。
+
+    回归背景：`model_parts` 曾把 `':25'` 当模板 id 传给夹具，而真实 id 形如
+    `US.AAPL@2026-01-05:reduce:25` ⇒ 校验器判「模板不存在」⇒ 整个决策降级
+    ABSTAIN —— `--fixture-action reduce_25` 从来就没生效过，且**不报错**。
+    """
+
+    def test_tier_resolves_to_a_real_template_id(self):
+        packet = build_packet()
+        model = FakePositionModel(action='reduce', tier=0.25, evidence_from_packet=True)
+        out = model.call(packet, '2026-01-06T14:20:00+00:00')['output']
+        ids = {t['template_id'] for t in packet['allowed_actions']}
+        self.assertIn(out['action_template_id'], ids)
+        ok, errors = validate_position_output(out, packet)
+        self.assertTrue(ok, errors)
+
+    def test_the_resolved_template_carries_the_requested_tier(self):
+        packet = build_packet()
+        model = FakePositionModel(action='reduce', tier=0.5, evidence_from_packet=True)
+        out = model.call(packet, '2026-01-06T14:20:00+00:00')['output']
+        template = next(t for t in packet['allowed_actions']
+                        if t['template_id'] == out['action_template_id'])
+        self.assertEqual(template['constraints']['tier'], 0.5)
+
+    def test_an_explicit_template_id_still_wins(self):
+        packet = build_packet()
+        wanted = next(t['template_id'] for t in packet['allowed_actions']
+                      if t.get('constraints', {}).get('tier') == 0.25)
+        model = FakePositionModel(action='reduce', template_id=wanted,
+                                  evidence_from_packet=True)
+        out = model.call(packet, '2026-01-06T14:20:00+00:00')['output']
+        self.assertEqual(out['action_template_id'], wanted)
+
+    def test_cli_fixture_action_maps_to_a_tier_not_a_suffix(self):
+        from scripts.portfolio_shadow.cli import model_parts
+        self.assertEqual(model_parts('reduce_25'), ('reduce', 0.25))
+        self.assertEqual(model_parts('reduce_50'), ('reduce', 0.5))
+        self.assertEqual(model_parts('exit'), ('exit', None))
+        self.assertEqual(model_parts('hold'), ('hold', None))

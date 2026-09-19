@@ -779,18 +779,23 @@ def make_position_reviewer(store, m, *, scope, model, real_model=None, debug=Fal
         factory = (lambda: real_model) if real_model is not None else None
     else:
         model_id = model_id or 'fixture'
-        factory = (lambda: FakePositionModel(action=model_parts(model)[0],
-                                             template_id=model_parts(model)[1],
+        fixture_action, tier = model_parts(model)
+        factory = (lambda: FakePositionModel(action=fixture_action, tier=tier,
                                              cost_micro=0, evidence_from_packet=True))
     return PositionReviewer(store, scope=scope, model_factory=factory, model_id=model_id,
                             debug=debug)
 
 
 def model_parts(action: str) -> tuple:
-    """fixture 动作 → (Position v2 动作, 模板档位后缀)。"""
-    return {'hold': ('hold', ''), 'exit': ('exit', ''),
-            'reduce_25': ('reduce', ':25'), 'reduce_50': ('reduce', ':50')}.get(
-        action, ('hold', ''))
+    """fixture 动作 → (Position v2 动作, 减仓档位)。
+
+    **返回档位而不是模板 id 的后缀**：模板 id 形如 `US.AAPL@2026-01-05:reduce:25`，
+    只在包的 `allowed_actions` 里才有；传 `':25'` 会被校验器判「模板不存在」，
+    整个决策降级为 ABSTAIN —— 夹具动作就此静默失效。由夹具在包里解析出真实 id。
+    """
+    return {'hold': ('hold', None), 'exit': ('exit', None),
+            'reduce_25': ('reduce', 0.25), 'reduce_50': ('reduce', 0.5)}.get(
+        action, ('hold', None))
 
 
 def _subject_from_packet(key: str, packet: dict) -> PositionSubject:
