@@ -52,6 +52,38 @@ def valid_for_role(code: str, role: str) -> bool:
     return role in meta['roles']
 
 
+def reasons_for_role(role: str) -> tuple:
+    """该角色的**全部合法原因码**，排序后返回。
+
+    存在的理由：`entry_v2`/`position_v2` 的校验器对原因码 fail-closed
+    （`valid_for_role`），而它们的提示词原先只发 packet + schema、**不给这份枚举** ——
+    模型只能猜一个 14 项注册表里的值，猜错整条决策作废。真实模型实测被拒 5 个
+    （`SUBJECT_ONLY_MARKET_EVIDENCE` 等，全是自造的合理词），而**夹具路径永远看不见**：
+    `FakePositionModel` 的注释写明"给一个自造的会被校验器拒"，于是它手工只发合法码。
+    证据 ID 的同类问题在 selection 上修过一次（提示词闭集），这里补上同一课。
+    """
+    return tuple(sorted(code for code, meta in REASON_REGISTRY.items()
+                        if role in meta['roles']))
+
+
+def with_reason_code_enum(schema: dict, role: str) -> dict:
+    """返回 schema 的**副本**，把 `reason_codes.items` 收紧到该角色的合法枚举。
+
+    为什么是"副本"而不是改模块常量：同一个 schema 对象被多个调用方共享（还进快照、进哈希），
+    就地改会串味、不同角色的枚举会互相覆盖。
+
+    为什么放在提示词侧而不是模块级常量：`mutifactor` 对 `scripts.*` 一直是**函数内导入**
+    （分层），模块级导入会把这条依赖固化。
+    """
+    import copy
+    out = copy.deepcopy(schema)
+    props = out.get('properties') or {}
+    if 'reason_codes' in props:
+        props['reason_codes'] = {'type': 'array',
+                                 'items': {'enum': list(reasons_for_role(role))}}
+    return out
+
+
 def normalize_reason(raw) -> str:
     """把任意输入规范成原因码：
     - 已是新枚举 → 原样；

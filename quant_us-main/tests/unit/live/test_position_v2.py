@@ -1,12 +1,16 @@
 """Position Decision v2 契约测试（§9，技术设计 §20.5）。"""
+import copy
+import json
 import time
 import unittest
 
 from mutifactor.llm.contracts.common import build_evidence_item
 from mutifactor.llm.contracts.position_v2 import (
-    build_position_action_templates, legacy_thesis_state, transition_thesis,
-    validate_position_v2,
+    POSITION_DECISION_SCHEMA, build_position_action_templates, build_position_prompt,
+    legacy_thesis_state, normalize_position_output, transition_thesis, validate_position_v2,
 )
+from scripts.live_trading.decision_ledger.reason_codes import (reasons_for_role,
+                                                               valid_for_role)
 
 
 def _ev(eid, summary, subject='US.AAPL', kind='fundamental', cluster='c1'):
@@ -146,3 +150,93 @@ class PositionV2ValidationTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ReasonCodeEnumTests(unittest.TestCase):
+    """`reason_codes` 的**合法闭集必须出现在提示词里**。
+
+    这是一条回归。校验器对原因码 fail-closed（`valid_for_role(rc, 'position')`），而提示词
+    原先只发 packet + schema —— 而 schema 里 `reason_codes` 是**任意字符串**。模型只能猜，
+    实测真实模型自造了 5 个看似合理但不在注册表里的码
+    （`SUBJECT_ONLY_MARKET_EVIDENCE` / `NO_SUBJECT_SPECIFIC_NEW_EVIDENCE` / …）⇒ **全条被拒**、
+    降级成 ABSTAIN。**夹具路径永远看不见**：`FakePositionModel` 的注释写着"给一个自造的会被
+    校验器拒"，于是它手工只发合法码 —— 阅读这段注释时看到的是"已处理"，实际是"绕开了"。
+
+    不变量：**提示词告诉模型的集合 == 校验器接受的集合**，两个方向都要。
+    """
+
+    def _enum(self, prompt):
+        schema = json.loads(prompt)['output_schema']
+        return set(schema['properties']['reason_codes']['items']['enum'])
+
+    def test_live_prompt_carries_exactly_the_accepted_codes(self):
+        enum = self._enum(build_position_prompt(_packet([])))
+        self.assertEqual(enum, set(reasons_for_role('position')))
+        for code in sorted(enum):
+            self.assertTrue(valid_for_role(code, 'position'), code)
+
+    def test_shadow_action_prompt_carries_exactly_the_accepted_codes(self):
+        """影子侧走的是另一条提示词（`build_position_action_prompt`），同样要带枚举。"""
+        from scripts.portfolio_shadow.position_overlay import \
+            build_position_action_prompt
+        enum = self._enum(build_position_action_prompt(_packet([])))
+        self.assertEqual(enum, set(reasons_for_role('position')))
+        for code in sorted(enum):
+            self.assertTrue(valid_for_role(code, 'position'), code)
+
+    def test_building_a_prompt_does_not_mutate_the_shared_schema(self):
+        """schema 对象被多方共享（还进快照、进哈希），就地改会串味。"""
+        before = copy.deepcopy(POSITION_DECISION_SCHEMA['properties']['reason_codes'])
+        build_position_prompt(_packet([]))
+        self.assertEqual(POSITION_DECISION_SCHEMA['properties']['reason_codes'], before)
+
+
+class NonVerbatimFactDowngradeTests(unittest.TestCase):
+    """非逐字 `fact` 必须**降级**而不是让整条决策作废。
+
+    校验器的判据（`fact 未逐字匹配证据摘要`）本身是对的 —— 不许把释义当事实。但它
+    fail-closed，而真实模型引的是 6000 字市场日报里的**片段**，与整段全等**在长度上就不可能**
+    ⇒ 每条 fact 都失败 ⇒ 整批降级 ABSTAIN，L 路恒等于 R。夹具里摘要是 `'测试用缺口声明'`
+    这种一句话，所以测试全都看不见。
+
+    实测（真实模型，2026-09-19）：修复前 `INVALID_OUTPUT` + 12 条错误；修复后
+    `validation_errors=None`、`reason_code=THESIS_WEAKENED`。
+    """
+
+    def _long_evidence(self):
+        return [_ev('e1', '很长的一段市场日报……' * 200)]
+
+    def test_nonverbatim_fact_is_downgraded_not_rejected(self):
+        packet = _packet([], evidence=self._long_evidence())
+        raw = {'status': 'complete', 'thesis_state': 'CONFIRMED', 'action': 'hold',
+               'action_template_id': None, 'confidence': 'medium',
+               'reason_codes': ['THESIS_WEAKENED'],
+               'facts': [{'text': '📉 逆势：LITE −2.81%', 'claim_type': 'fact',
+                          'evidence_ids': ['e1']}],
+               'inferences': [], 'counterevidence': [], 'missing_information': ['缺口']}
+        # 不降级时：校验必然失败（夹具就是这么绕过这个坑的）
+        self.assertTrue(validate_position_v2(raw, packet))
+        normalized = normalize_position_output(raw, packet)
+        self.assertEqual(normalized['facts'][0]['claim_type'], 'inference')
+        self.assertEqual(validate_position_v2(normalized, packet), [])
+
+    def test_verbatim_fact_is_kept(self):
+        """逐字匹配的 fact 不该被误降级 —— 否则这条修复就把真事实也削弱了。"""
+        summary = 'US.AAPL 收盘 100.0'
+        packet = _packet([], evidence=[_ev('e1', summary)])
+        raw = {'status': 'complete', 'thesis_state': 'CONFIRMED', 'action': 'hold',
+               'action_template_id': None, 'confidence': 'medium',
+               'reason_codes': ['THESIS_WEAKENED'],
+               'facts': [{'text': summary, 'claim_type': 'fact', 'evidence_ids': ['e1']}],
+               'inferences': [], 'counterevidence': [], 'missing_information': ['缺口']}
+        self.assertEqual(normalize_position_output(raw, packet)['facts'][0]['claim_type'],
+                         'fact')
+
+    def test_normalize_does_not_mutate_the_input(self):
+        """归一化返回副本：raw response 要原样留痕，不能被就地改写。"""
+        packet = _packet([], evidence=self._long_evidence())
+        raw = {'facts': [{'text': 'x', 'claim_type': 'fact', 'evidence_ids': ['e1']}],
+               'inferences': [], 'counterevidence': []}
+        before = copy.deepcopy(raw)
+        normalize_position_output(raw, packet)
+        self.assertEqual(raw, before)

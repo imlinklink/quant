@@ -10,6 +10,7 @@ import json
 from typing import Any, Dict, List, Optional
 
 from mutifactor.llm.validators.evidence import (
+    downgrade_nonverbatim_facts,
     require_counterevidence_or_missing,
     validate_claims,
 )
@@ -197,6 +198,16 @@ def _template_index(packet: Dict) -> Dict[str, Dict]:
     return {t['template_id']: t for t in packet.get('allowed_actions', []) if t.get('template_id')}
 
 
+def normalize_position_output(raw: Dict[str, Any], packet: Dict[str, Any]) -> Dict[str, Any]:
+    """把带合法引用的**非逐字** `fact` 降级为 `inference`；返回副本。
+
+    原先 position 契约**没有 normalize 钩子**，于是 `fact 未逐字匹配证据摘要` 直接让整条
+    决策作废（→ ABSTAIN）。实测真实模型引的是 6000 字市场日报的片段，全等不可能。
+    详见 `downgrade_nonverbatim_facts`。
+    """
+    return downgrade_nonverbatim_facts(raw, _evidence_index(packet))
+
+
 def validate_position_v2(raw: Dict[str, Any], packet: Dict[str, Any],
                          as_of=None) -> List[str]:
     """校验 Position v2 输出。返回错误列表；空列表 = 通过（fail-closed）。"""
@@ -280,5 +291,9 @@ POSITION_SYSTEM = '''你是持仓与退出委员会，只输出符合给定 sche
 
 def build_position_prompt(packet: Dict[str, Any]) -> str:
     """把冻结输入包序列化为模型 user prompt。"""
+    # 原因码枚举进提示词：校验器对 `valid_for_role(rc, 'position')` fail-closed，
+    # schema 里 reason_codes 本是任意字符串 ⇒ 不给枚举等于让模型猜，猜错整条作废。
+    from scripts.live_trading.decision_ledger.reason_codes import with_reason_code_enum
     return json.dumps({'decision_type': 'position_decision', 'input': packet,
-                       'output_schema': POSITION_DECISION_SCHEMA}, ensure_ascii=False)
+                       'output_schema': with_reason_code_enum(
+                           POSITION_DECISION_SCHEMA, 'position')}, ensure_ascii=False)

@@ -64,7 +64,8 @@ def _selection_contract():
 def _entry_contract():
     from mutifactor.llm.contracts.entry_v2 import (
         ENTRY_DECISION_SCHEMA, ENTRY_SYSTEM, ENTRY_V2_PROMPT_VERSION,
-        ENTRY_V2_SCHEMA_VERSION, build_entry_prompt, validate_entry_v2,
+        ENTRY_V2_SCHEMA_VERSION, build_entry_prompt, normalize_entry_output,
+        validate_entry_v2,
     )
     return {
         'schema_version': ENTRY_V2_SCHEMA_VERSION,
@@ -72,6 +73,9 @@ def _entry_contract():
         'output_schema': ENTRY_DECISION_SCHEMA,
         'system_prompt': ENTRY_SYSTEM,
         'build_prompt': build_entry_prompt,
+        # 非逐字 fact 降级为 inference。**原先没有这一项**（selection/portfolio/review 都有）
+        # ⇒ `fact 未逐字匹配` 直接让整条 entry 决策作废，L 路恒等于 R。
+        'normalize': normalize_entry_output,
         'validate': validate_entry_v2,
     }
 
@@ -79,7 +83,8 @@ def _entry_contract():
 def _position_contract():
     from mutifactor.llm.contracts.position_v2 import (
         POSITION_DECISION_SCHEMA, POSITION_SYSTEM, POSITION_V2_PROMPT_VERSION,
-        POSITION_V2_SCHEMA_VERSION, build_position_prompt, validate_position_v2,
+        POSITION_V2_SCHEMA_VERSION, build_position_prompt, normalize_position_output,
+        validate_position_v2,
     )
     return {
         'schema_version': POSITION_V2_SCHEMA_VERSION,
@@ -87,6 +92,8 @@ def _position_contract():
         'output_schema': POSITION_DECISION_SCHEMA,
         'system_prompt': POSITION_SYSTEM,
         'build_prompt': build_position_prompt,
+        # 同上：原先缺这一项，持仓的 L 路也拿不到有效动作。
+        'normalize': normalize_position_output,
         'validate': validate_position_v2,
     }
 

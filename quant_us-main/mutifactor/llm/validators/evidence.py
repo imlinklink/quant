@@ -56,3 +56,32 @@ def require_counterevidence_or_missing(claims: List[Dict], missing: List[str]) -
     if not missing and not any(c.get('claim_type') == 'counterevidence' for c in claims):
         return ['须提供反对证据或明确资料缺口']
     return []
+
+
+def downgrade_nonverbatim_facts(raw: Dict, index: Dict[str, Dict],
+                                fields=('facts', 'inferences', 'counterevidence')) -> Dict:
+    """把 text 与所引摘要**不全等**的 `fact` 降级为 `inference`；返回副本。
+
+    为什么要降级而不是让它去失败：`validate_claims` 的 `fact 未逐字匹配` 是 fail-closed 的
+    （不允许把释义当事实），**这条判据本身是对的**；但直接判失败会让**整条决策作废**。
+    实测：真实模型引的是 6000 字市场日报里的**片段**（"📉 逆势：LITE −2.81% · CRWV −4.16%"），
+    与整段摘要全等**在长度上就不可能**，于是每个 fact 都失败 ⇒ 整批降级成 ABSTAIN，
+    闭环永远走不通。夹具里摘要是 `'测试用缺口声明'` 这种一句话，所以**测试全都看不见**。
+
+    降级只**降低声明强度**：不动证据引用、不动置信度、不动权限 —— 与 selection 的
+    `normalize_selection_output` 同一做法（那条 2026-09 就修过，entry/position 漏了这一课）。
+
+    判据取"**每一条**所引摘要都全等"而不是"至少一条"：`validate_claims` 是**逐条 eid**
+    比对的，引两条就得同时等于两条 —— 按"至少一条"保留仍会被判失败，等于没修。
+    """
+    import copy
+    out = copy.deepcopy(raw)
+    for field in fields:
+        for claim in out.get(field) or []:
+            if claim.get('claim_type') != 'fact':
+                continue
+            summaries = [index[eid].get('summary') for eid in claim.get('evidence_ids') or []
+                         if eid in index]
+            if not summaries or any(s != claim.get('text') for s in summaries):
+                claim['claim_type'] = 'inference'
+    return out

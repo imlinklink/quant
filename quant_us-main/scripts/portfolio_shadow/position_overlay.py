@@ -23,7 +23,9 @@ from mutifactor.llm.contracts.position_v2 import (POSITION_DECISION_SCHEMA,
                                                   POSITION_SYSTEM,
                                                   POSITION_V2_PROMPT_VERSION,
                                                   POSITION_V2_SCHEMA_VERSION,
-                                                  REDUCE_TIERS, validate_position_v2)
+                                                  REDUCE_TIERS,
+                                                  normalize_position_output,
+                                                  validate_position_v2)
 
 from .llm_overlay import ABSTAIN_REASONS, OverlayDecision, RealModel, gate
 
@@ -89,12 +91,25 @@ POSITION_ACTION_SYSTEM = POSITION_SYSTEM + (
 
 
 def build_position_action_prompt(packet: dict) -> str:
+    # 原因码枚举**必须进提示词**：校验器对 `valid_for_role(rc, 'position')` fail-closed，
+    # 而原先只发 packet + schema（schema 里 reason_codes 是任意字符串）⇒ 模型只能猜，
+    # 猜错整条决策作废、降级成 ABSTAIN。实测真实模型自造了 5 个合理但不在注册表里的码
+    # （SUBJECT_ONLY_MARKET_EVIDENCE 等）被全拒；**夹具路径永远看不见**——它手工只发合法码。
+    from scripts.live_trading.decision_ledger.reason_codes import with_reason_code_enum
     return json.dumps({'decision_type': 'position_action', 'input': packet,
-                       'output_schema': POSITION_ACTION_SCHEMA}, ensure_ascii=False)
+                       'output_schema': with_reason_code_enum(
+                           POSITION_ACTION_SCHEMA, 'position')}, ensure_ascii=False)
 
 
 def validate_position_output(output, packet: dict) -> tuple[bool, list[str]]:
-    """校验模型输出：先绑包，再交给 Position v2 契约。"""
+    """校验模型输出：先绑包，**再把非逐字 fact 降级**，最后交给 Position v2 契约。
+
+    降级放在**这里**而不是各调用点：本函数有两个调用方 —— `OverlayReviewer.call_model`
+    （用它记录 `validation_errors`）与 `resolve_position_overlay`（用它定动作）。
+    写在调用点就得写两遍，漏一处就会出现"记下的错误"和"据以判定的规则"不是同一套。
+    实测正是这样漏过一次：只补了 `resolve_position_overlay`，账本上却仍记着原始的
+    `fact 未逐字匹配` —— 因为错误是另一个调用点记的。
+    """
     errors: list[str] = []
     if not isinstance(output, dict):
         return False, ['NOT_DICT']
@@ -102,6 +117,8 @@ def validate_position_output(output, packet: dict) -> tuple[bool, list[str]]:
         errors.append('PACKET_MISMATCH')
         return False, errors
     core = {k: v for k, v in output.items() if k not in _OVERLAY_ONLY_KEYS}
+    # 与实盘契约（`_position_contract` 的 `normalize`）同一规则；这条路径不走 DecisionEngine。
+    core = normalize_position_output(core, packet)
     errors.extend(validate_position_v2(core, packet))
     if errors:
         return False, errors
