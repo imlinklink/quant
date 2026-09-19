@@ -14,6 +14,7 @@ import time
 import urllib.request
 from datetime import date, datetime
 from pathlib import Path
+from typing import Optional
 
 import yaml
 
@@ -30,16 +31,72 @@ def log(msg: str):
         f.write(line + '\n')
 
 
-def notify(title: str, msg: str):
-    log(f'[通知] {title}: {msg}')
+ALERT_SECONDS = 60
+STATE_PATH = LOG_DIR / 'watchdog_alert_state.json'
+
+
+def _as_str(text) -> str:
+    """AppleScript 字符串字面量的转义。
+
+    原先直接把 msg 插进 `display notification "..."` —— **消息里只要有一个双引号或反斜杠
+    就会破坏整条脚本**，而 `check=False, capture_output=True` 把错误吞得干干净净：
+    报错为零、通知为零，日志上却照写「[通知] …」。转义不是防御性编程，
+    它是这条通道唯一的正确性来源。
+    """
+    return str(text).replace('\\', '\\\\').replace('"', '\\"')
+
+
+def notify(title: str, msg: str) -> dict:
+    """弹一条**会自动消失的模态告警**，并返回「有没有被人看到」的证据。
+
+    为什么不用 `display notification`：**实测（2026-09-19）它静默失效** ——
+    osascript 返回 rc=0、stderr 为空、`usernoted`/`NotificationCenter` 都在跑，
+    而用户**一条都没看到**。原因：它要求发送方（osascript 的宿主 Script Editor）
+    持有通知权限，而那个权限显然没给。`display alert` 走另一条路、不需要它
+    （实测用户看到了并点了按钮）。
+
+    `giving up after` 让它自动消失，无人值守时不会堆叠成一屏模态框。
+    返回值里 `seen`（出现过 `button returned:`）与「超时无人处理」是**可区分**的 ——
+    这样「通知了」与「被看到了」在日志里不再是一回事。
+    """
+    log(f'[通知] {title}: {msg}')          # 保留原日志行；但**这一行不代表送达**
+    script = (f'display alert "{_as_str(title)}" message "{_as_str(msg)}" '
+              f'as warning giving up after {ALERT_SECONDS}')
     try:
-        subprocess.run(
-            ['osascript', '-e',
-             f'display notification "{msg}" with title "{title}"'],
-            check=False, capture_output=True, timeout=10,
-        )
+        proc = subprocess.run(['/usr/bin/osascript', '-e', script],
+                              check=False, capture_output=True, timeout=ALERT_SECONDS + 15)
+        out = (proc.stdout or b'').decode('utf-8', 'replace').strip()
+        err = (proc.stderr or b'').decode('utf-8', 'replace').strip()
+        seen = 'button returned:' in out
+        log(f'[通知结果] {"已看到" if seen else "未确认（超时或未处理）"} — {out or err or proc.returncode}')
+        return {'channel': 'alert', 'seen': seen, 'rc': proc.returncode,
+                'detail': out or err}
+    except Exception as exc:
+        log(f'[通知结果] ❌ 通道异常: {exc!r}')
+        return {'channel': 'alert', 'seen': False, 'rc': None, 'detail': repr(exc)}
+
+
+def alert_if_changed(problems: list) -> Optional[dict]:
+    """**只在问题集合变化时**弹告警；返回 notify 的结果（没弹则 None）。
+
+    不这么做的话，一个持续存在的问题会**每 5 分钟弹一次模态框** —— `--once` 是无状态的，
+    每次运行都不知道上次报过什么。告警重复到第三次就没人看了，那与没有告警等价。
+    状态落盘，所以跨进程也记得。
+    """
+    key = sorted(problems)
+    try:
+        last = json.loads(STATE_PATH.read_text(encoding='utf-8')).get('key') or []
     except Exception:
-        pass
+        last = []
+    if key == last:
+        log('（问题集合与上次相同，不重复弹告警）')
+        return None
+    STATE_PATH.write_text(
+        json.dumps({'key': key, 'at': datetime.now().isoformat(timespec='seconds')},
+                   ensure_ascii=False), encoding='utf-8')
+    if not key:
+        return None                       # 恢复：只落盘新状态，不弹（避免多一条噪音）
+    return notify('quant 看护', '; '.join(key))
 
 
 def port_open(port: int, host: str = '127.0.0.1') -> bool:
@@ -87,7 +144,6 @@ def check_once(cfg: dict) -> int:
             log(f'✅ [{name}] 服务正常 ({svc.get("url")})')
         else:
             problems.append(f'[{name}] 服务未运行或页面不可达')
-            notify('quant 看护', f'{name} 服务不在线，请检查')
             if cfg.get('restart_enabled') and svc.get('restart_cmd'):
                 log(f'[{name}] 尝试自动重启: {svc["restart_cmd"]}')
                 subprocess.Popen(svc['restart_cmd'], shell=True,
@@ -110,8 +166,11 @@ def check_once(cfg: dict) -> int:
     (LOG_DIR / 'status.json').write_text(json.dumps(status, ensure_ascii=False, indent=2), encoding='utf-8')
     if problems:
         log('⚠️ 发现问题: ' + '; '.join(problems))
+        # 告警收口在一处（原先散在服务循环里，每次失败都弹）：**只在问题集合变化时弹**。
+        alert_if_changed(problems)
         return 1
     log('✅ 看护检查全部通过')
+    alert_if_changed(problems)          # 记下"已恢复"，这样下次真的再坏时会重新弹
     return 0
 
 
