@@ -180,4 +180,85 @@ class QualityIntervalTests(unittest.TestCase):
         self.assertEqual(list(out.quality), ['quality_fail', 'quality_fail'])
 
 
+class PriceBasisTests(unittest.TestCase):
+    """价格口径（`adjustment`）**必须可选，而且真的会改变宇宙成员资格**。
+
+    原先 `run_daily_pipeline` 在四处写死 `qfq`、且没有 CLI —— 于是"不复权价基的时点
+    宇宙"根本做不出来。这不是格式问题：实测（2026-09-20）前复权序列里
+    `SEC-US-NVDA 2015-01-05 previous_raw_close = 0.4819`（真实约 $19.3，0.4819 × 40 倍
+    拆股 = 19.28），NVDA 于是被 `PRICE_TOO_LOW` 排除 **719 个 session**（2015→2017-10）
+    —— 十年最大的赢家被一个假理由挡在样本外。改用 raw 价基后它提前 **749 天**进入宇宙，
+    且其余 38 只一只未变（只有它的累计拆股因子大到能把价格压到 $5 门槛之下）。
+    """
+
+    def _fixture(self, root, qfq_close, none_close):
+        dates = pd.bdate_range('2026-01-02', periods=30)
+        for basis, close in (('qfq', qfq_close), ('none', none_close)):
+            raw = root / 'raw' / 'day' / basis / 'year=2026'
+            raw.mkdir(parents=True, exist_ok=True)
+            for code in ('US.SPY', 'US.A'):
+                frame = pd.DataFrame({'code': code, 'time_key': dates.astype(str),
+                                      'open': close, 'high': close * 1.1, 'low': close * 0.9,
+                                      'close': close, 'volume': 1_000_000.,
+                                      'turnover': close * 1_000_000.})
+                frame.to_csv(raw / f'{code.replace(".", "_")}.csv.gz', index=False, compression='gzip')
+        master = root / 'master.csv'
+        pd.DataFrame([
+            {'code': 'US.SPY', 'listing_date': '1993-01-29', 'delisting_date': '', 'asset_type': 'etf'},
+            {'code': 'US.A', 'listing_date': '2000-01-01', 'delisting_date': '', 'asset_type': 'stock'},
+        ]).to_csv(master, index=False)
+        return master, dates
+
+    def _eligible(self, root, run_id):
+        u = pd.read_csv(root / 'runs' / run_id / 'universe.csv')
+        return int(u[u.code == 'US.A'].eligible.sum())
+
+    def _run(self, root, master, dates, run_id, adjustment):
+        return run_pipeline(master_path=master, start=str(dates[0].date()), end=str(dates[-1].date()),
+                            universe_start=str(dates[20].date()), universe_end=str(dates[-1].date()),
+                            run_id=run_id, raw_root=root / 'raw', runs_root=root / 'runs',
+                            checkpoint=root / 'checkpoint.json', skip_download=True,
+                            adjustment=adjustment)
+
+    def test_basis_actually_selects_the_price_series(self):
+        # qfq 价 2.5 低于 $5 门槛、none 价 10.0 高于 —— 同一批 bar，只有口径不同
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            master, dates = self._fixture(root, qfq_close=2.5, none_close=10.0)
+            self._run(root, master, dates, 'qfqrun', 'qfq')
+            self._run(root, master, dates, 'nonerun', 'none')
+            self.assertEqual(self._eligible(root, 'qfqrun'), 0, '前复权价应被 $5 门槛挡掉')
+            self.assertGreater(self._eligible(root, 'nonerun'), 0, '不复权价应可入池')
+
+    def test_basis_is_recorded_in_the_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            master, dates = self._fixture(root, qfq_close=10.0, none_close=10.0)
+            self._run(root, master, dates, 'r1', 'none')
+            state = json.loads((root / 'runs' / 'r1' / 'pipeline.json').read_text())
+            self.assertEqual(state['parameters']['adjustment'], 'none')
+
+    def test_default_stays_qfq(self):
+        # 既有调用方一个参数都不传 ⇒ 行为必须一字不变
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            master, dates = self._fixture(root, qfq_close=10.0, none_close=2.5)
+            run_pipeline(master_path=master, start=str(dates[0].date()), end=str(dates[-1].date()),
+                         universe_start=str(dates[20].date()), universe_end=str(dates[-1].date()),
+                         run_id='r2', raw_root=root / 'raw', runs_root=root / 'runs',
+                         checkpoint=root / 'checkpoint.json', skip_download=True)
+            self.assertGreater(self._eligible(root, 'r2'), 0)   # 走了 qfq（10.0），不是 none（2.5）
+
+    def test_missing_basis_names_what_is_available(self):
+        # 拼错口径是**配置错误**，不该变成"标准化后没有日线数据"这种看不出原因的失败
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            master, dates = self._fixture(root, qfq_close=10.0, none_close=10.0)
+            with self.assertRaises(ValueError) as ctx:
+                self._run(root, master, dates, 'r3', 'hfq')
+            msg = str(ctx.exception)
+            self.assertIn('价基目录不存在', msg)
+            self.assertIn('none', msg)          # 把实际可用的口径列出来
+
+
 if __name__=='__main__':unittest.main()

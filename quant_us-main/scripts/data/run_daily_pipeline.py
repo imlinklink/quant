@@ -61,14 +61,26 @@ def run_pipeline(*,master_path,start,end,universe_start,universe_end,run_id,
                  raw_root='data/market_history/raw',runs_root='data/market_history/runs',
                  checkpoint='data/market_history/checkpoints/download_state.json',
                  skip_download=False,ctx=None,min_price=5.,min_dollar_volume=5_000_000.,
-                 verified_master=False):
+                 verified_master=False,adjustment='qfq'):
+    """`adjustment` 是**价格口径**（qfq 前复权 / none 不复权 / hfq 后复权）。
+
+    它原先在四处写死成 `qfq`、且没有 CLI —— 而价格口径会**实质改变宇宙成员资格**。
+    实测（2026-09-20）：前复权序列里 `SEC-US-NVDA 2015-01-05 previous_raw_close = 0.4819`
+    （真实约 $19.3，0.4819 × 40 倍拆股 = 19.28），于是 NVDA 被 `PRICE_TOO_LOW` 排除
+    **719 个 session**（2015→2017-10）—— 十年最大的赢家被一个假理由挡在样本外。
+    没有这个参数，"不复权价基的时点宇宙"就根本做不出来。
+    """
+    basis = Path(raw_root)/'day'/adjustment
+    if not basis.exists():
+        have = sorted(p.name for p in (Path(raw_root)/'day').glob('*')) if (Path(raw_root)/'day').exists() else []
+        raise ValueError(f'价基目录不存在: {basis}（该 raw_root 下实际有: {have}）')
     run_dir=Path(runs_root)/run_id
     if run_dir.exists() and any(run_dir.iterdir()):raise FileExistsError(f'run-id 已存在，禁止覆盖: {run_dir}')
     run_dir.mkdir(parents=True,exist_ok=False)
     state={'run_id':run_id,'status':'running','created_at':datetime.now(timezone.utc).isoformat(),
            'parameters':{'start':start,'end':end,'universe_start':universe_start,
                          'universe_end':universe_end,'min_price':min_price,
-                         'min_dollar_volume':min_dollar_volume},'stages':{}}
+                         'min_dollar_volume':min_dollar_volume,'adjustment':adjustment},'stages':{}}
     _write_json(run_dir/'pipeline.json',state)
     try:
         master=read_frame(master_path)
@@ -82,18 +94,18 @@ def run_pipeline(*,master_path,start,end,universe_start,universe_end,run_id,
             if ctx is None:raise ValueError('未提供 Futu quote context')
             listing_dates=dict(zip(master.code.astype(str),master.listing_date))
             dl=download(ctx,master.code.astype(str).tolist(),start,end,raw_root,checkpoint,
-                        kinds=('day',),listing_dates=listing_dates)
-            active_failed=failures_for_request(dl,master.code.astype(str).tolist(),('day',),start,end,'qfq')
+                        kinds=('day',),listing_dates=listing_dates,autype=adjustment)
+            active_failed=failures_for_request(dl,master.code.astype(str).tolist(),('day',),start,end,adjustment)
             if active_failed:raise RuntimeError(f"行情下载失败分区: {len(active_failed)}")
-            request_args=(master.code.astype(str).tolist(),('day',),start,end,'qfq')
+            request_args=(master.code.astype(str).tolist(),('day',),start,end,adjustment)
             completed=records_for_request(dl.get('completed',{}),*request_args)
             unavailable=records_for_request(dl.get('unavailable',{}),*request_args)
-            state['stages']['download']={'status':'complete','adjustment':'qfq',
+            state['stages']['download']={'status':'complete','adjustment':adjustment,
                                          'partitions':len(completed),'unavailable':len(unavailable)}
         else:state['stages']['download']={'status':'skipped'}
         _write_json(run_dir/'pipeline.json',state)
 
-        raw=collect_inputs([Path(raw_root)/'day'/'qfq'])
+        raw=collect_inputs([basis])
         daily=_filter_daily(normalize(raw,'day'),master,start,end)
         if daily.empty:raise ValueError('标准化后没有日线数据')
         write_frame(daily,run_dir/'daily.csv.gz')
@@ -149,6 +161,9 @@ def main():
     p.add_argument('--verified-master',action='store_true',
                    help='已核验主数据模式：不覆盖真实上市日，供 v2（security_id 键）正式流程使用')
     p.add_argument('--min-price',type=float,default=5.);p.add_argument('--min-dollar-volume',type=float,default=5_000_000.)
+    p.add_argument('--adjustment',default='qfq',
+                   help='价格口径 qfq/none/hfq（默认 qfq 保持既有行为）。'
+                        '口径会改变宇宙成员资格，见 run_pipeline 的 docstring')
     args=p.parse_args();ctx=None
     try:
         if not args.skip_download:
@@ -158,7 +173,8 @@ def main():
             universe_start=args.universe_start,universe_end=args.universe_end,run_id=args.run_id,
             raw_root=args.raw_root,runs_root=args.runs_root,checkpoint=args.checkpoint,
             skip_download=args.skip_download,ctx=ctx,min_price=args.min_price,
-            min_dollar_volume=args.min_dollar_volume,verified_master=args.verified_master)
+            min_dollar_volume=args.min_dollar_volume,verified_master=args.verified_master,
+            adjustment=args.adjustment)
         print(json.dumps({'run_id':args.run_id,'status':result['status'],'stages':result['stages']},ensure_ascii=False,indent=2));return 0
     finally:
         if ctx is not None:ctx.close()
