@@ -2,6 +2,7 @@
 import unittest
 
 from scripts.data.import_corporate_actions_from_futu import (build_actions, cash_from_statement,
+                                                             collect_actions,
                                                              ratio_from_rate)
 
 SPLITS = {'US.NVDA': [
@@ -46,6 +47,81 @@ class FutuCorporateActionsTests(unittest.TestCase):
 
     def test_empty_input(self):
         self.assertTrue(build_actions({}, {}).empty)
+
+
+class _FakeCtx:
+    """假的 OpenQuoteContext：按 (kind, code) 决定返回成功还是失败码。
+
+    `fail_once` 让某只证券**第一次**调用失败、之后成功，用来验重试。
+    """
+
+    def __init__(self, splits=None, dividends=None, fail=(), fail_once=()):
+        self._s, self._d = splits or {}, dividends or {}
+        self._fail, self._fail_once = set(fail), set(fail_once)
+        self._seen = {}
+
+    def _respond(self, kind, code, key, payload):
+        self._seen[(kind, code)] = self._seen.get((kind, code), 0) + 1
+        if (kind, code) in self._fail:
+            return 1, 'throttled'
+        if (kind, code) in self._fail_once and self._seen[(kind, code)] == 1:
+            return 1, 'throttled'
+        return 0, {key: payload.get(code, [])}
+
+    def get_corporate_actions_stock_splits(self, code):
+        return self._respond('splits', code, 'split_list', self._s)
+
+    def get_corporate_actions_dividends(self, code):
+        return self._respond('dividends', code, 'dividend_list', self._d)
+
+
+class CollectActionsFailureTests(unittest.TestCase):
+    """取数失败**不得**被写成"没有公司行动"。
+
+    2026-09-20 实测的形态：连着打 39 只时富途限流，从第 23 只起全部返回空；修前的代码
+    把非 0 返回码静默变成空列表 ⇒ 产出一张只有 23/39 只的表，而 `summary.json` 里
+    只有一个正常的行数、**看不出 16 只丢了**。这条路径原先埋在 `main()` 里，
+    只有真连富途才走得到，所以一直没被测到 —— 抽成 `collect_actions` 就是为了钉死它。
+    """
+
+    def _run(self, ctx, codes):
+        return collect_actions(ctx, codes, retries=0, sleep=lambda s: None)
+
+    def test_failed_fetch_is_reported_not_silently_empty(self):
+        ctx = _FakeCtx(fail={('splits', 'US.XOM'), ('dividends', 'US.XOM')})
+        _, _, raw, failures = self._run(ctx, ['US.XOM'])
+        self.assertEqual(set(failures['US.XOM']), {'splits', 'dividends'})
+        # 列表**同时**是空的 —— 所以只有"失败名单"能让它区别于"真的没有行动"，
+        # 两者必须一起存在，缺一个这张表就是在说谎。
+        self.assertEqual(raw['US.XOM'], {'splits': [], 'dividends': []})
+
+    def test_genuinely_no_actions_is_not_a_failure(self):
+        _, _, raw, failures = self._run(_FakeCtx(), ['US.ARM'])
+        self.assertEqual(failures, {})
+        self.assertEqual(raw['US.ARM'], {'splits': [], 'dividends': []})
+
+    def test_partial_batch_keeps_the_good_codes(self):
+        # 一批里只挂一只 —— 好的那些不能因为有人失败就双双丢掉
+        ctx = _FakeCtx(splits={'US.NVDA': [{'dir_deci_pub_date_str': '2024-06-10', 'rate': '1→10'}]},
+                       fail={('dividends', 'US.XOM')})
+        splits, dividends, _, failures = self._run(ctx, ['US.NVDA', 'US.XOM'])
+        self.assertEqual(len(splits['US.NVDA']), 1)
+        self.assertEqual(set(failures), {'US.XOM'})
+        self.assertNotIn('US.NVDA', failures)
+        self.assertEqual(dividends['US.XOM'], [])
+
+    def test_transient_failure_recovers_on_retry(self):
+        ctx = _FakeCtx(fail_once={('dividends', 'US.PG')},
+                       dividends={'US.PG': [{'pub_date': '07/22/2026', 'statement': 'Cash Dividend: 0.8 USD Per Share',
+                                             'ex_date': '08/21/2026'}]})
+        _, dividends, _, failures = collect_actions(ctx, ['US.PG'], retries=2, sleep=lambda s: None)
+        self.assertEqual(failures, {})                       # 重试后成功 ⇒ 不算失败
+        self.assertEqual(len(dividends['US.PG']), 1)
+
+    def test_persistent_failure_records_the_return_code(self):
+        _, _, _, failures = collect_actions(_FakeCtx(fail={('splits', 'US.ORCL')}),
+                                            ['US.ORCL'], retries=2, sleep=lambda s: None)
+        self.assertIn('throttled', failures['US.ORCL']['splits'])
 
 
 if __name__ == '__main__':
