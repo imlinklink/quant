@@ -60,55 +60,68 @@ years_positive 5/11       eligible 13 / rejected 27
 
 | 环节 | 位置 | 实测状态 |
 |---|---|---|
-| 时点宇宙 | `data/market_history/runs/SURVIVOR39-QFQ-20260912-b/universe_v2/universe.csv.gz` | 112,658 行 / 40 券 / 2015-01-02→2026-09-10 / 2,939 session；`eligible` 98,456 |
-| 上市日语义 | 同上 | **正确**：ARM 首次 eligible 2023-10-05（实际上市 09-14）、CRWV 2025-04-21（03-28）、SNDK 2025-03-07、LIN 2018-11-21 |
+| 时点宇宙（结构） | `data/market_history/runs/SURVIVOR39-QFQ-20260912-b/universe_v2/universe.csv.gz` | 112,658 行 / 40 券 / 2015-01-02→2026-09-10 / 2,939 session |
+| **时点宇宙（价基）** | 同上，`price_version = qfq-20260912` | ❌ **前复权价基 —— 本实验不能用，见 §3.0** |
+| 上市日语义 | 同上 | 结构正确：ARM 首次 eligible 2023-10-05（实际 09-14）、CRWV 2025-04-21（03-28）、SNDK 2025-03-07、LIN 2018-11-21 |
 | as-of 面板 | `data/survivor_sample_audit/asof_panels/US_*.csv.gz` | 39 个，与宇宙（非 SPY）**1:1 完全对齐，无缺无多** |
+| raw(不复权) 行情 | `data/market_history/raw/day/none/year=*/` | 39 只齐备（ARM/CRWV/LIN/SNDK 分区少是因为本来就是后上市） |
 | 质量区间 | `data/survivor_sample_audit/research_quality_intervals-v3.csv` | 40 行，**只有 15 只 `verified`** |
 | 市场门/基准 | `data/medium_term/US-MT-MOM-BASELINE-001/prepared/etf_raw_daily.csv.gz` | QQQ raw，2015-01-02→2026-09-11 |
 | 组合引擎 | `scripts/medium_term/portfolio_engine.py::simulate_multi_asset_portfolio` | 支持 N 资产、T+1、分红应收、除息下调止损 |
-| **公司行动** | `data/corporate_actions_runs/futu-survivor39-20260912/corporate_actions.csv` | **1,601 条 / 只有 25 只 —— 闸门，见 §3** |
+| 公司行动 | `data/corporate_actions_runs/futu-actions39-20260920b/` | ✅ 2,293 条 / 39 只全覆盖 / 权威接口直取（2026-09-20 已补，见 §3.1） |
 
-**结论：这是一件接线工作，不是数据采购工作。** 唯一挡住它的是 §3。
+**结论：这是一件接线工作 —— 但需要先补两处，见 §3。**
 
-## 3. 唯一的闸门：24 只的行动历史未经核验
+## 3. 前置闸门
 
-39 只（非 SPY）里 **14 只零条公司行动**：
+### 3.0 raw 价基的时点宇宙不存在（2026-09-20 新发现）
 
-| 判定 | 证券 | 依据 |
-|---|---|---|
-| **明确缺失（8 只）** | XOM、PG、ORCL、QCOM、TSM、UNH、SHW、PLD | 均为长期分红公司（PLD 是 REIT），不可能零条 |
-| 情有可原（6 只） | ARM、CRWV、NBIS、SNDK、LITE、AXTI | 近年上市/分拆，确实不分红、无拆股 |
+现有三个 `universe_v2` run 的 `price_version` **全是 `qfq-20260912`**（前复权）。用前复权价去做
+`previous_raw_close` 的流动性门是错的，后果实测可见：
 
-**为什么这是硬闸门而不是可容忍的噪声：**
+```
+SEC-US-NVDA  2015-01-05  previous_raw_close = 0.4819
+```
 
-1. **SHW 在 2021-04-01 有 3:1 拆股，这条缺失**。raw 序列会在那天"假摔" 67% ⇒ 回测
-   会把它读成暴跌 ⇒ 触发止损 ⇒ **生成假信号**。这是会污染结论的雷，不是偏差。
-2. **HON 的拆股比已记录为错**：`price_action_mismatches.csv` 记
-   `2026-06-29, split, expected=0.5, observed=0.9157`；另有 3 条分红不匹配。
-3. 8 只缺分红 ⇒ 它们的十年回报被系统性低估（年化 1–3%/年，十年累计可观）。
-   方向恰好让"宽宇宙"显得更差 —— **但一个你控制不了方向的偏差仍然是偏差**。
+NVDA 2015 年初实际约 $19.3。`0.4819 × 40 = 19.28`（NVDA 2021 年 4:1 + 2024 年 10:1 = 40 倍）
+⇒ **那条"不复权"序列实为前复权**，于是 NVDA 因 `PRICE_TOO_LOW` 被排除 **719 个 session**
+（2015 至 2017-10）—— 十年里最大的赢家被一个假理由挡在样本外。
 
-**并且这不是新发现**：`research_quality_intervals-v3.csv` 判定的 15 只 `verified`
-（＝当前 13 只 TECH ＋ BAC ＋ HD）**正好是行动历史看起来完整的那批**。项目自己的审计
-早就划出了这条线，`m2-raw-asof-raw-universe-audit` 也写明「ORCL/QCOM/TSM/UNH 的行动
-历史缺口在核验前仍须隔离」。
+这不是新问题：`docs/m2-raw-asof-raw-universe-audit-2026-09-12.md` 已点名
+「入场筛选沿用了 `SURVIVOR39-QFQ-20260912-b` 的股票池，其中 `previous_raw_close` 实为复权收盘价」，
+并给出了修正版 `M2-RAW-AUDIT-20260912-003` —— 但那只覆盖 **15** 只。
 
-**所以：不补这 24 只，扩样归因跑出来的数字没有意义 —— 这正是整个项目要避免的那种"看起来在工作"的结果。**
+**而宇宙成员资格正是本实验唯一在变的变量。** 拿错误的成员资格去归因，量出来的是噪声。
+**所以必须先建 raw(不复权) 价基的 39 只时点宇宙**（`build_historical_universe_v2.py`
+＋ none 价基流动性）。数据齐备，这一步可做。
 
-### 3.1 前置工单：补齐行动历史
+### 3.1 公司行动（2026-09-20 已补，闸门解除）
 
-- **对象**：24 只（8 只明显缺失 ＋ 6 只确认为无非行动但需留证 ＋ HON 比值修正
-  ＋ 其余 9 只逐条复核）
-- **来源**：权威公开 —— 公司 IR 公告 / SEC EDGAR / 交易所。**不得用 QFQ↔raw 价差反推
-  充当核验**（现有 1,601 条正是这样来的，所以它们只能算"候选"）
-- **每条记录必须带**：`source_url`、`source_observed_at`、核验方式、核验人/日期
-- **验收**：复用 `survivor_sample_audit/price_action_checks.py` 的方法逐条对齐
-  raw 与 action 的价格影响，**要求 mismatched = 0**；拆股比值必须精确（HON 那条就是反例）
-- **不可覆盖**：新产物另起 run id，旧 `futu-survivor39-20260912` 保留作溯源
+39 只里原有 14 只零条行动，其中 **8 只明显是缺数据**（XOM、PG、ORCL、QCOM、TSM、UNH、SHW、PLD）。
+其中 **SHW 在 2021-04-01 有 3:1 拆股，缺失会让 raw 序列"假摔" 67%** ⇒ 回测读成暴跌 ⇒
+触发止损 ⇒ **生成假信号**。这是会污染结论的雷，不是偏差。
+
+已从**富途公司行动接口直取**（优于 QFQ↔raw 反推，且多带公告日/记录日/派发日）：
+2,293 条 / 39 只全覆盖 / `fetch_failures` 为空。**窗口内 12 条拆股经 raw 价格跳变验证
+11 条精确吻合**，含 SHW 2021-04-01 的 3:1。
+
+**唯一例外是 HON**（`2026-06-29` 富途记作 ratio 0.5 的"拆股"，而价格只动了 −1.9%）——
+形状是分拆(spin-off)而非拆股，与 `price_action_mismatches.csv` 早已记录的一致。
+**这条不该被"补齐"掉：HON 必须保持排除。**
+
+### 3.2 17 只的上市日仍为 `UNKNOWN_LISTING_DATE`（口径问题，非正确性问题）
+
+`build_research_quality_intervals.py:37` 对 `listing.year <= 1970` 一律拒绝，而富途对老公司
+返回 1970 占位。**注意 `verified` 里完全没有 `observed_at`**（已读代码确认）—— 它是
+「上市日已知 ＋ 行动完整 ＋ 无未解行动」的**正确性/完整性**判定，与"当时是否可得"无关。
+
+修法**不是加新标签**，而是让质量构造器**接受带 provenance 的下界**：管线的
+`reconcile_listing_dates` 已用首根 bar 修正上市日并标 `listed_on_or_before_history_start` /
+`confirmed_by_first_daily` —— 对窗口起点之后的区间，一个带标签的下界是**充分且如实**的。
 
 ## 4. 实验设计（补齐后才可执行）
 
-- **宇宙**：§2 的 `universe_v2` 中 `eligible == True` 且在 `research_quality_intervals`
+- **宇宙**：**§3.0 新建的 raw 价基** `universe_v2` 中 `eligible == True` 且在 `research_quality_intervals`
   内 `verified`（或行动已补齐并转入 verified）的证券
 - **策略**：**B3 一个字母都不改**（`entry_rule=b3`、`exit_policy_id=H60`、`single_position_risk_bp=100`）。
   一次只动一个变量：宇宙。
@@ -144,24 +157,35 @@ years_positive 5/11       eligible 13 / rejected 27
    权威历史表更好。
 4. 富途不提供 ticker 变更历史 ⇒ 改名会表现为新证券。
 
-## 7. 需要拍板的三件事
+## 7. 待拍板项 —— 已定（2026-09-20，用户授权自行决定）
 
-1. **是否先做 §3.1 的行动补齐？** 不花钱，是纯工作量（约 24 只逐条核）。
-   不做则本实验不能跑 —— 跑出来的数字会是错的，而错的方向不可控。
-2. **归因结论的用途边界**。建议：仅用于回答"42.7% 这个数字可不可信"，
-   **不进入任何选型或放行判断**。
-3. **回撤预算**：要不要吃满 20% 硬界（B3@60@1% → B3@90@1%，CAGR +3.0pp、
-   Sharpe 1.22→1.32、MDD 13.9%→18.8%、Calmar 1.09→0.97）。
-   这是风险偏好决定，不是研究结论，且**与本次归因无关，可以并行定**。
+**① 行动补齐：已执行。** 从富途公司行动接口直取，2,293 条 / 39 只全覆盖；
+窗口内拆股 11/12 经价格跳变验证。HON 保持排除。
+
+**② 用途边界：仅诊断，不进选型。** 这条不是谨慎，是本项目自己的规矩：
+`buy-strategy-validation-plan` §14.2 禁止用已查看的窗口选策略。
+2016–2026 已被查看 ⇒ 任何在这段上的结果都不能作为选型依据，**包括"某个配置更好"这种结论**。
+
+**③ 回撤预算：不吃满，维持 18% guardrail。** 三条理由：
+
+1. 它会改动**已冻结实验**的参数，须新建 experiment_id 重冻 —— 不是调一个数字的事；
+2. +3.0pp 的代价是 **Calmar 从 1.09 掉到 0.97** —— 每单位回撤的回报**变差**了。
+   Sharpe 1.22→1.32 说明按波动率算是改善的，按回撤算不是。这是**用风险买收益**，
+   不是策略变好；
+3. 更关键：18.20% 与 15.16% **带的是同一份后视挑选偏差**，归因跑完可能一起缩水。
+   **在未归因的数字上花回撤预算为时过早。** 而且这个决定可以推迟而没有任何损失。
 
 ## 8. 执行顺序
 
 ```
-1. 拍板 §7 的三件事
-2. 做 §3.1 行动补齐（前置，硬闸门）→ 验收：mismatched = 0
-3. 把补齐后的证券转入 verified 质量区间（新 run id，不覆盖旧的）
-4. 冻结本实验 manifest（代码/数据/参数/判据 hash）
+1. [已做] 行动补齐 —— 权威直取 + 价格跳变验证；HON 保持排除
+2. [前置] 建 raw(不复权) 价基的 39 只时点宇宙（§3.0）—— 数据齐备，可做
+3. [前置] 让质量构造器接受带 provenance 的上市日下界（§3.2），
+          把可放行的证券转入 verified（新 run id，不覆盖旧的）
+4. 冻结本实验 manifest（代码/数据/参数/判据 hash），判据用同一条 `_select_frozen`
 5. 跑三臂 A / B / C
 6. 一次性打开结果，写归因结论 + §6 边界
 7. 登记：仅诊断 / 需要修数据 / 可以进入下一步
 ```
+
+**回撤预算的决定（§7③）不阻塞本流程**，可以在归因结果出来之后再定。
