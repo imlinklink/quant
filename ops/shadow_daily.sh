@@ -35,6 +35,14 @@ STAMP="$(date -Iseconds)"
 TODAY=$(date +%F)
 mkdir -p "$RUNS" "$INBOX"
 
+# ---- P0 观察流水：**每次运行都留下一行，包括早退的路径** ----
+# 原先只在脚本末尾追加，于是「漏跑」「刷新失败」「跳过」「从未跑过」在这个文件里
+# 长得一模一样。2026-09-20 实测：生产 `p0-watch.log` 是 0 字节，而当时无法从它
+# 判断到底是哪一种 —— 与这个文件存在的理由（漏跑看得见）正好相反。
+# 早退分支各写一行之后，空文件只意味着一件事：**这次运行根本没发生**。
+P0_LOG="$BASE/p0-watch.log"
+p0() { printf '%s\t%s\n' "$STAMP" "$1" >> "$P0_LOG"; }
+
 cd "$US" || exit 1
 
 # ---- 运行锁：避免手动运行与后台任务重叠（mkdir 是原子的）----
@@ -42,12 +50,16 @@ LOCK="$EVIDENCE_DIR/.run.lock"
 if ! mkdir "$LOCK" 2>/dev/null; then
   HOLDER=$(cat "$LOCK/pid" 2>/dev/null || echo '?')
   if [ "$HOLDER" != '?' ] && kill -0 "$HOLDER" 2>/dev/null; then
-    echo "$STAMP SKIP 已有运行在进行（pid $HOLDER，锁 $LOCK）"
+    # **`${HOLDER}` 的花括号是必需的，不是风格**：macOS 自带 bash 3.2 会把 `$VAR`
+    # 紧邻的 UTF-8 字节吞进变量名（`$HOLDER，` → 变量 `HOLDER\xef\xbc\x8c`），
+    # 在 `set -u` 下直接 `unbound variable` 退出 1。实测复现过。
+    echo "$STAMP SKIP 已有运行在进行（pid ${HOLDER}，锁 ${LOCK}）"
+    p0 "SKIP 已有运行在进行（pid ${HOLDER}）"
     exit 0
   fi
   echo "$STAMP 接管过期锁（持有者 $HOLDER 已不在）"
   rm -f "$LOCK/pid"; rmdir "$LOCK" 2>/dev/null
-  mkdir "$LOCK" 2>/dev/null || { echo "$STAMP FAIL 无法获取锁"; exit 1; }
+  mkdir "$LOCK" 2>/dev/null || { echo "$STAMP FAIL 无法获取锁"; p0 "FAIL 无法获取锁"; exit 1; }
 fi
 echo $$ > "$LOCK/pid"
 trap 'rm -rf "$LOCK"' EXIT
@@ -57,6 +69,7 @@ if [ -n "${SHADOW_EXPERIMENT:-}" ]; then
   MANIFEST="$BASE/$SHADOW_EXPERIMENT/manifest.json"
   if [ ! -f "$MANIFEST" ]; then
     echo "$STAMP FAIL 指定实验 ${SHADOW_EXPERIMENT} 未冻结（缺 ${MANIFEST}）"
+    p0 "FAIL 指定实验 ${SHADOW_EXPERIMENT} 未冻结"
     exit 1
   fi
 else
@@ -64,11 +77,13 @@ else
   COUNT=$(printf '%s' "$FOUND" | grep -c . || true)
   if [ "$COUNT" -eq 0 ]; then
     echo "$STAMP SKIP 尚无已冻结实验（${BASE}/*/manifest.json）—— 入组后自动开始"
+    p0 "SKIP 尚无已冻结实验"
     exit 0
   fi
   if [ "$COUNT" -ne 1 ]; then
     echo "$STAMP FAIL 发现 ${COUNT} 个已冻结实验，无法判定跑哪个 —— 请用 SHADOW_EXPERIMENT 指定："
     printf '  %s\n' $FOUND
+    p0 "FAIL 发现 ${COUNT} 个已冻结实验，无法判定跑哪个"
     exit 1
   fi
   MANIFEST="$FOUND"
@@ -78,6 +93,7 @@ fi
 echo "$STAMP refresh-market-data（只追加，不改历史）"
 "$PY" -m scripts.portfolio_shadow.refresh_data --live-dir "$LIVE_ETF" || {
   echo "$STAMP FAIL refresh 失败，本次不跑 —— 宁可停一天，也不在陈旧行情上做决策"
+  p0 "FAIL refresh 失败，本次不跑"
   exit 1
 }
 
@@ -86,7 +102,7 @@ echo "$STAMP refresh-market-data（只追加，不改历史）"
 echo "$STAMP ingest-digest session=$TODAY dir=$DIGEST_DIR"
 DIGEST_JSONL="$INBOX/$TODAY.jsonl"
 if [ ! -d "$DIGEST_DIR" ]; then
-  echo "$STAMP 注意：日报目录不存在（$DIGEST_DIR）—— 本次不带市场级证据"
+  echo "$STAMP 注意：日报目录不存在（${DIGEST_DIR}）—— 本次不带市场级证据"
 elif [ -z "$(ls -A "$DIGEST_DIR" 2>/dev/null)" ]; then
   echo "$STAMP 注意：日报目录为空 —— 本次不带市场级证据（模型会因证据不足弃权）"
 fi
@@ -116,13 +132,15 @@ echo "$STAMP 状态：$STATUS_LINE"
 # ---- P0 观察：流水按日累积，并在**值得你知道**的状态上弹一次通知 ----
 # 为什么不通知常态化状态：`NO_OPPORTUNITIES` 是当前常态，天天弹等于没弹，
 # 真正要看见的是「链路走没走到模型」——那是 P0 的验收点。
-P0_LOG="$BASE/p0-watch.log"
-printf '%s\t%s\n' "$STAMP" "$STATUS_LINE" >> "$P0_LOG"
+p0 "$STATUS_LINE"
 STATE="${STATUS_LINE%% *}"
 case "$STATE" in
   DECIDED|SETTLED|MODEL_FAILED|DEADLINE_MISSED|NO_EVIDENCE)
-    # 通知是"顺便让你看见"，失败不阻断（launchd 上下文里不一定能弹出来）
-    /usr/bin/osascript -e "display notification \"${STATUS_LINE//\"/}\" \
-with title \"影子账户 ${STATE}\"" >/dev/null 2>&1 || true
+    # **告警通道走 `watchdog.py --notify`，不再自己写 AppleScript**。
+    # 原先这里是 `display notification` —— 那正是 2026-09-19 深夜实测证明**静默失效**
+    # 的通道（rc=0、stderr 空、用户一条都没看到），而它写得比那次修复更早，于是漏掉了修复。
+    # 复用同一份实现还顺带拿到两件事：字符串转义，以及**"有没有被人看到"的记录**。
+    # 失败不阻断（launchd 上下文里可能无人应答）。
+    "$PY" "$ROOT/ops/watchdog.py" --notify "影子账户 ${STATE}" "$STATUS_LINE" || true
     ;;
 esac
