@@ -14,6 +14,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 PY = '/usr/bin/python3'  # cron 环境 PATH 较短，用绝对路径
 
+# 排程来自 `jobs_spec.py`（**单一事实来源**）：`watchdog.py` 用同一份规格判断
+# "简报该不该已经更新了"。两处各写一份的话，改了一边就会**每天假报**或**真出事不报**。
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from jobs_spec import BRIEF, cron_weekday_field   # noqa: E402
+
 MARK_START = '# >>> quant-ops (auto-managed) >>>'
 MARK_END = '# <<< quant-ops <<<'
 
@@ -28,9 +33,13 @@ def build_block() -> str:
         # cron 已能正常执行这里的命令（探针每分钟写一行，两次都成功）。
         # 但「macOS cron 不补跑睡过的任务」这条没变 —— 时间敏感的任务仍应走 launchd。
         '# 盘前：美股简报 + 选股建议 + 结果回填（`--mode morning` 的构成）',
+        # 时刻与星期由 `jobs_spec.BRIEF` 渲染（原先写死成 `20 8 * * 1-5`）。
+        # 那一份写死的副本正是**看护判定会与之失配**的那份：排程挪了半小时，
+        # 看护仍然按旧时刻判断"该不该有简报"，于是每天在错的时间假报一次。
         # 只跑美股（`--markets us`）。**选股建议会调 LLM** —— 那正该调；判断依据是
         # "是不是该做的那件事"，不是花多少钱。
-        f'20 8 * * 1-5 cd {ROOT} && '
+        f'{BRIEF["minute"]} {BRIEF["hour"]} * * '
+        f'{cron_weekday_field(BRIEF["weekdays"])} cd {ROOT} && '
         f'{PY} ops/pipeline.py --mode morning --markets us '
         f'>> {log_dir}/cron_morning.log 2>&1',
         '# 盘后：结果回填（只美股；港股线 2026-09-19 起未恢复）',

@@ -22,6 +22,12 @@ ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = ROOT / 'ops' / 'ops_config.yaml'
 LOG_DIR = ROOT / 'ops' / 'logs'
 
+# 简报的排程来自 `jobs_spec.py`（**单一事实来源**，`install_cron.py` 渲染 crontab 用的是
+# 同一份）。显式插入本目录：本文件既可能被当脚本跑（`python3 ops/watchdog.py`，此时
+# sys.path[0] 已是 ops/），也可能被测试当模块导入（那时不是）。
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from jobs_spec import latest_expected_date   # noqa: E402
+
 
 def log(msg: str):
     LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -77,11 +83,15 @@ def notify(title: str, msg: str) -> dict:
 
 
 def alert_if_changed(problems: list) -> Optional[dict]:
-    """**只在问题集合变化时**弹告警；返回 notify 的结果（没弹则 None）。
+    """**只在出现新问题时**弹告警；返回 notify 的结果（没弹则 None）。
 
     不这么做的话，一个持续存在的问题会**每 5 分钟弹一次模态框** —— `--once` 是无状态的，
     每次运行都不知道上次报过什么。告警重复到第三次就没人看了，那与没有告警等价。
     状态落盘，所以跨进程也记得。
+
+    判据是「**新增**了问题」而不是「集合变了」：后者会把一次纯措辞修改（例如把
+    "简报不是今天的"改成"简报不是最新的"）当成新问题，弹一遍用户早就看到过的内容。
+    问题减少（含全部恢复）只落盘、不弹。
     """
     key = sorted(problems)
     try:
@@ -94,8 +104,11 @@ def alert_if_changed(problems: list) -> Optional[dict]:
     STATE_PATH.write_text(
         json.dumps({'key': key, 'at': datetime.now().isoformat(timespec='seconds')},
                    ensure_ascii=False), encoding='utf-8')
-    if not key:
-        return None                       # 恢复：只落盘新状态，不弹（避免多一条噪音）
+    fresh = [p for p in key if p not in set(last)]
+    if not fresh:
+        log('（无新增问题，仅恢复到更少的问题，不弹告警）')
+        return None
+    log(f'（新增问题 {len(fresh)} 条: {"; ".join(fresh)}）')
     return notify('quant 看护', '; '.join(key))
 
 
@@ -169,17 +182,32 @@ def http_ok(url: str) -> bool:
         return False
 
 
-def brief_fresh(path: Path) -> tuple:
+def brief_fresh(path: Path, now: datetime = None) -> tuple:
+    """(是否最新, 简报内容, 期望日期, 说明)。
+
+    判据是**排程**而不是"今天"。简报由 cron 在北京周一~周五 08:20 产出，所以
+    周六、周日、以及周一 08:20 之前，"此刻最新可能存在的那份"是更早一天的 ——
+    原先拿 `date.today()` 比，于是**每个周末每 5 分钟报一次假警**（还叠上周一早晨
+    那几个小时），而假警会把真警淹掉（与端口 8899/8890 写错是同一个病）。
+
+    期望日期来自 `jobs_spec.BRIEF`，与 `install_cron.py` 渲染 crontab 用的是同一份规格。
+    """
+    now = now or datetime.now()
+    expected = latest_expected_date(now)
     try:
         with open(path, encoding='utf-8') as f:
             data = json.load(f)
-        return data.get('date') == date.today().strftime('%Y-%m-%d'), data
-    except Exception:
-        return False, {}
+    except Exception as exc:
+        return False, {}, expected, f'读取失败 {exc!r}'
+    actual = str(data.get('date') or '')
+    ok = expected is not None and actual >= expected.isoformat()
+    return ok, data, expected, f'简报日期={actual or "(空)"}，期望 ≥{expected}'
 
 
-def check_once(cfg: dict) -> int:
+def check_once(cfg: dict, now: datetime = None) -> int:
+    """跑一轮检查。`now` 只为可测性注入（简报新鲜度判定依赖它）；默认取当前时刻。"""
     problems = []
+    now = now or datetime.now()
     LOG_DIR.mkdir(parents=True, exist_ok=True)
 
     opend_port = int(cfg.get('opend_port', 11111))
@@ -209,11 +237,14 @@ def check_once(cfg: dict) -> int:
         if not m.get('enabled', True):
             log(f"⏭️  [{m.get('name')}] 已停用，跳过简报检查")
             continue
-        fresh, data = brief_fresh(ROOT / m.get('brief_path', ''))
+        fresh, data, _expected, detail = brief_fresh(ROOT / m.get('brief_path', ''), now=now)
         if fresh:
-            log(f"✅ [{m.get('name')}] 简报是今天的: {data.get('risk_level')}")
+            log(f"✅ [{m.get('name')}] 简报是最新的（{detail}）: {data.get('risk_level')}")
         else:
-            problems.append(f"[{m.get('name')}] 简报不是今天的，需要运行 run_market_brief.py")
+            # 日期只进日志、**不进 `problems`** —— 告警的去重键是 `problems` 的集合，
+            # 文案里带上日期就会每天变一次，"同一个持续问题"会被当成新问题天天弹。
+            log(f"❌ [{m.get('name')}] 简报不是最新的（{detail}）")
+            problems.append(f"[{m.get('name')}] 简报不是最新的，需要运行 run_market_brief.py")
 
     # 三处一致性核对：**必须被自动发现**，理由见 `drift_checks`。
     # 措辞保持中性 —— 三项性质不同（装到系统的 crontab / plist，与一份记录文件），
@@ -250,7 +281,17 @@ def main():
     parser = argparse.ArgumentParser(description='quant 运营看护')
     parser.add_argument('--once', action='store_true')
     parser.add_argument('--daemon', action='store_true')
+    parser.add_argument('--notify', nargs=2, metavar=('TITLE', 'MSG'),
+                        help='直接弹一条告警并返回结果（复用本模块的告警通道与转义）')
     args = parser.parse_args()
+
+    if args.notify:
+        # **告警通道只实现一份**。`shadow_daily.sh` 的 P0 通知原先是自己写的一句
+        # `display notification` —— 那正是后来被实测证明**静默失效**的通道
+        # （见 `notify` 的 docstring），而它写得比那次修复更早，因此漏掉了修复：
+        # 最该被看见的「链路走到模型了」弹了等于没弹。
+        result = notify(*args.notify)
+        return 0 if result['seen'] else 1
 
     cfg = yaml.safe_load(CONFIG_PATH.read_text(encoding='utf-8')) or {}
     if args.once or not args.daemon:
