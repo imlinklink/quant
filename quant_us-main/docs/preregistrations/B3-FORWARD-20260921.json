@@ -1,0 +1,95 @@
+{
+  "schema_version": "forward-observation-prereg-v1",
+  "registration_id": "B3-FORWARD-20260921",
+  "registered_at": "2026-09-21",
+  "prose": "docs/b3-forward-preregistration-2026-09-21.md",
+  "upstream": {
+    "attribution_result": "docs/b3-universe-attribution-result-2026-09-21.md",
+    "d1_conclusion": "docs/d1-conclusion-entry-exit-2026-09-21.md"
+  },
+  "design_refs": ["§8.4", "§9.1", "§9.3"],
+  "returns_examined": false,
+  "status": "REGISTERED_AWAITING_RUNNER",
+
+  "question": "后视挑选出来的约 6.0pp CAGR 优势，在前向还在不在？",
+  "not_a_challenger_validation": "H3 与 A 均判 CONCENTRATED（保留原策略），宇宙归因只产诊断 ⇒ 当前没有任何被证据支持的规则改动可验证。",
+
+  "disclosure_not_picking_the_winner": {
+    "insample_32name_arm_is_worse_on_every_metric": "CAGR 9.12% vs 15.16%；MDD 更深；Calmar 0.52 vs 1.09",
+    "why_observed_anyway": "32 只的成员由预登记规则产生、**不含后视** —— 这是先验理由，不是因为它历史数字好看。",
+    "if_13_still_leads_forward": "正确结论是「后视挑选的优势在前向依然存在」，**不是**「13 只被验证为更好的策略」——13 只的成员选择过程本身不可复现。"
+  },
+
+  "arms": {
+    "A": {"universe": "13 只硬编码（现行生产池）", "pit_gate": false},
+    "B": {"universe": "32 只（预登记规则建立）", "pit_gate": true},
+    "C": {"universe": "32 只", "pit_gate": false}
+  },
+  "held_constant": {
+    "strategy": "entry_rule=b3、exit_policy_id=H60、horizon=60、single_position_risk_bp=100、max_weight_bp=2000、max_positions=5、top_n=5、max_wait_sessions=20",
+    "cost": "单边 10bp；压力情景 2×",
+    "three_arms_differ_only_by": "候选池 + 时点门（与 B3-UNIVERSE-ATTR-20260921 及其工程修订 01 同一套定义）"
+  },
+
+  "start": {
+    "rule": "三臂 runner 冻结并启动后的第一个交易日；三臂**同日空仓起步**",
+    "existing_forward_days_excluded": "现行生产实验已积累的几日前向数据不并入（起点不同不可配对）",
+    "data_must_not_be_backfilled": "runner 冻结之前前向数据一列都不产生；起点不能事后补"
+  },
+
+  "evaluation": {
+    "point": "同时满足 ≥30 个独立成熟组 且 ≥60 个交易日的**首个**时点",
+    "render_once": "只在该点作判定一次；跨零即 INCONCLUSIVE，**不得**延长窗口直到显著；再看得另立登记",
+    "independence_unit": "证券 × 候选轮次；Position 按整笔 trade；多期限不重复计数"
+  },
+
+  "primary_metric": {
+    "name": "full_cost_terminal_return_delta",
+    "definition": "共同起止日的全成本终值收益差（B − A 与 B − C）",
+    "must_also_report": ["最大回撤及其差", "年化波动", "平均/最大暴露", "换手", "成交笔数",
+                         "现金使用", "盈利/亏损贡献集中度", "未完成交易与右删失",
+                         "数据质量", "退化的配对单列"]
+  },
+
+  "gates": {
+    "engineering": ["三臂各自跨引擎对账 VERIFIED", "账户不变量", "NAV 会计恒等式",
+                    "重放一致", "无缺失持仓价格"],
+    "min_sample": {"independent_matured_groups": 30, "trading_days": 60},
+    "evidence_supports_paper_retention": ["主收益差为正", "配对差异 95% 区间下界 > 0",
+                                          "双倍成本下仍为正", "回撤未超预算"],
+    "drawdown_budget": {"abs_mdd_delta_max": 0.03},
+    "concentration": {"single_security_positive_share_max": 0.5,
+                      "leave_one_out_must_stay_positive": true},
+    "no_auto_promotion": "达到门槛也**不改变任何生产权限或配置**；生产变更另行评审（llm_permissions 默认全 shadow）"
+  },
+
+  "tokens": ["DATA_INVALID", "ENGINEERING_BLOCKED", "INSUFFICIENT_SAMPLE", "NO_IMPROVEMENT",
+             "RISK_REJECTED", "CONCENTRATED", "INCONCLUSIVE", "EVIDENCE_SUPPORTED"],
+
+  "frozen_during_observation": ["规则", "参数", "prompt/模型", "成本假设", "股票池定义",
+                                "等待窗", "费用口径"],
+  "any_change_invalidates": "该臂的前向记录作废，须另立登记重启观察",
+
+  "forbidden": [
+    "延长观察期直到显著，或事后调整评估点/门槛",
+    "用前向结果回头改历史结论",
+    "把前向结果读作「策略可上线」或「样本外已通过」",
+    "把三臂中历史数字最好的那条当作「被验证的配置」",
+    "只报 A−B 而不报 C（时点门必须同时呈现）"
+  ],
+
+  "boundaries": [
+    "仍含幸存者偏差（不纳入退市样本）⇒ 结论限定为所选存续股票内的条件性结论",
+    "前向样本天然稀疏（历史 10 年 190 笔）⇒ 30 组可能要等数月；不用日评审次数凑数",
+    "前向不等于无偏：去掉的是对这段历史的事后挑选，去不掉「选择在 2026 年开始观察」本身",
+    "公司行动仍为外部来源（富途直供，已记哈希）；HON 因 CORPORATE_ACTION_UNRESOLVED 保持排除"
+  ],
+
+  "prerequisites_not_met": [
+    "三臂前向 runner 不存在（现有 portfolio_shadow 只跑单实验 R/L 两账户）",
+    "runner 必须先冻结代码/数据哈希并有测试：三臂同日空仓起步、只差宇宙、members=None 空操作、跨引擎对账 VERIFIED、每日幂等与崩溃可恢复",
+    "runner 与本文档一并提交后的第一个交易日才是起点"
+  ],
+
+  "relationship_to_production": "现行生产实验 M1-FORWARD-S-20260917 继续按原样跑，不受本登记影响；本登记的三臂是另立、独立记账的观察，两者**不得合并计数**（§2.1 三个数据来源不得混用）。"
+}
