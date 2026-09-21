@@ -80,3 +80,23 @@ def test_arms_json_records_the_provenance(tmp_path, monkeypatch):
     assert meta['registration_sha256'] == fa.file_hash(fa.FORWARD_REGISTRATION)
     assert meta['baseline_manifest_sha256'] == fa.file_hash(fa.BASELINE_MANIFEST)
     assert meta['start_session'] == '2026-08-25'
+
+
+def test_run_day_refuses_after_the_frozen_code_changes(tmp_path, monkeypatch):
+    """观察期内改了冻结集里的任何一件 ⇒ 拒绝继续。
+
+    登记写明"观察期内不得改规则/参数/prompt/成本/股票池；任何一处变更 ⇒ 该臂的前向记录作废"。
+    这条守卫是那句话的执行力：没有它，改了尺子照样记，而已记录的几天与新记的几天不可比。
+
+    **不收数据面板**：它们是增长型的，冻进来第二天就会被自己的校验拒（与 M1 manifest 里
+    "`data_hashes` 不能装增长型数据"是同一条教训）。
+    """
+    monkeypatch.setattr(fa, 'registration', lambda: {'returns_examined': False})
+    fa.start(tmp_path / 'fwd', start_session='2026-08-25')
+    meta_path = tmp_path / 'fwd' / 'arms.json'
+    meta = json.loads(meta_path.read_text(encoding='utf-8'))
+    assert 'data/survivor_sample_audit/asof_panels/US_AAPL.csv.gz' not in meta['frozen_code']
+    meta['frozen_code']['scripts/portfolio_shadow/paper_engine.py'] = 'deadbeef'
+    meta_path.write_text(json.dumps(meta), encoding='utf-8')
+    with pytest.raises(ValueError, match='OBSERVATION_CODE_CHANGED'):
+        fa.run_day(tmp_path / 'fwd', '2026-08-26')

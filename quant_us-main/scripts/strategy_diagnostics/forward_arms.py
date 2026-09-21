@@ -61,6 +61,44 @@ ARMS = ('A', 'B', 'C')
 ARM_IDS = {arm: f'B3FWD-{arm}-20260921' for arm in ARMS}
 # 观察起点由 `start` 写死；此后 `run-day` 只能向前推进
 LEDGER_NAME = 'ledger.sqlite3'
+# **冻结集**：只收"决定三臂决策与会计的东西"。不收数据面板 —— 它们是**增长型**的
+# （每天追加新 session），冻进来第二天就会被自己的校验拒（这与 M1 manifest 里
+# "`data_hashes` 不能装增长型数据"是同一条教训）。数据的历史段由刷新的
+# `history_unchanged` 守，那才是它对的地方。
+FROZEN_CODE = (
+    'scripts/strategy_diagnostics/forward_arms.py',
+    'scripts/strategy_diagnostics/experiments.py',
+    'scripts/portfolio_shadow/paper_engine.py',
+    'scripts/portfolio_shadow/candidate_adapter.py',
+    'scripts/portfolio_shadow/schema.py',
+    'scripts/medium_term/stock_cross_section.py',
+    'scripts/medium_term/entry_risk.py',
+    'scripts/medium_term/momentum_features.py',
+    'scripts/medium_term/timed_entries.py',
+    'scripts/medium_term/portfolio_engine.py',
+    'scripts/medium_term/stock_cross_section.py',
+)
+
+
+def frozen_code() -> dict:
+    """冻结集逐文件的 sha256。**配置（登记 + 策略 manifest）也进来** —— 改了它们，
+    观察就不再是同一件事。"""
+    out = {rel: file_hash(ROOT / rel) for rel in sorted(set(FROZEN_CODE))}
+    out['docs/preregistrations/B3-FORWARD-20260921.json'] = file_hash(FORWARD_REGISTRATION)
+    out['data/portfolio_shadow/M1-FORWARD-S-20260917/manifest.json'] = file_hash(BASELINE_MANIFEST)
+    return out
+
+
+def verify_frozen(root: Path) -> None:
+    """每日开跑前核对冻结集。**不符即拒** —— 观察期内改了尺子，前向记录就不再可比。
+
+    （要改就得另立登记、重开起点；登记里写了"任何一处变更 ⇒ 该臂的前向记录作废"。）
+    """
+    recorded = read(Path(root) / 'arms.json').get('frozen_code') or {}
+    current = frozen_code()
+    drifted = sorted(k for k in set(recorded) | set(current) if recorded.get(k) != current.get(k))
+    if drifted:
+        raise ValueError(f'OBSERVATION_CODE_CHANGED:{drifted}')
 
 
 def arm_names() -> dict:
@@ -119,6 +157,7 @@ def start(root: Path, *, start_session: str) -> dict:
                                 'pit_gate': arm == 'B'}
     created['registration_sha256'] = file_hash(FORWARD_REGISTRATION)
     created['baseline_manifest_sha256'] = file_hash(BASELINE_MANIFEST)
+    created['frozen_code'] = frozen_code()
     write_json(root / 'arms.json', _plain(created))
     return created
 
@@ -211,6 +250,7 @@ def run_day(root: Path, session) -> dict:
     """
     root = Path(root).resolve()
     meta = read(root / 'arms.json')
+    verify_frozen(root)
     start = pd.Timestamp(meta['start_session'])
     target = pd.Timestamp(session)
     if target < start:
