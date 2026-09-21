@@ -225,6 +225,125 @@ class LegacyChainTests(ChainHarness):
                            '未声明动作集时不得收窄可选动作')
 
 
+class TimeoutAndBudgetTests(ChainHarness):
+    """启动前必须存在且**真的生效**的两道闸（规划 §4.1 用户裁定）。
+
+    两者此前都不存在：`timeout_seconds` 只被赋值、从未被使用（一次挂死的调用能让日作业
+    无限等待），调用预算则完全没有。
+    """
+
+    LLM = {'technical_packet': True, 'open_actions': ['hold', 'exit']}
+
+    def _reviewer(self, *, budget=None, timeout=60, model=None):
+        from scripts.portfolio_shadow.position_overlay import FakePositionModel
+        from scripts.portfolio_shadow.position_review import PositionReviewer, PositionSubject
+        reviewer = PositionReviewer(
+            self.store, scope='SHADOW:EXP:L',
+            model_factory=(lambda: model or FakePositionModel(
+                action='hold', cost_micro=0, evidence_from_packet=True)),
+            model_id='fixture', timeout_seconds=timeout, model_budget_micro=budget)
+        frozen, _blocked = self.freeze(technical_inputs=self.technical())
+        packet = frozen[0][1]          # frozen 是 [(key, packet)]，不是 (frozen, blocked)
+        subject = PositionSubject(opportunity_id=self.oid, security_id=CODE,
+                                  reviewed_session=SESSION, execution_session=EXEC)
+        return reviewer, subject, packet
+
+    def test_timeout_is_enforced_not_just_configured(self):
+        import time as _time
+
+        class HangingModel:
+            def __init__(self):
+                self.calls = 0
+
+            def call(self, packet, deadline):
+                self.calls += 1
+                _time.sleep(2.0)          # 远超超时
+                return {'status': 'OK', 'output': None}
+
+        hanging = HangingModel()
+        reviewer, subject, packet = self._reviewer(timeout=0.05, model=hanging)
+        started = _time.time()
+        outcome = reviewer.review(subject, packet, '2026-01-06T13:20:00+00:00')
+        elapsed = _time.time() - started
+        self.assertLess(elapsed, 1.0, '超时没有被收口：调用把主线程拖住了')
+        self.assertEqual(outcome.decision.action, POSITION_ABSTAIN)
+        self.assertEqual(outcome.decision.reason_code, 'TIMED_OUT')
+        self.assertEqual(hanging.calls, 1)
+
+    def test_timeout_is_capped_by_the_remaining_decision_window(self):
+        from datetime import datetime, timedelta, timezone
+        reviewer, _subject, _packet = self._reviewer(timeout=60)
+        now = datetime(2026, 1, 6, 13, 19, 55, tzinfo=timezone.utc)
+        reviewer.now = lambda: now                     # 距截止只剩 5 秒
+        deadline = (now + timedelta(seconds=5)).isoformat()
+        self.assertAlmostEqual(reviewer._effective_timeout(deadline), 5.0, places=3)
+
+    def test_budget_exhaustion_abstains_without_calling_the_model(self):
+        from dataclasses import replace as _replace
+        from scripts.portfolio_shadow.position_overlay import FakePositionModel
+        # 账户已计入的模型成本 ≥ 预算
+        seq, body = self.store.latest_state('SHADOW:EXP:L')
+        state = state_from_dict(body)
+        bumped = _replace(state, sequence=seq + 1, model_cost=9_000_000)
+        self.store.save_state('SHADOW:EXP:L', bumped,
+                              {'session': SESSION, 'equity': 1, 'cash_available': 1,
+                               'gross_exposure': 0, 'fees': 0, 'valuation_status': 'OK',
+                               'revision': 2}, [], session=SESSION)
+        calls = []
+
+        class CountingModel(FakePositionModel):
+            def call(self, packet, deadline):
+                calls.append(1)
+                return super().call(packet, deadline)
+
+        reviewer, subject, packet = self._reviewer(
+            budget=5_000_000, model=CountingModel(evidence_from_packet=True))
+        outcome = reviewer.review(subject, packet, '2026-01-06T13:20:00+00:00')
+        self.assertEqual(calls, [], '预算用尽时不得发起调用')
+        # 动作词汇用角色中立的 'ABSTAIN'（与编排器里其它程序侧分支一致 ——
+        # 租约在飞、崩溃遗留走的也是它）；语义与可报告性由**原因码**承载。
+        self.assertNotIn(outcome.decision.action, ('POSITION_EXIT',))
+        self.assertTrue(outcome.decision.action.endswith('ABSTAIN'))
+        self.assertEqual(outcome.decision.reason_code, 'MODEL_BUDGET_EXHAUSTED')
+        from scripts.portfolio_shadow.llm_overlay import NO_CALL_REASONS, is_program_abstain
+        self.assertTrue(is_program_abstain('MODEL_BUDGET_EXHAUSTED'))
+        self.assertIn('MODEL_BUDGET_EXHAUSTED', NO_CALL_REASONS)
+        self.assertEqual(outcome.decision.model_cost, 0)
+        # 必须落 Application，否则结算会把「没评审过」当成缺口
+        self.assertIsNotNone(self.store.application('SHADOW:EXP:L', subject.key()))
+
+    def test_within_budget_the_model_is_called(self):
+        from scripts.portfolio_shadow.position_overlay import FakePositionModel
+        calls = []
+
+        class CountingModel(FakePositionModel):
+            def call(self, packet, deadline):
+                calls.append(1)
+                return super().call(packet, deadline)
+
+        reviewer, subject, packet = self._reviewer(
+            budget=5_000_000, model=CountingModel(evidence_from_packet=True))
+        reviewer.review(subject, packet, '2026-01-06T13:20:00+00:00')
+        self.assertEqual(len(calls), 1)
+
+    def test_no_budget_configured_keeps_the_old_behaviour(self):
+        reviewer, subject, packet = self._reviewer(budget=None)
+        outcome = reviewer.review(subject, packet, '2026-01-06T13:20:00+00:00')
+        self.assertNotEqual(outcome.decision.reason_code, 'MODEL_BUDGET_EXHAUSTED')
+
+
+class ManifestBudgetTests(unittest.TestCase):
+    def test_real_model_requires_a_declared_budget(self):
+        from scripts.portfolio_shadow.schema import Manifest
+        base = manifest_dict(use_real_model=True, knowledge_cutoff='unknown',
+                             model_budget_micro=5_000_000)
+        self.assertEqual(manifest_from_dict(base).validate(), [])
+        without = {k: v for k, v in base['llm_policy'].items()
+                   if k != 'model_budget_micro'}
+        errors = manifest_from_dict({**base, 'llm_policy': without}).validate()
+        self.assertTrue(any('model_budget_micro' in e for e in errors), errors)
+
+
 class AccountFactTests(unittest.TestCase):
     def test_drawdown_and_cash_come_from_the_latest_settlement(self):
         state = new_account_state('SHADOW:x:R', to_micro(100000))

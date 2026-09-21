@@ -34,10 +34,15 @@ ABSTAIN_REASONS = ('TIMED_OUT', 'FAILED', 'INVALID_OUTPUT', 'LATE_RESPONSE',
                    'RECALL_ABANDONED',
                    # 评审窗口已过，由结算按设计 §3.3 冻结 —— **模型从未被咨询**。
                    # 漏掉它会让「没被问过」在报告里长成「被问过但采用父策略」。
-                   'DECISION_DEADLINE_MISSED')
+                   'DECISION_DEADLINE_MISSED',
+                   # 调用预算已用尽：**零成本、未发起调用**，按弃权采用父策略。
+                   # 它属于「本该有判断却没有」⇒ 进失败分母，否则预算耗尽会被读成
+                   # 「模型没有价值」（规划 §4.1 要求启动前就设预算）。
+                   'MODEL_BUDGET_EXHAUSTED')
 # 未发起任何调用、因而确实零成本的原因（区别于「调用过但成本未知」）
 NO_CALL_REASONS = ('HISTORICAL_AS_OF', 'MODEL_KNOWLEDGE_CUTOFF', 'DATA_BLOCKED_QUOTE',
-                   'INSUFFICIENT_EVIDENCE', 'DECISION_DEADLINE_MISSED')
+                   'INSUFFICIENT_EVIDENCE', 'DECISION_DEADLINE_MISSED',
+                   'MODEL_BUDGET_EXHAUSTED')
 # 上两类在报告里的细分（`ABSTAIN_REASONS` 的下属分组，并集必须等于 ABSTAIN_REASONS）：
 #   数据拦截 —— 机会级，连 R 一起拦（设计 §5.3），从「模型可评审」分母里剔除
 DATA_BLOCK_REASONS = ('DATA_BLOCKED_QUOTE',)
@@ -46,7 +51,7 @@ QUALITY_ABSTAIN_REASONS = ('INSUFFICIENT_EVIDENCE',)
 #   故障/降级 —— 本该有判断却没有：分母要算它，否则缺口会被算成「模型没有价值」
 FAILURE_ABSTAIN_REASONS = ('TIMED_OUT', 'FAILED', 'INVALID_OUTPUT', 'LATE_RESPONSE',
                            'RECALL_ABANDONED', 'MODEL_KNOWLEDGE_CUTOFF', 'HISTORICAL_AS_OF',
-                           'DECISION_DEADLINE_MISSED')
+                           'DECISION_DEADLINE_MISSED', 'MODEL_BUDGET_EXHAUSTED')
 
 
 def is_program_abstain(reason_code) -> bool:

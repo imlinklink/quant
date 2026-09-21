@@ -50,7 +50,8 @@ POLICY_KEYS = {
     'execution_policy': ('entry_rule', 'exit_policy_id', 'horizon', 'max_wait_sessions'),
     'llm_policy': ('overlay', 'use_real_model', 'knowledge_cutoff', 'evidence_mode',
                    'evidence_window_days', 'evidence_max_events', 'position_overlay',
-                   'portfolio_review', 'technical_packet', 'open_actions'),
+                   'portfolio_review', 'technical_packet', 'open_actions',
+                   'model_budget_micro'),
     'evaluation_protocol': ('main_metric', 'enrollment_window', 'review_date',
                             'cost_allocation'),
 }
@@ -151,6 +152,13 @@ class Manifest:
                 if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
                     errors.append(f'llm_policy.{key} 缺失或非法：{value!r}'
                                   f'（需要模型判断的角色必填正整数）')
+        # 调用预算（规划 §4.1）：用真实模型的实验**必须**显式给出上限，否则一次失控的
+        # 重试循环就是一张没有封顶的账单。缺省（None）表示未启用真实模型，不报错。
+        budget = self.llm_policy.get('model_budget_micro')
+        if self.llm_policy.get('use_real_model'):
+            if not isinstance(budget, int) or isinstance(budget, bool) or budget <= 0:
+                errors.append(f'llm_policy.model_budget_micro 缺失或非法：{budget!r}'
+                              f'（use_real_model=true 时必填正整数，单位微美元）')
         if not self.calendar_version:
             errors.append('calendar_version 缺失')
         # 技术包（规划 §6.2）与开放动作集（§6.1）：两者必须**一起**出现在持仓角色上。

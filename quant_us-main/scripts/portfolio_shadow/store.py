@@ -544,6 +544,18 @@ class ShadowStore:
             # 与状态同一事务：不留「已成交但未标记」的窗口
             _apply_marks(con, self.experiment_id, scope, applied_marks, session)
 
+    def model_cost_so_far(self, scope: str) -> tuple[int, int]:
+        """该账户**已计入**的模型成本与**金额未知**的尝试数（规划 §4.1 的调用预算用）。
+
+        未知金额记 0 并挂账待补记，所以 `spent` 会**滞后于真实花费** —— 调用方必须把
+        第二个返回值一并披露，不能拿它当准确账单。
+        """
+        row = self.latest_state(scope)
+        if not row:
+            return 0, 0
+        body = row[1]
+        return int(body.get('model_cost') or 0), len(body.get('model_cost_unsettled') or ())
+
     def latest_state(self, scope: str) -> tuple[int, dict] | None:
         with self.transaction(immediate=False) as con:
             row = con.execute('SELECT sequence, body FROM shadow_account_state '

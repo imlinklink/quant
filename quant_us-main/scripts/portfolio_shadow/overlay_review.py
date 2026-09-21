@@ -19,6 +19,8 @@
 """
 from __future__ import annotations
 
+import threading
+
 import json
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -26,7 +28,7 @@ from typing import Callable
 
 from scripts.live_trading.decision_ledger.event_store import stable_id
 
-from .llm_overlay import OverlayDecision, model_call_expected
+from .llm_overlay import OverlayDecision, _parse, model_call_expected
 from .schema import Application
 
 # 模型总超时（设计 §7 建议 60 秒，且不超过剩余决策窗口）
@@ -100,7 +102,7 @@ class OverlayReviewer:
 
     def __init__(self, store, *, scope, model_factory, model_id='', timeout_seconds=None,
                  now=None, lease_seconds=LEASE_SECONDS, knowledge_cutoff=None,
-                 debug: bool = False):
+                 debug: bool = False, model_budget_micro=None):
         self.store = store
         self.scope = scope
         self.model_factory = model_factory
@@ -109,6 +111,9 @@ class OverlayReviewer:
         self.lease_seconds = lease_seconds
         # 超时不得超过剩余决策窗口，由调用方传入的 deadline 收窄
         self.timeout_seconds = timeout_seconds or MODEL_TIMEOUT_SECONDS
+        # 调用预算（规划 §4.1）：真实模型有费用、数据与调度都会失败 ⇒ 启动时就设上限，
+        # 用尽即弃权（零成本、不发起调用）。None = 未设上限（夹具与离线路径）。
+        self.model_budget_micro = model_budget_micro
         self.knowledge_cutoff = knowledge_cutoff
         # 设计 §9 的 historical_debug：真实调用留痕用于提示词调试，但**不写 Application**，
         # 因而不会进入正式 R/L 表现 —— 过去的执行日不能用今天生成的模型结果补填。
@@ -152,10 +157,48 @@ class OverlayReviewer:
         return self.store.claim_attempt(decision_id, now=_now(self.now).isoformat(),
                                         lease_seconds=self.lease_seconds, body=body)
 
+    def _effective_timeout(self, deadline) -> float:
+        """超时上限 = min(配置值, 距决策截止的剩余秒数)。
+
+        注释里一直写着「超时不得超过剩余决策窗口」，但 `timeout_seconds` 此前**只被赋值、
+        从未被使用** —— 一次挂死的 HTTP 调用能让整个日作业无限等待，而配置看起来是生效的。
+        """
+        limit = float(self.timeout_seconds)
+        end = _parse(deadline)
+        if end is not None:
+            remaining = (end - _now(self.now)).total_seconds()
+            limit = min(limit, max(1.0, remaining))
+        return limit
+
     def call_model(self, packet, deadline, decision_id) -> ModelAttemptResult:
-        """发起一次（且仅一次）模型调用。**必须在领取事务结束之后调用。**"""
+        """发起一次（且仅一次）模型调用。**必须在领取事务结束之后调用。**
+
+        调用在**工作线程**里跑、主线程按 `_effective_timeout` 收口：超时就按 `TIMED_OUT`
+        留痕并返回（`resolve_*` 会映射成弃权），不等待、不重试。线程是守护线程 ——
+        挂死的调用不能拖住 Daily 作业。
+        """
         started_at = _now(self.now).isoformat()
-        model_result = self.model_factory().call(packet, deadline)
+        box: dict = {}
+
+        def _run():
+            try:
+                box['result'] = self.model_factory().call(packet, deadline)
+            except BaseException as exc:   # 线程里的异常必须兜住，否则会静默丢失
+                box['error'] = exc
+
+        worker = threading.Thread(target=_run, daemon=True, name='overlay-model-call')
+        worker.start()
+        worker.join(self._effective_timeout(deadline))
+        received_at = _now(self.now).isoformat()
+        if worker.is_alive():
+            return ModelAttemptResult(
+                status='TIMED_OUT', model_result={'status': 'TIMED_OUT'},
+                started_at=started_at, received_at=received_at,
+                request_id=stable_id('llm_request', decision_id, started_at),
+                validation_errors=('NO_OUTPUT',))
+        if 'error' in box:
+            raise box['error']
+        model_result = box.get('result') or {}
         received_at = _now(self.now).isoformat()
         output = model_result.get('output')
         if output is None:
@@ -236,6 +279,18 @@ class OverlayReviewer:
             self.finalize_action(subject, packet, d, decision_id)
             return ReviewOutcome(decision_id, d, True, 'abandoned')
 
+        if self._budget_exhausted():
+            # 预算用尽：零成本、不调用、不重试，按弃权采用父策略。落 Application 是必须的
+            # —— 否则结算会把「没评审过」当成缺口（`_ensure_position_reviewed`）。
+            d = OverlayDecision('ABSTAIN', 'MODEL_BUDGET_EXHAUSTED', 0, '', False, False,
+                                decision_id)
+            self.store.put_job_run(decision_id, 1, 'COMPLETED', {
+                **self._attempt_body(subject, packet), 'gated': True,
+                'budget_exhausted': True, 'budget_micro': self.model_budget_micro,
+                'completed_at': _now(self.now).isoformat(), **_decision_body(d)})
+            self.finalize_action(subject, packet, d, decision_id)
+            return ReviewOutcome(decision_id, d, True, 'budget_exhausted')
+
         if not model_call_expected(packet):
             d = self.spec.decide(packet, None, deadline, attempt_id=decision_id)
             self.store.put_job_run(decision_id, 1, 'COMPLETED', {
@@ -259,6 +314,15 @@ class OverlayReviewer:
             **_decision_body(d)})
         self.finalize_action(subject, packet, d, decision_id, result)
         return ReviewOutcome(decision_id, d, True, result.status.lower())
+
+    def _budget_exhausted(self) -> bool:
+        """已计入成本是否已达上限。金额未知的尝试（`model_cost_unsettled`）**不计入** ——
+        记账上它们就是 0，拿它们当已花费是编数；但调用方必须在报告里披露这个滞后
+        （`cost_status=PROVISIONAL`）。"""
+        if not self.model_budget_micro:
+            return False
+        spent, _uncertain = self.store.model_cost_so_far(self.scope)
+        return spent >= self.model_budget_micro
 
     def _debug_review(self, subject, packet, deadline, decision_id) -> ReviewOutcome:
         """设计 §9 的 `historical_debug` 分支：真实调用留痕，但**不冻结动作**。
