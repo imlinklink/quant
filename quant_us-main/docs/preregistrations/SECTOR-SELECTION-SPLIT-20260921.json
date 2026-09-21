@@ -1,0 +1,51 @@
+{
+  "schema_version": "diagnostic-preregistration-v1",
+  "registration_id": "SECTOR-SELECTION-SPLIT-20260921",
+  "registered_at": "2026-09-21",
+  "returns_examined": false,
+  "purpose": "把 B−A 的 −6.04pp 拆成「行业倾斜（科技）」与「事后挑名字」两部分；**顺带回答一个真正有决策价值的问题**：下一个前向注册该不该加一条非科技臂。",
+  "upstream": "docs/b3-universe-attribution-result-2026-09-21.md（B−A = −6.04pp CAGR）",
+  "design_refs": ["§8.3（因子分解是描述性的，容量与路径依赖产生交互）", "§5（结论只能写成归因）"],
+
+  "sector_mapping": {
+    "note": "仓库里**没有**行业标签（主表只有 name/exchange）⇒ 这张表是**我写的**，属于判断。两套边界都算，且都在此**先写明**，免得边界被事后挑成能给出想要答案的那条。",
+    "tech_broad": {
+      "names": ["SEC-US-AAPL","SEC-US-AMD","SEC-US-ARM","SEC-US-AVGO","SEC-US-AXTI","SEC-US-COHR","SEC-US-CRWV","SEC-US-GOOGL","SEC-US-INTC","SEC-US-LITE","SEC-US-META","SEC-US-MSFT","SEC-US-MU","SEC-US-NBIS","SEC-US-NFLX","SEC-US-NVDA","SEC-US-AMZN"],
+      "basis": "策略自己的「科技」概念：13 只硬编码 TECH ∪ {AVGO, COHR, AXTI, NBIS}。AMZN 留在这里（策略把它当科技）。共 17 只。"
+    },
+    "tech_narrow_gics": {
+      "names": ["SEC-US-AAPL","SEC-US-AMD","SEC-US-ARM","SEC-US-AVGO","SEC-US-AXTI","SEC-US-COHR","SEC-US-CRWV","SEC-US-INTC","SEC-US-LITE","SEC-US-MSFT","SEC-US-MU","SEC-US-NBIS","SEC-US-NVDA"],
+      "basis": "GICS 口径的 Information Technology：AMZN 归 Consumer Discretionary，GOOGL/META/NFLX 归 Communication Services。共 13 只。"
+    },
+    "non_tech_in_both": ["SEC-US-XOM","SEC-US-CVX","SEC-US-KO","SEC-US-PG","SEC-US-JNJ","SEC-US-JPM","SEC-US-BAC","SEC-US-DIS","SEC-US-DUK","SEC-US-NEE","SEC-US-HD","SEC-US-CAT","SEC-US-PLD","SEC-US-AMT","SEC-US-SHW"]
+  },
+
+  "arms": {
+    "A_13_hindsight_tech": "13 只硬编码（后视 + 科技）",
+    "T_tech_broad": "17 只（规则建立的科技子集）",
+    "N_non_tech": "15 只（规则建立的非科技子集）",
+    "B_32_ref": "32 只（= T ∪ N，参照）"
+  },
+  "decomposition": {
+    "selection_effect": "T − A（同为科技，差别只在「事后挑的 13 只」vs「规则选出的 17 只」）",
+    "sector_effect": "N − T（同为规则建立，差别只在行业）",
+    "identity": "B − A = (T − A) + (B − T) —— **描述性分解**，容量与路径依赖会产生交互（§8.3 明写不能解释为逐笔独立因果效应）"
+  },
+  "held_constant": {
+    "strategy": "B3 一个字母不改（b3 / H60 / 100bp / 20% / 5 仓 / top_n 5 / 等待窗 20）",
+    "window": "2016-01-05 → 2026-08-25（与归因实验同窗，四臂共用）",
+    "cost": "0.002 往返（与归因实验同）",
+    "pit_gate": "**全部关闭** —— 本实验的变量是池子，不是门（与归因实验的 C 臂同口径）",
+    "inputs": "与归因实验**同一份** quality/actions/market"
+  },
+
+  "controls": {
+    "harness_control": "沿用归因实验的 harness 保真度控制（复现冻结基线 final_equity 448722.3536857565 / MDD −0.1390344329）",
+    "subset_closure": "T ∪ N 必须逐元素等于 32 只的清单、T ∩ N 必须为空 —— 否则分解不闭合并立即失败",
+    "arm_A_matches_attribution": "本实验的 A 臂必须与归因实验的 A 臂逐字段相同（同输入同参数）；不等即实现有误"
+  },
+
+  "conclusion_form": "只能写成「在 2016-01-05→2026-08-25 这段**已查看**窗口、所选存续股票内，事后挑选与行业倾斜各贡献约 X / Y 个百分点」。不得写成策略优势、可放行、样本外证据（§5）。描述性分解，非因果。",
+  "decision_use": "唯一有决策价值的输出：若**行业倾斜**占了这 6pp 的绝大部分 ⇒ 下一个前向注册应把池子的**行业中性**作为显式约束；否则不必。",
+  "forbidden": ["看到结果后调边界或换分类", "把描述性分解读成因果", "用本实验的任何数字做选型"]
+}
