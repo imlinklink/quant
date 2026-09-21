@@ -88,5 +88,50 @@ class IncrementalMaturityTests(unittest.TestCase):
         self.assertEqual(len(forward.opportunities_for(s2[7])), 1)
 
 
+class MissingAtrTests(unittest.TestCase):
+    """ATR 是定止损的输入。缺失必须**按数据缺口丢弃候选**，而不是崩在 `to_micro`。
+
+    原先 `_atr_micro` 直接把值交给 `to_micro`，而 `int(Decimal('NaN'))` 抛
+    `ValueError: cannot convert NaN to integer` —— warmup 期的一根空 ATR 就能让整条
+    生成链崩掉，读起来像代码缺陷，实际是数据缺口。`_atr_micro` 的 docstring 与
+    `experiments._run` 的 `ATR_MISSING` 观察都假定它返回 `None`，这个假定此前没有测试。
+    """
+
+    def _gen(self, atr):
+        sessions = pd.bdate_range('2026-01-02', periods=40)
+        prices = pd.DataFrame({
+            'security_id': ['SEC-A'] * len(sessions), 'session': sessions,
+            'raw_open': 100.0, 'raw_high': 101.0, 'raw_low': 99.0, 'raw_close': 100.5,
+            'volume': 1000.0, 'asof_atr': atr, 'scale_to_next': 1.0})
+        market = pd.DataFrame({'session': sessions, 'asof_close': 400.0, 'asof_ma200': 390.0})
+        gen = IncrementalCandidateGenerator(
+            prices, market, pd.DataFrame(), None, {}, sessions,
+            experiment_id='x', parent_version='1', require_matured=False)
+        # 绕开月度动量管线与成熟度门，让"ATR 是否可用"成为唯一变量
+        gen._signal_for = lambda sid, sess: 'BREAKOUT'
+        gen.pending['SEC-A-pending'] = {'security_id': 'SEC-A',
+                                        'decision_session': sessions[5], 'rank': 1}
+        return gen, sessions
+
+    def test_missing_atr_drops_the_candidate_instead_of_crashing(self):
+        gen, sessions = self._gen(float('nan'))
+        self.assertEqual(gen.opportunities_for(sessions[7]), [])
+        self.assertEqual(gen.pending, {})          # 缺 ATR ⇒ 无法定止损 ⇒ 丢弃
+
+    def test_nonpositive_atr_is_not_a_valid_risk_distance(self):
+        """0 与负值同样不是可用的风险距离 —— 由 `_atr_micro` 直接钉死，不靠调用方自觉。"""
+        gen, sessions = self._gen(0.0)
+        self.assertIsNone(gen._atr_micro('SEC-A', sessions[7]))
+        self.assertIsNone(self._gen(-1.0)[0]._atr_micro('SEC-A', sessions[7]))
+        self.assertEqual(self._gen(2.0)[0]._atr_micro('SEC-A', sessions[7]), 2_000_000)
+
+    def test_valid_atr_still_produces_the_opportunity(self):
+        """反证：上面的丢弃不是"永远丢弃"—— 有效 ATR 照样产出机会。"""
+        gen, sessions = self._gen(2.0)
+        out = gen.opportunities_for(sessions[7])
+        self.assertEqual(len(out), 1)
+        self.assertEqual(gen.pending, {})
+
+
 if __name__ == '__main__':
     unittest.main()

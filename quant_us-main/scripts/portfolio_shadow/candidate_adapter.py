@@ -207,7 +207,7 @@ class IncrementalCandidateGenerator:
         try:
             atr = float(self._atr_key.loc[(sid, signal_session), 'asof_atr']) * float(
                 self._atr_key.loc[(sid, signal_session), 'scale_to_next'])
-            return to_micro(atr)
+            return to_micro(atr) if pd.notna(atr) and 0 < atr < float("inf") else None
         except KeyError:
             return None
 
