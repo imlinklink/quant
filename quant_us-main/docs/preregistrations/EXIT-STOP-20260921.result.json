@@ -1,0 +1,5978 @@
+{
+  "horizon": 60,
+  "registration_sha256": "034a60ffe7a08ca4f686487fb9737c66a6d6ac077db83002e9d2cec498d1b907",
+  "round_trip_cost": 0.002,
+  "summary": {
+    "actual_net_r_sum": 162.05994776234687,
+    "by_security_ordered": {
+      "descending": [
+        {
+          "delta_r": 33.93161509218478,
+          "security_id": "SEC-US-MU"
+        },
+        {
+          "delta_r": 10.86496926729807,
+          "security_id": "SEC-US-LITE"
+        },
+        {
+          "delta_r": 7.830432508892797,
+          "security_id": "SEC-US-META"
+        },
+        {
+          "delta_r": 5.655467715222712,
+          "security_id": "SEC-US-MSFT"
+        },
+        {
+          "delta_r": 3.32036724979812,
+          "security_id": "SEC-US-AMD"
+        },
+        {
+          "delta_r": 1.5647967459599657,
+          "security_id": "SEC-US-NFLX"
+        },
+        {
+          "delta_r": -0.40485459193759843,
+          "security_id": "SEC-US-GOOGL"
+        },
+        {
+          "delta_r": -0.5585513749532875,
+          "security_id": "SEC-US-AAPL"
+        },
+        {
+          "delta_r": -0.6188306955486198,
+          "security_id": "SEC-US-AMZN"
+        },
+        {
+          "delta_r": -0.7393207994241784,
+          "security_id": "SEC-US-ARM"
+        },
+        {
+          "delta_r": -1.3624589012550978,
+          "security_id": "SEC-US-NVDA"
+        },
+        {
+          "delta_r": -3.7454886168229544,
+          "security_id": "SEC-US-INTC"
+        }
+      ],
+      "top2_share": 0.803697099807128,
+      "top5_share": 1.1052189372529324
+    },
+    "concentration": {
+      "by_security_micro_r": {
+        "SEC-US-AAPL": -0.5585513749532875,
+        "SEC-US-AMD": 3.32036724979812,
+        "SEC-US-AMZN": -0.6188306955486198,
+        "SEC-US-ARM": -0.7393207994241784,
+        "SEC-US-GOOGL": -0.40485459193759843,
+        "SEC-US-INTC": -3.7454886168229544,
+        "SEC-US-LITE": 10.86496926729807,
+        "SEC-US-META": 7.830432508892797,
+        "SEC-US-MSFT": 5.655467715222712,
+        "SEC-US-MU": 33.93161509218478,
+        "SEC-US-NFLX": 1.5647967459599657,
+        "SEC-US-NVDA": -1.3624589012550978
+      },
+      "leave_one_out_still_positive": true,
+      "top1_security": "SEC-US-MU",
+      "top1_share_of_delta": 0.6087683030143306
+    },
+    "control_mismatches": [],
+    "control_survivors_arms_identical": true,
+    "count": 201,
+    "delta_r_mean": 0.2843782836704833,
+    "delta_r_sum": 55.73814359941473,
+    "mae_pct_mean": -0.07392768956767574,
+    "mfe_pct_mean": 0.20871739737120565,
+    "no_stop_leaked_a_stop_exit": [],
+    "no_stop_net_r_sum": 218.80597501593184,
+    "stopped": 86,
+    "stopped_breakdown": {
+      "avoided_delta_r": -23.772970548507036,
+      "avoided_further_loss": 54,
+      "recovered_delta_r": 79.51111414792173,
+      "would_have_recovered": 32
+    },
+    "survivors": 115,
+    "tail": {
+      "below_minus_1r": {
+        "actual": 86,
+        "no_stop": 33
+      },
+      "below_minus_2r": {
+        "actual": 0,
+        "no_stop": 13
+      },
+      "worst_net_r": {
+        "actual": -1.866563172874102,
+        "no_stop": -5.542643522349509
+      }
+    },
+    "worst_actual_net_r": [
+      {
+        "net_r": -1.866563172874102,
+        "security_id": "SEC-US-AMD"
+      },
+      {
+        "net_r": -1.852169934553847,
+        "security_id": "SEC-US-NFLX"
+      },
+      {
+        "net_r": -1.8268583626318424,
+        "security_id": "SEC-US-NFLX"
+      },
+      {
+        "net_r": -1.3013897165233688,
+        "security_id": "SEC-US-META"
+      },
+      {
+        "net_r": -1.2039432081524184,
+        "security_id": "SEC-US-NVDA"
+      }
+    ]
+  },
+  "trades": [
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2016-04-28",
+        "holding_sessions": 19,
+        "mae_pct": -0.0861717196657612,
+        "mfe_pct": 0.027861886135333025,
+        "net_r": -1.0250000000000001,
+        "pnl_pct": -0.08199999999999996
+      },
+      "delta_r": -0.43549141661576884,
+      "entry_price": 769.51,
+      "entry_session": "2016-04-04",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2016-06-27",
+        "holding_sessions": 60,
+        "mae_pct": -0.12585931306935583,
+        "mfe_pct": 0.027861886135333025,
+        "net_r": -1.460491416615769,
+        "pnl_pct": -0.11683931332926145
+      },
+      "security_id": "SEC-US-GOOGL",
+      "shares": 16,
+      "stop": 707.9492,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2016-06-30",
+        "holding_sessions": 60,
+        "mae_pct": -0.06573512610949994,
+        "mfe_pct": 0.19166886369628244,
+        "net_r": 0.028827225590999393,
+        "pnl_pct": 0.0023061780472799515
+      },
+      "delta_r": 0.0,
+      "entry_price": 113.79,
+      "entry_session": "2016-04-07",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2016-06-30",
+        "holding_sessions": 60,
+        "mae_pct": -0.06573512610949994,
+        "mfe_pct": 0.19166886369628244,
+        "net_r": 0.028827225590999393,
+        "pnl_pct": 0.0023061780472799515
+      },
+      "security_id": "SEC-US-META",
+      "shares": 109,
+      "stop": 104.6868,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2016-07-08",
+        "holding_sessions": 60,
+        "mae_pct": -0.06113537117903933,
+        "mfe_pct": 0.3975436681222708,
+        "net_r": 4.862076965065497,
+        "pnl_pct": 0.3889661572052403
+      },
+      "delta_r": 0.0,
+      "entry_price": 36.64,
+      "entry_session": "2016-04-14",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2016-07-08",
+        "holding_sessions": 60,
+        "mae_pct": -0.06113537117903933,
+        "mfe_pct": 0.3975436681222708,
+        "net_r": 4.862076965065497,
+        "pnl_pct": 0.3889661572052403
+      },
+      "security_id": "SEC-US-NVDA",
+      "shares": 340,
+      "stop": 33.7088,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2016-08-26",
+        "holding_sessions": 60,
+        "mae_pct": -0.06140435368907726,
+        "mfe_pct": 0.06468613259212375,
+        "net_r": 0.7018761868068356,
+        "pnl_pct": 0.05615009494454681
+      },
+      "delta_r": 0.0,
+      "entry_price": 726.74,
+      "entry_session": "2016-06-03",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2016-08-26",
+        "holding_sessions": 60,
+        "mae_pct": -0.06140435368907726,
+        "mfe_pct": 0.06468613259212375,
+        "net_r": 0.7018761868068356,
+        "pnl_pct": 0.05615009494454681
+      },
+      "security_id": "SEC-US-AMZN",
+      "shares": 17,
+      "stop": 668.6008,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2016-09-12",
+        "holding_sessions": 60,
+        "mae_pct": -0.021052631578947323,
+        "mfe_pct": 0.6842105263157894,
+        "net_r": 2.0063155175461267,
+        "pnl_pct": 0.2485263157894737
+      },
+      "delta_r": 0.0,
+      "entry_price": 4.75,
+      "entry_session": "2016-06-17",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2016-09-12",
+        "holding_sessions": 60,
+        "mae_pct": -0.021052631578947323,
+        "mfe_pct": 0.6842105263157894,
+        "net_r": 2.0063155175461267,
+        "pnl_pct": 0.2485263157894737
+      },
+      "security_id": "SEC-US-AMD",
+      "shares": 1744,
+      "stop": 4.161608,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2016-10-31",
+        "holding_sessions": 60,
+        "mae_pct": -0.026610169491525393,
+        "mfe_pct": 0.23838983050847462,
+        "net_r": 2.5756355932203387,
+        "pnl_pct": 0.20605084745762703
+      },
+      "delta_r": 0.0,
+      "entry_price": 59.0,
+      "entry_session": "2016-08-08",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2016-10-31",
+        "holding_sessions": 60,
+        "mae_pct": -0.026610169491525393,
+        "mfe_pct": 0.23838983050847462,
+        "net_r": 2.5756355932203387,
+        "pnl_pct": 0.20605084745762703
+      },
+      "security_id": "SEC-US-NVDA",
+      "shares": 228,
+      "stop": 54.28,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2016-08-10",
+        "holding_sessions": 1,
+        "mae_pct": -0.09697695300808129,
+        "mfe_pct": 0.002693804250224696,
+        "net_r": -1.0219893048128341,
+        "pnl_pct": -0.09295330739299601
+      },
+      "delta_r": 1.720691073632253,
+      "entry_price": 33.41,
+      "entry_session": "2016-08-10",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2016-11-02",
+        "holding_sessions": 60,
+        "mae_pct": -0.09697695300808129,
+        "mfe_pct": 0.3543849146961988,
+        "net_r": 0.6987017688194188,
+        "pnl_pct": 0.06354923675546265
+      },
+      "security_id": "SEC-US-LITE",
+      "shares": 353,
+      "stop": 30.37125,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2016-11-10",
+        "holding_sessions": 60,
+        "mae_pct": -0.0704781872429644,
+        "mfe_pct": 0.07652608660591875,
+        "net_r": -0.3485626159180716,
+        "pnl_pct": -0.027885009273445727
+      },
+      "delta_r": 0.0,
+      "entry_price": 124.01,
+      "entry_session": "2016-08-18",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2016-11-10",
+        "holding_sessions": 60,
+        "mae_pct": -0.0704781872429644,
+        "mfe_pct": 0.07652608660591875,
+        "net_r": -0.3485626159180716,
+        "pnl_pct": -0.027885009273445727
+      },
+      "security_id": "SEC-US-META",
+      "shares": 108,
+      "stop": 114.0892,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2016-11-14",
+        "holding_sessions": 51,
+        "mae_pct": -0.08268850680135897,
+        "mfe_pct": 0.09443102401467485,
+        "net_r": -1.0250000000000006,
+        "pnl_pct": -0.08200000000000007
+      },
+      "delta_r": 0.8814767927038791,
+      "entry_price": 774.11,
+      "entry_session": "2016-09-02",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2016-11-28",
+        "holding_sessions": 60,
+        "mae_pct": -0.08268850680135897,
+        "mfe_pct": 0.09443102401467485,
+        "net_r": -0.14352320729612142,
+        "pnl_pct": -0.011481856583689718
+      },
+      "security_id": "SEC-US-AMZN",
+      "shares": 17,
+      "stop": 712.1812,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2016-10-31",
+        "holding_sessions": 39,
+        "mae_pct": -0.10670648927504756,
+        "mfe_pct": 0.22861797447732823,
+        "net_r": -1.0250000000000006,
+        "pnl_pct": -0.08199999999999996
+      },
+      "delta_r": 2.109828943795822,
+      "entry_price": 36.83,
+      "entry_session": "2016-09-07",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2016-11-30",
+        "holding_sessions": 60,
+        "mae_pct": -0.10670648927504756,
+        "mfe_pct": 0.22861797447732823,
+        "net_r": 1.0848289437958218,
+        "pnl_pct": 0.08678631550366567
+      },
+      "security_id": "SEC-US-LITE",
+      "shares": 370,
+      "stop": 33.8836,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2016-12-08",
+        "holding_sessions": 60,
+        "mae_pct": -0.02298850574712641,
+        "mfe_pct": 0.7504105090311988,
+        "net_r": 4.871057471264367,
+        "pnl_pct": 0.6958653530377668
+      },
+      "delta_r": 0.0,
+      "entry_price": 6.09,
+      "entry_session": "2016-09-15",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2016-12-08",
+        "holding_sessions": 60,
+        "mae_pct": -0.02298850574712641,
+        "mfe_pct": 0.7504105090311988,
+        "net_r": 4.871057471264367,
+        "pnl_pct": 0.6958653530377668
+      },
+      "security_id": "SEC-US-AMD",
+      "shares": 1225,
+      "stop": 5.22,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2017-02-03",
+        "holding_sessions": 60,
+        "mae_pct": -0.0474198047419806,
+        "mfe_pct": 0.2468619246861925,
+        "net_r": 0.5392641897308319,
+        "pnl_pct": 0.08168200836820083
+      },
+      "delta_r": 0.0,
+      "entry_price": 35.85,
+      "entry_session": "2016-11-08",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2017-02-03",
+        "holding_sessions": 60,
+        "mae_pct": -0.0474198047419806,
+        "mfe_pct": 0.2468619246861925,
+        "net_r": 0.5392641897308319,
+        "pnl_pct": 0.08168200836820083
+      },
+      "security_id": "SEC-US-LITE",
+      "shares": 198,
+      "stop": 30.419823,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2017-02-03",
+        "holding_sessions": 60,
+        "mae_pct": -0.031791907514450934,
+        "mfe_pct": 0.4630057803468206,
+        "net_r": 5.249566473988439,
+        "pnl_pct": 0.4199653179190752
+      },
+      "delta_r": 0.0,
+      "entry_price": 17.3,
+      "entry_session": "2016-11-08",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2017-02-03",
+        "holding_sessions": 60,
+        "mae_pct": -0.031791907514450934,
+        "mfe_pct": 0.4630057803468206,
+        "net_r": 5.249566473988439,
+        "pnl_pct": 0.4199653179190752
+      },
+      "security_id": "SEC-US-MU",
+      "shares": 780,
+      "stop": 15.916,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2017-02-09",
+        "holding_sessions": 60,
+        "mae_pct": -0.0507435577250539,
+        "mfe_pct": 0.3742763083210352,
+        "net_r": 3.004583790074665,
+        "pnl_pct": 0.32073810875241215
+      },
+      "delta_r": 0.0,
+      "entry_price": 88.09,
+      "entry_session": "2016-11-14",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2017-02-09",
+        "holding_sessions": 60,
+        "mae_pct": -0.0507435577250539,
+        "mfe_pct": 0.3742763083210352,
+        "net_r": 3.004583790074665,
+        "pnl_pct": 0.32073810875241215
+      },
+      "security_id": "SEC-US-NVDA",
+      "shares": 114,
+      "stop": 78.686428,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2017-03-03",
+        "holding_sessions": 60,
+        "mae_pct": -0.010425285454244593,
+        "mfe_pct": 0.0906834353797783,
+        "net_r": 0.8458422968724145,
+        "pnl_pct": 0.0676673837497932
+      },
+      "delta_r": 0.0,
+      "entry_price": 60.43,
+      "entry_session": "2016-12-06",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2017-03-03",
+        "holding_sessions": 60,
+        "mae_pct": -0.010425285454244593,
+        "mfe_pct": 0.0906834353797783,
+        "net_r": 0.8458422968724145,
+        "pnl_pct": 0.0676673837497932
+      },
+      "security_id": "SEC-US-MSFT",
+      "shares": 230,
+      "stop": 55.5956,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2017-04-20",
+        "holding_sessions": 60,
+        "mae_pct": -0.05493482309124764,
+        "mfe_pct": 0.44785847299813786,
+        "net_r": 2.0374484786284435,
+        "pnl_pct": 0.21867039106145247
+      },
+      "delta_r": 0.0,
+      "entry_price": 10.74,
+      "entry_session": "2017-01-25",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2017-04-20",
+        "holding_sessions": 60,
+        "mae_pct": -0.05493482309124764,
+        "mfe_pct": 0.44785847299813786,
+        "net_r": 2.0374484786284435,
+        "pnl_pct": 0.21867039106145247
+      },
+      "security_id": "SEC-US-AMD",
+      "shares": 1035,
+      "stop": 9.587323,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2017-05-04",
+        "holding_sessions": 60,
+        "mae_pct": -0.03698544264122028,
+        "mfe_pct": 0.09981193842724823,
+        "net_r": 1.1660566274291289,
+        "pnl_pct": 0.09328453019433036
+      },
+      "delta_r": 0.0,
+      "entry_price": 143.57,
+      "entry_session": "2017-02-08",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2017-05-04",
+        "holding_sessions": 60,
+        "mae_pct": -0.03698544264122028,
+        "mfe_pct": 0.09981193842724823,
+        "net_r": 1.1660566274291289,
+        "pnl_pct": 0.09328453019433036
+      },
+      "security_id": "SEC-US-NFLX",
+      "shares": 107,
+      "stop": 132.0844,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2017-03-09",
+        "holding_sessions": 17,
+        "mae_pct": -0.11402623612512608,
+        "mfe_pct": 0.08365287588294668,
+        "net_r": -1.0187132426877208,
+        "pnl_pct": -0.1088761856710393
+      },
+      "delta_r": 1.6137037208384535,
+      "entry_price": 49.55,
+      "entry_session": "2017-02-14",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2017-05-10",
+        "holding_sessions": 60,
+        "mae_pct": -0.1856710393541876,
+        "mfe_pct": 0.12865792129162457,
+        "net_r": 0.5949904781507326,
+        "pnl_pct": 0.06359031281533811
+      },
+      "security_id": "SEC-US-LITE",
+      "shares": 234,
+      "stop": 44.254285,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2017-05-25",
+        "holding_sessions": 60,
+        "mae_pct": -0.020297427652733124,
+        "mfe_pct": 0.20056270096463025,
+        "net_r": 2.260972668810293,
+        "pnl_pct": 0.18087781350482324
+      },
+      "delta_r": 0.0,
+      "entry_price": 24.88,
+      "entry_session": "2017-03-02",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2017-05-25",
+        "holding_sessions": 60,
+        "mae_pct": -0.020297427652733124,
+        "mfe_pct": 0.20056270096463025,
+        "net_r": 2.260972668810293,
+        "pnl_pct": 0.18087781350482324
+      },
+      "security_id": "SEC-US-MU",
+      "shares": 624,
+      "stop": 22.8896,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2017-06-01",
+        "holding_sessions": 60,
+        "mae_pct": -0.05173783515392261,
+        "mfe_pct": 0.46117179741807335,
+        "net_r": 4.420698985650209,
+        "pnl_pct": 0.4329553128103276
+      },
+      "delta_r": 0.0,
+      "entry_price": 100.7,
+      "entry_session": "2017-03-08",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2017-06-01",
+        "holding_sessions": 60,
+        "mae_pct": -0.05173783515392261,
+        "mfe_pct": 0.46117179741807335,
+        "net_r": 4.420698985650209,
+        "pnl_pct": 0.4329553128103276
+      },
+      "security_id": "SEC-US-NVDA",
+      "shares": 125,
+      "stop": 90.837623,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2017-05-03",
+        "holding_sessions": 11,
+        "mae_pct": -0.12091503267973847,
+        "mfe_pct": 0.046840958605664396,
+        "net_r": -1.0177618106366546,
+        "pnl_pct": -0.11460113289760343
+      },
+      "delta_r": 4.5117305343712335,
+      "entry_price": 45.9,
+      "entry_session": "2017-04-19",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2017-07-13",
+        "holding_sessions": 60,
+        "mae_pct": -0.12091503267973847,
+        "mfe_pct": 0.46623093681917216,
+        "net_r": 3.4939687237345787,
+        "pnl_pct": 0.3934248366013071
+      },
+      "security_id": "SEC-US-LITE",
+      "shares": 239,
+      "stop": 40.731608,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2017-07-26",
+        "holding_sessions": 60,
+        "mae_pct": -0.03192354615697446,
+        "mfe_pct": 0.0660159956621933,
+        "net_r": 0.5299342551172562,
+        "pnl_pct": 0.042394740409380516
+      },
+      "delta_r": 0.0,
+      "entry_price": 147.54,
+      "entry_session": "2017-05-02",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2017-07-26",
+        "holding_sessions": 60,
+        "mae_pct": -0.03192354615697446,
+        "mfe_pct": 0.0660159956621933,
+        "net_r": 0.5299342551172562,
+        "pnl_pct": 0.042394740409380516
+      },
+      "security_id": "SEC-US-AAPL",
+      "shares": 106,
+      "stop": 135.7368,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2017-07-03",
+        "holding_sessions": 21,
+        "mae_pct": -0.08753993610223654,
+        "mfe_pct": 0.053035143769968096,
+        "net_r": -1.0250000000000004,
+        "pnl_pct": -0.08200000000000007
+      },
+      "delta_r": 0.9121405750798723,
+      "entry_price": 31.3,
+      "entry_session": "2017-06-05",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2017-08-28",
+        "holding_sessions": 60,
+        "mae_pct": -0.14217252396166136,
+        "mfe_pct": 0.053035143769968096,
+        "net_r": -0.11285942492012804,
+        "pnl_pct": -0.009028753993610248
+      },
+      "security_id": "SEC-US-MU",
+      "shares": 525,
+      "stop": 28.796,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2017-06-12",
+        "holding_sessions": 6,
+        "mae_pct": -0.10381291920961999,
+        "mfe_pct": 0.008338872439422218,
+        "net_r": -1.0250000000000001,
+        "pnl_pct": -0.08200000000000007
+      },
+      "delta_r": 1.1231192217052397,
+      "entry_price": 165.49,
+      "entry_session": "2017-06-05",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2017-08-28",
+        "holding_sessions": 60,
+        "mae_pct": -0.12834612363284792,
+        "mfe_pct": 0.15716961749954672,
+        "net_r": 0.09811922170523953,
+        "pnl_pct": 0.007849537736419167
+      },
+      "security_id": "SEC-US-NFLX",
+      "shares": 99,
+      "stop": 152.2508,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2017-08-29",
+        "holding_sessions": 60,
+        "mae_pct": -0.06250845623055057,
+        "mfe_pct": 0.18089568393992694,
+        "net_r": 1.3737394380241972,
+        "pnl_pct": 0.11314003517791904
+      },
+      "delta_r": 0.0,
+      "entry_price": 147.82,
+      "entry_session": "2017-06-06",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2017-08-29",
+        "holding_sessions": 60,
+        "mae_pct": -0.06250845623055057,
+        "mfe_pct": 0.18089568393992694,
+        "net_r": 1.3737394380241972,
+        "pnl_pct": 0.11314003517791904
+      },
+      "security_id": "SEC-US-NVDA",
+      "shares": 107,
+      "stop": 135.645668,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2017-08-10",
+        "holding_sessions": 46,
+        "mae_pct": -0.16123907863383646,
+        "mfe_pct": 0.09023034154090537,
+        "net_r": -1.0179116954835352,
+        "pnl_pct": -0.11365888800635426
+      },
+      "delta_r": 0.12504426351276554,
+      "entry_price": 62.95,
+      "entry_session": "2017-06-07",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2017-08-30",
+        "holding_sessions": 60,
+        "mae_pct": -0.1985702938840349,
+        "mfe_pct": 0.09023034154090537,
+        "net_r": -0.8928674319707697,
+        "pnl_pct": -0.09969658459094533
+      },
+      "security_id": "SEC-US-LITE",
+      "shares": 187,
+      "stop": 55.921073,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2017-08-11",
+        "holding_sessions": 27,
+        "mae_pct": -0.10320641282565124,
+        "mfe_pct": 0.08049432197728801,
+        "net_r": -1.0194381820040999,
+        "pnl_pct": -0.10489028056112226
+      },
+      "delta_r": 3.6034438823126496,
+      "entry_price": 29.94,
+      "entry_session": "2017-07-06",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2017-09-28",
+        "holding_sessions": 60,
+        "mae_pct": -0.10320641282565124,
+        "mfe_pct": 0.28456913827655317,
+        "net_r": 2.5840057003085497,
+        "pnl_pct": 0.2658690714762859
+      },
+      "security_id": "SEC-US-MU",
+      "shares": 409,
+      "stop": 26.859465,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2017-10-09",
+        "holding_sessions": 60,
+        "mae_pct": -0.0177398563624086,
+        "mfe_pct": 0.2239887054201708,
+        "net_r": 2.580733226935115,
+        "pnl_pct": 0.20645865815480935
+      },
+      "delta_r": 0.0,
+      "entry_price": 162.91,
+      "entry_session": "2017-07-17",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2017-10-09",
+        "holding_sessions": 60,
+        "mae_pct": -0.0177398563624086,
+        "mfe_pct": 0.2239887054201708,
+        "net_r": 2.580733226935115,
+        "pnl_pct": 0.20645865815480935
+      },
+      "security_id": "SEC-US-NFLX",
+      "shares": 100,
+      "stop": 149.8772,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2017-11-21",
+        "holding_sessions": 60,
+        "mae_pct": -0.001626016260162677,
+        "mfe_pct": 0.6139837398373984,
+        "net_r": 7.556300813008127,
+        "pnl_pct": 0.6045040650406504
+      },
+      "delta_r": 0.0,
+      "entry_price": 30.75,
+      "entry_session": "2017-08-29",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2017-11-21",
+        "holding_sessions": 60,
+        "mae_pct": -0.001626016260162677,
+        "mfe_pct": 0.6139837398373984,
+        "net_r": 7.556300813008127,
+        "pnl_pct": 0.6045040650406504
+      },
+      "security_id": "SEC-US-MU",
+      "shares": 520,
+      "stop": 28.29,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2017-09-25",
+        "holding_sessions": 14,
+        "mae_pct": -0.12564102564102564,
+        "mfe_pct": 0.02564102564102555,
+        "net_r": -1.0199585748690492,
+        "pnl_pct": -0.1022075555555555
+      },
+      "delta_r": 0.24942111603574246,
+      "entry_price": 58.5,
+      "entry_session": "2017-09-06",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2017-11-29",
+        "holding_sessions": 60,
+        "mae_pct": -0.1316239316239317,
+        "mfe_pct": 0.14017094017094012,
+        "net_r": -0.7705374588333067,
+        "pnl_pct": -0.07721367521367517
+      },
+      "security_id": "SEC-US-LITE",
+      "shares": 221,
+      "stop": 52.637858,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2017-12-01",
+        "holding_sessions": 60,
+        "mae_pct": -0.06661274481483626,
+        "mfe_pct": 0.06447512854584314,
+        "net_r": 0.1201556993471602,
+        "pnl_pct": 0.009612455947772826
+      },
+      "delta_r": 0.0,
+      "entry_price": 173.09,
+      "entry_session": "2017-09-08",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2017-12-01",
+        "holding_sessions": 60,
+        "mae_pct": -0.06661274481483626,
+        "mfe_pct": 0.06447512854584314,
+        "net_r": 0.1201556993471602,
+        "pnl_pct": 0.009612455947772826
+      },
+      "security_id": "SEC-US-META",
+      "shares": 94,
+      "stop": 159.2428,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2017-12-05",
+        "holding_sessions": 60,
+        "mae_pct": -0.017823529411764683,
+        "mfe_pct": 0.2862941176470588,
+        "net_r": 1.2904411764705892,
+        "pnl_pct": 0.10323529411764709
+      },
+      "delta_r": 0.0,
+      "entry_price": 170.0,
+      "entry_session": "2017-09-12",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2017-12-05",
+        "holding_sessions": 60,
+        "mae_pct": -0.017823529411764683,
+        "mfe_pct": 0.2862941176470588,
+        "net_r": 1.2904411764705892,
+        "pnl_pct": 0.10323529411764709
+      },
+      "security_id": "SEC-US-NVDA",
+      "shares": 96,
+      "stop": 156.4,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2018-01-04",
+        "holding_sessions": 60,
+        "mae_pct": -0.0066322770817980325,
+        "mfe_pct": 0.13953413860497887,
+        "net_r": 1.3851598795296522,
+        "pnl_pct": 0.11081279036237213
+      },
+      "delta_r": 0.0,
+      "entry_price": 156.055,
+      "entry_session": "2017-10-10",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2018-01-04",
+        "holding_sessions": 60,
+        "mae_pct": -0.0066322770817980325,
+        "mfe_pct": 0.13953413860497887,
+        "net_r": 1.3851598795296522,
+        "pnl_pct": 0.11081279036237213
+      },
+      "security_id": "SEC-US-AAPL",
+      "shares": 110,
+      "stop": 143.5706,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2017-12-04",
+        "holding_sessions": 21,
+        "mae_pct": -0.10720720720720733,
+        "mfe_pct": 0.0134134134134134,
+        "net_r": -1.0250000000000004,
+        "pnl_pct": -0.08200000000000007
+      },
+      "delta_r": 5.410660660660657,
+      "entry_price": 199.8,
+      "entry_session": "2017-11-03",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2018-01-31",
+        "holding_sessions": 60,
+        "mae_pct": -0.10720720720720733,
+        "mfe_pct": 0.4354854854854855,
+        "net_r": 4.3856606606606565,
+        "pnl_pct": 0.3508528528528527
+      },
+      "security_id": "SEC-US-NFLX",
+      "shares": 89,
+      "stop": 183.816,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2018-03-06",
+        "holding_sessions": 60,
+        "mae_pct": -0.006542282529682697,
+        "mfe_pct": 0.16622243760600908,
+        "net_r": 1.6711473225102969,
+        "pnl_pct": 0.13369178580082375
+      },
+      "delta_r": 0.0,
+      "entry_price": 82.54,
+      "entry_session": "2017-12-07",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2018-03-06",
+        "holding_sessions": 60,
+        "mae_pct": -0.006542282529682697,
+        "mfe_pct": 0.16622243760600908,
+        "net_r": 1.6711473225102969,
+        "pnl_pct": 0.13369178580082375
+      },
+      "security_id": "SEC-US-MSFT",
+      "shares": 214,
+      "stop": 75.9368,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2018-02-09",
+        "holding_sessions": 43,
+        "mae_pct": -0.14804722979109897,
+        "mfe_pct": 0.06675749318801083,
+        "net_r": -1.0169646752241202,
+        "pnl_pct": -0.11989202997275195
+      },
+      "delta_r": 2.9125706741089363,
+      "entry_price": 44.04,
+      "entry_session": "2017-12-08",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2018-03-07",
+        "holding_sessions": 60,
+        "mae_pct": -0.14804722979109897,
+        "mfe_pct": 0.24886466848319722,
+        "net_r": 1.8956059988848164,
+        "pnl_pct": 0.2234768392370572
+      },
+      "security_id": "SEC-US-MU",
+      "shares": 273,
+      "stop": 38.848035,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2018-03-07",
+        "holding_sessions": 60,
+        "mae_pct": -0.048502654502345255,
+        "mfe_pct": 0.2987371784959538,
+        "net_r": 2.7120066749400613,
+        "pnl_pct": 0.2453068398536158
+      },
+      "delta_r": 0.0,
+      "entry_price": 194.01,
+      "entry_session": "2017-12-08",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2018-03-07",
+        "holding_sessions": 60,
+        "mae_pct": -0.048502654502345255,
+        "mfe_pct": 0.2987371784959538,
+        "net_r": 2.7120066749400613,
+        "pnl_pct": 0.2453068398536158
+      },
+      "security_id": "SEC-US-NVDA",
+      "shares": 80,
+      "stop": 176.461378,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2018-03-08",
+        "holding_sessions": 60,
+        "mae_pct": -0.01614053766302892,
+        "mfe_pct": 0.7343092893265906,
+        "net_r": 8.568957945169021,
+        "pnl_pct": 0.6855166356135214
+      },
+      "delta_r": 0.0,
+      "entry_price": 187.85,
+      "entry_session": "2017-12-11",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2018-03-08",
+        "holding_sessions": 60,
+        "mae_pct": -0.01614053766302892,
+        "mfe_pct": 0.7343092893265906,
+        "net_r": 8.568957945169021,
+        "pnl_pct": 0.6855166356135214
+      },
+      "security_id": "SEC-US-NFLX",
+      "shares": 94,
+      "stop": 172.822,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2018-04-04",
+        "holding_sessions": 60,
+        "mae_pct": -0.04359611475039549,
+        "mfe_pct": 0.22159475943076568,
+        "net_r": 1.6747967020555659,
+        "pnl_pct": 0.13398373616444537
+      },
+      "delta_r": 0.0,
+      "entry_price": 44.27,
+      "entry_session": "2018-01-08",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2018-04-04",
+        "holding_sessions": 60,
+        "mae_pct": -0.04359611475039549,
+        "mfe_pct": 0.22159475943076568,
+        "net_r": 1.6747967020555659,
+        "pnl_pct": 0.13398373616444537
+      },
+      "security_id": "SEC-US-INTC",
+      "shares": 417,
+      "stop": 40.7284,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2018-05-09",
+        "holding_sessions": 60,
+        "mae_pct": -0.02384680322960031,
+        "mfe_pct": 0.18195002633610624,
+        "net_r": 1.3302889899908985,
+        "pnl_pct": 0.15823175773668208
+      },
+      "delta_r": 0.0,
+      "entry_price": 1385.93,
+      "entry_session": "2018-02-13",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2018-05-09",
+        "holding_sessions": 60,
+        "mae_pct": -0.02384680322960031,
+        "mfe_pct": 0.18195002633610624,
+        "net_r": 1.3302889899908985,
+        "pnl_pct": 0.15823175773668208
+      },
+      "security_id": "SEC-US-AMZN",
+      "shares": 9,
+      "stop": 1221.08,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2018-06-28",
+        "holding_sessions": 60,
+        "mae_pct": -0.030193961207758413,
+        "mfe_pct": 0.1577584483103378,
+        "net_r": -0.11504446412456246,
+        "pnl_pct": -0.011198160367926422
+      },
+      "delta_r": 0.0,
+      "entry_price": 50.01,
+      "entry_session": "2018-04-05",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2018-06-28",
+        "holding_sessions": 60,
+        "mae_pct": -0.030193961207758413,
+        "mfe_pct": 0.1577584483103378,
+        "net_r": -0.11504446412456246,
+        "pnl_pct": -0.011198160367926422
+      },
+      "security_id": "SEC-US-INTC",
+      "shares": 332,
+      "stop": 45.142143,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2018-04-30",
+        "holding_sessions": 18,
+        "mae_pct": -0.12956204379562053,
+        "mfe_pct": 0.042451018056089085,
+        "net_r": -1.0156026742731952,
+        "pnl_pct": -0.13018315405301573
+      },
+      "delta_r": 1.1618410316466652,
+      "entry_price": 52.06,
+      "entry_session": "2018-04-05",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2018-06-28",
+        "holding_sessions": 60,
+        "mae_pct": -0.12956204379562053,
+        "mfe_pct": 0.24202842873607366,
+        "net_r": 0.1462383573734699,
+        "pnl_pct": 0.01874529389166346
+      },
+      "security_id": "SEC-US-MU",
+      "shares": 242,
+      "stop": 45.386785,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2018-06-29",
+        "holding_sessions": 60,
+        "mae_pct": -0.011933586994119838,
+        "mfe_pct": 0.46387270840539596,
+        "net_r": 2.8925104974953264,
+        "pnl_pct": 0.3519605672777584
+      },
+      "delta_r": 0.0,
+      "entry_price": 289.1,
+      "entry_session": "2018-04-06",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2018-06-29",
+        "holding_sessions": 60,
+        "mae_pct": -0.011933586994119838,
+        "mfe_pct": 0.46387270840539596,
+        "net_r": 2.8925104974953264,
+        "pnl_pct": 0.3519605672777584
+      },
+      "security_id": "SEC-US-NFLX",
+      "shares": 45,
+      "stop": 253.922323,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2018-04-25",
+        "holding_sessions": 6,
+        "mae_pct": -0.10700636942675157,
+        "mfe_pct": 0.015923566878981,
+        "net_r": -1.018828972247534,
+        "pnl_pct": -0.10821928662420388
+      },
+      "delta_r": 1.6348281938234406,
+      "entry_price": 235.5,
+      "entry_session": "2018-04-18",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2018-07-12",
+        "holding_sessions": 60,
+        "mae_pct": -0.10700636942675157,
+        "mfe_pct": 0.14373673036093404,
+        "net_r": 0.6159992215759066,
+        "pnl_pct": 0.06543099787685769
+      },
+      "security_id": "SEC-US-NVDA",
+      "shares": 66,
+      "stop": 210.485358,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2018-07-31",
+        "holding_sessions": 60,
+        "mae_pct": -0.007874015748031371,
+        "mfe_pct": 0.3398259428097803,
+        "net_r": 0.7604176921960748,
+        "pnl_pct": 0.09186655615416495
+      },
+      "delta_r": 0.0,
+      "entry_price": 48.26,
+      "entry_session": "2018-05-07",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2018-07-31",
+        "holding_sessions": 60,
+        "mae_pct": -0.007874015748031371,
+        "mfe_pct": 0.3398259428097803,
+        "net_r": 0.7604176921960748,
+        "pnl_pct": 0.09186655615416495
+      },
+      "security_id": "SEC-US-MU",
+      "shares": 278,
+      "stop": 42.429678,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2018-07-31",
+        "holding_sessions": 60,
+        "mae_pct": -0.040608365081524544,
+        "mfe_pct": 0.10709357828181187,
+        "net_r": 0.06312871797042871,
+        "pnl_pct": 0.005050297437634301
+      },
+      "delta_r": 0.0,
+      "entry_price": 243.2947,
+      "entry_session": "2018-05-07",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2018-07-31",
+        "holding_sessions": 60,
+        "mae_pct": -0.040608365081524544,
+        "mfe_pct": 0.10709357828181187,
+        "net_r": 0.06312871797042871,
+        "pnl_pct": 0.005050297437634301
+      },
+      "security_id": "SEC-US-NVDA",
+      "shares": 83,
+      "stop": 223.831124,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2018-08-15",
+        "holding_sessions": 60,
+        "mae_pct": -0.014812345508179892,
+        "mfe_pct": 0.2107755882482436,
+        "net_r": 2.2764957009604396,
+        "pnl_pct": 0.18211965607683545
+      },
+      "delta_r": 0.0,
+      "entry_price": 1589.89,
+      "entry_session": "2018-05-22",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2018-08-15",
+        "holding_sessions": 60,
+        "mae_pct": -0.014812345508179892,
+        "mfe_pct": 0.2107755882482436,
+        "net_r": 2.2764957009604396,
+        "pnl_pct": 0.18211965607683545
+      },
+      "security_id": "SEC-US-AMZN",
+      "shares": 13,
+      "stop": 1462.6988,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2018-09-28",
+        "holding_sessions": 60,
+        "mae_pct": -0.002577319587628857,
+        "mfe_pct": 1.1997422680412373,
+        "net_r": 8.251512835092504,
+        "pnl_pct": 0.9883350515463918
+      },
+      "delta_r": 0.0,
+      "entry_price": 15.52,
+      "entry_session": "2018-07-06",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2018-09-28",
+        "holding_sessions": 60,
+        "mae_pct": -0.002577319587628857,
+        "mfe_pct": 1.1997422680412373,
+        "net_r": 8.251512835092504,
+        "pnl_pct": 0.9883350515463918
+      },
+      "security_id": "SEC-US-AMD",
+      "shares": 896,
+      "stop": 13.661073,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "GAP_STOP",
+        "exit_session": "2018-07-17",
+        "holding_sessions": 7,
+        "mae_pct": -0.17297752133669908,
+        "mfe_pct": 0.009183796129342392,
+        "net_r": -1.852169934553847,
+        "pnl_pct": -0.1678853227551389
+      },
+      "delta_r": 0.9145221502410319,
+      "entry_price": 415.95,
+      "entry_session": "2018-07-09",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2018-10-01",
+        "holding_sessions": 60,
+        "mae_pct": -0.2524870777737709,
+        "mfe_pct": 0.009183796129342392,
+        "net_r": -0.937647784312815,
+        "pnl_pct": -0.08499074407981722
+      },
+      "security_id": "SEC-US-NFLX",
+      "shares": 44,
+      "stop": 378.24725,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2018-10-26",
+        "holding_sessions": 60,
+        "mae_pct": -0.05370964749536167,
+        "mfe_pct": 0.08163265306122458,
+        "net_r": -0.07370129870129945,
+        "pnl_pct": -0.005896103896103953
+      },
+      "delta_r": 0.0,
+      "entry_price": 107.8,
+      "entry_session": "2018-08-03",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2018-10-26",
+        "holding_sessions": 60,
+        "mae_pct": -0.05370964749536167,
+        "mfe_pct": 0.08163265306122458,
+        "net_r": -0.07370129870129945,
+        "pnl_pct": -0.005896103896103953
+      },
+      "security_id": "SEC-US-MSFT",
+      "shares": 195,
+      "stop": 99.176,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2018-10-24",
+        "holding_sessions": 58,
+        "mae_pct": -0.13521207764198417,
+        "mfe_pct": 0.11229302659956852,
+        "net_r": -1.0182534208367244,
+        "pnl_pct": -0.1115685032350826
+      },
+      "delta_r": -0.2576620079020133,
+      "entry_price": 347.75,
+      "entry_session": "2018-08-03",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2018-10-26",
+        "holding_sessions": 60,
+        "mae_pct": -0.15945363048166783,
+        "mfe_pct": 0.11229302659956852,
+        "net_r": -1.2759154287387378,
+        "pnl_pct": -0.13980014378145222
+      },
+      "security_id": "SEC-US-NFLX",
+      "shares": 44,
+      "stop": 309.647553,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2018-09-24",
+        "holding_sessions": 14,
+        "mae_pct": -0.08493653433818582,
+        "mfe_pct": 0.0011137769796527586,
+        "net_r": -1.0250000000000008,
+        "pnl_pct": -0.08199999999999996
+      },
+      "delta_r": -1.2101358611654929,
+      "entry_price": 2038.11,
+      "entry_session": "2018-09-05",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2018-11-28",
+        "holding_sessions": 60,
+        "mae_pct": -0.3032760744022648,
+        "mfe_pct": 0.0011137769796527586,
+        "net_r": -2.2351358611654937,
+        "pnl_pct": -0.17881086889323927
+      },
+      "security_id": "SEC-US-AMZN",
+      "shares": 11,
+      "stop": 1875.0612,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2018-09-24",
+        "holding_sessions": 14,
+        "mae_pct": -0.08590409555107958,
+        "mfe_pct": 0.0050531820912400605,
+        "net_r": -1.0250000000000001,
+        "pnl_pct": -0.08200000000000007
+      },
+      "delta_r": -4.429520477755394,
+      "entry_price": 282.99,
+      "entry_session": "2018-09-05",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2018-11-28",
+        "holding_sessions": 60,
+        "mae_pct": -0.5289232835082511,
+        "mfe_pct": 0.03452418813385627,
+        "net_r": -5.454520477755394,
+        "pnl_pct": -0.43636163822043184
+      },
+      "security_id": "SEC-US-NVDA",
+      "shares": 79,
+      "stop": 260.3508,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2018-10-29",
+        "holding_sessions": 18,
+        "mae_pct": -0.10698500736632288,
+        "mfe_pct": 0.006803015859259798,
+        "net_r": -1.0249999999999992,
+        "pnl_pct": -0.08199999999999996
+      },
+      "delta_r": -2.916608891585059,
+      "entry_price": 230.78,
+      "entry_session": "2018-10-04",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2018-12-31",
+        "holding_sessions": 60,
+        "mae_pct": -0.36164312332091175,
+        "mfe_pct": 0.006803015859259798,
+        "net_r": -3.9416088915850582,
+        "pnl_pct": -0.31532871132680473
+      },
+      "security_id": "SEC-US-AAPL",
+      "shares": 96,
+      "stop": 212.3176,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "GAP_STOP",
+        "exit_session": "2018-10-25",
+        "holding_sessions": 9,
+        "mae_pct": -0.3282789992418499,
+        "mfe_pct": 0.0815011372251706,
+        "net_r": -1.866563172874102,
+        "pnl_pct": -0.32269749810462467
+      },
+      "delta_r": 0.39906504760275885,
+      "entry_price": 26.38,
+      "entry_session": "2018-10-15",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2019-01-10",
+        "holding_sessions": 60,
+        "mae_pct": -0.3923426838514025,
+        "mfe_pct": 0.0815011372251706,
+        "net_r": -1.467498125271343,
+        "pnl_pct": -0.25370583775587574
+      },
+      "security_id": "SEC-US-AMD",
+      "shares": 384,
+      "stop": 21.81934,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2019-05-08",
+        "holding_sessions": 46,
+        "mae_pct": -0.0829155060352833,
+        "mfe_pct": 0.1065923862581244,
+        "net_r": -1.0249999999999997,
+        "pnl_pct": -0.08199999999999996
+      },
+      "delta_r": -1.1599350046425279,
+      "entry_price": 53.85,
+      "entry_session": "2019-03-05",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2019-05-29",
+        "holding_sessions": 60,
+        "mae_pct": -0.1982358402971217,
+        "mfe_pct": 0.1065923862581244,
+        "net_r": -2.1849350046425275,
+        "pnl_pct": -0.17479480037140216
+      },
+      "security_id": "SEC-US-INTC",
+      "shares": 393,
+      "stop": 49.542,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2019-05-31",
+        "holding_sessions": 60,
+        "mae_pct": -0.05211572634384731,
+        "mfe_pct": 0.07171812527765442,
+        "net_r": -0.6108507330075528,
+        "pnl_pct": -0.048868058640604284
+      },
+      "delta_r": 0.0,
+      "entry_price": 360.16,
+      "entry_session": "2019-03-07",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2019-05-31",
+        "holding_sessions": 60,
+        "mae_pct": -0.05211572634384731,
+        "mfe_pct": 0.07171812527765442,
+        "net_r": -0.6108507330075528,
+        "pnl_pct": -0.048868058640604284
+      },
+      "security_id": "SEC-US-NFLX",
+      "shares": 58,
+      "stop": 331.3472,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2019-06-06",
+        "holding_sessions": 60,
+        "mae_pct": -0.0030666783492507843,
+        "mfe_pct": 0.15105581354595654,
+        "net_r": 1.524767808639272,
+        "pnl_pct": 0.1219814246911417
+      },
+      "delta_r": 0.0,
+      "entry_price": 114.13,
+      "entry_session": "2019-03-13",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2019-06-06",
+        "holding_sessions": 60,
+        "mae_pct": -0.0030666783492507843,
+        "mfe_pct": 0.15105581354595654,
+        "net_r": 1.524767808639272,
+        "pnl_pct": 0.1219814246911417
+      },
+      "security_id": "SEC-US-MSFT",
+      "shares": 185,
+      "stop": 104.9996,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2019-06-11",
+        "holding_sessions": 60,
+        "mae_pct": -0.023763648041104757,
+        "mfe_pct": 0.1469609388684534,
+        "net_r": 1.0770610731593377,
+        "pnl_pct": 0.08616488585274706
+      },
+      "delta_r": 0.0,
+      "entry_price": 1712.7,
+      "entry_session": "2019-03-18",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2019-06-11",
+        "holding_sessions": 60,
+        "mae_pct": -0.023763648041104757,
+        "mfe_pct": 0.1469609388684534,
+        "net_r": 1.0770610731593377,
+        "pnl_pct": 0.08616488585274706
+      },
+      "security_id": "SEC-US-AMZN",
+      "shares": 12,
+      "stop": 1575.684,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2019-06-13",
+        "holding_sessions": 60,
+        "mae_pct": -0.07323518308795762,
+        "mfe_pct": 0.2948282370705926,
+        "net_r": 1.9683194065259264,
+        "pnl_pct": 0.18297546243865614
+      },
+      "delta_r": 0.0,
+      "entry_price": 26.49,
+      "entry_session": "2019-03-20",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2019-06-13",
+        "holding_sessions": 60,
+        "mae_pct": -0.07323518308795762,
+        "mfe_pct": 0.2948282370705926,
+        "net_r": 1.9683194065259264,
+        "pnl_pct": 0.18297546243865614
+      },
+      "security_id": "SEC-US-AMD",
+      "shares": 693,
+      "stop": 24.027483,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2019-06-03",
+        "holding_sessions": 12,
+        "mae_pct": -0.12991083490948407,
+        "mfe_pct": 0.0190489057011618,
+        "net_r": -1.0249999999999995,
+        "pnl_pct": -0.08199999999999996
+      },
+      "delta_r": 1.1891380707916774,
+      "entry_price": 185.05,
+      "entry_session": "2019-05-16",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2019-08-09",
+        "holding_sessions": 60,
+        "mae_pct": -0.1308295055390435,
+        "mfe_pct": 0.12758713861118598,
+        "net_r": 0.1641380707916779,
+        "pnl_pct": 0.01313104566333423
+      },
+      "security_id": "SEC-US-META",
+      "shares": 116,
+      "stop": 170.246,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2019-08-05",
+        "holding_sessions": 24,
+        "mae_pct": -0.1069121447028425,
+        "mfe_pct": 0.12596899224806202,
+        "net_r": -1.0205300138723477,
+        "pnl_pct": -0.09941834625322998
+      },
+      "delta_r": 0.5291889583537792,
+      "entry_price": 30.96,
+      "entry_session": "2019-07-02",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2019-09-25",
+        "holding_sessions": 60,
+        "mae_pct": -0.1069121447028425,
+        "mfe_pct": 0.1482558139534882,
+        "net_r": -0.49134105551856844,
+        "pnl_pct": -0.04786563307493541
+      },
+      "security_id": "SEC-US-AMD",
+      "shares": 572,
+      "stop": 27.943928,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "GAP_STOP",
+        "exit_session": "2019-08-05",
+        "holding_sessions": 22,
+        "mae_pct": -0.09323861868713057,
+        "mfe_pct": 0.055584361713159725,
+        "net_r": -1.0515218293062316,
+        "pnl_pct": -0.08412174634449854
+      },
+      "delta_r": -0.29017162708700606,
+      "entry_price": 1928.6,
+      "entry_session": "2019-07-05",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2019-09-27",
+        "holding_sessions": 60,
+        "mae_pct": -0.11136575754433264,
+        "mfe_pct": 0.055584361713159725,
+        "net_r": -1.3416934563932377,
+        "pnl_pct": -0.10733547651145903
+      },
+      "security_id": "SEC-US-AMZN",
+      "shares": 11,
+      "stop": 1774.312,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2019-08-05",
+        "holding_sessions": 22,
+        "mae_pct": -0.08583953512080744,
+        "mfe_pct": 0.06361504740544399,
+        "net_r": -1.0249999999999995,
+        "pnl_pct": -0.08199999999999996
+      },
+      "delta_r": -0.21572025690692342,
+      "entry_price": 196.18,
+      "entry_session": "2019-07-05",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2019-09-27",
+        "holding_sessions": 60,
+        "mae_pct": -0.10459781833010506,
+        "mfe_pct": 0.06361504740544399,
+        "net_r": -1.240720256906923,
+        "pnl_pct": -0.09925762055255383
+      },
+      "security_id": "SEC-US-META",
+      "shares": 109,
+      "stop": 180.4856,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "GAP_STOP",
+        "exit_session": "2019-07-18",
+        "holding_sessions": 10,
+        "mae_pct": -0.15329509106769945,
+        "mfe_pct": 0.01710328055195731,
+        "net_r": -1.8268583626318424,
+        "pnl_pct": -0.14614866901054757
+      },
+      "delta_r": -2.0050754711993415,
+      "entry_price": 378.29,
+      "entry_session": "2019-07-05",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2019-09-27",
+        "holding_sessions": 60,
+        "mae_pct": -0.3331042322028074,
+        "mfe_pct": 0.01710328055195731,
+        "net_r": -3.831933833831184,
+        "pnl_pct": -0.3065547067064951
+      },
+      "security_id": "SEC-US-NFLX",
+      "shares": 57,
+      "stop": 348.0268,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2019-10-16",
+        "holding_sessions": 60,
+        "mae_pct": -0.05845932325413972,
+        "mfe_pct": 0.028293736501080025,
+        "net_r": 0.15228581713462855,
+        "pnl_pct": 0.012182865370770292
+      },
+      "delta_r": 0.0,
+      "entry_price": 138.9,
+      "entry_session": "2019-07-24",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2019-10-16",
+        "holding_sessions": 60,
+        "mae_pct": -0.05845932325413972,
+        "mfe_pct": 0.028293736501080025,
+        "net_r": 0.15228581713462855,
+        "pnl_pct": 0.012182865370770292
+      },
+      "security_id": "SEC-US-MSFT",
+      "shares": 154,
+      "stop": 127.788,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2019-10-30",
+        "holding_sessions": 60,
+        "mae_pct": -0.0365296803652968,
+        "mfe_pct": 0.24868282402528963,
+        "net_r": 1.4249384820315554,
+        "pnl_pct": 0.16168106779065705
+      },
+      "delta_r": 0.0,
+      "entry_price": 28.47,
+      "entry_session": "2019-08-07",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2019-10-30",
+        "holding_sessions": 60,
+        "mae_pct": -0.0365296803652968,
+        "mfe_pct": 0.24868282402528963,
+        "net_r": 1.4249384820315554,
+        "pnl_pct": 0.16168106779065705
+      },
+      "security_id": "SEC-US-AMD",
+      "shares": 252,
+      "stop": 25.239643,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2019-10-30",
+        "holding_sessions": 60,
+        "mae_pct": -0.07821122740247388,
+        "mfe_pct": 0.17411988582302573,
+        "net_r": 0.9049435896128932,
+        "pnl_pct": 0.08648715509039029
+      },
+      "delta_r": 0.0,
+      "entry_price": 52.55,
+      "entry_session": "2019-08-07",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2019-10-30",
+        "holding_sessions": 60,
+        "mae_pct": -0.07821122740247388,
+        "mfe_pct": 0.17411988582302573,
+        "net_r": 0.9049435896128932,
+        "pnl_pct": 0.08648715509039029
+      },
+      "security_id": "SEC-US-LITE",
+      "shares": 162,
+      "stop": 47.527698,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2019-10-31",
+        "holding_sessions": 60,
+        "mae_pct": -0.004045954045954092,
+        "mfe_pct": 0.25134865134865136,
+        "net_r": 3.055044955044957,
+        "pnl_pct": 0.24440359640359643
+      },
+      "delta_r": 0.0,
+      "entry_price": 200.2,
+      "entry_session": "2019-08-08",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2019-10-31",
+        "holding_sessions": 60,
+        "mae_pct": -0.004045954045954092,
+        "mfe_pct": 0.25134865134865136,
+        "net_r": 3.055044955044957,
+        "pnl_pct": 0.24440359640359643
+      },
+      "security_id": "SEC-US-AAPL",
+      "shares": 51,
+      "stop": 184.184,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2019-10-02",
+        "holding_sessions": 38,
+        "mae_pct": -0.08899999999999997,
+        "mfe_pct": 0.016315789473684283,
+        "net_r": -1.02495353717046,
+        "pnl_pct": -0.08214895789473686
+      },
+      "delta_r": 1.2377152751501774,
+      "entry_price": 190.0,
+      "entry_session": "2019-08-09",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2019-11-01",
+        "holding_sessions": 60,
+        "mae_pct": -0.08899999999999997,
+        "mfe_pct": 0.04257894736842105,
+        "net_r": 0.21276173797971756,
+        "pnl_pct": 0.01705263157894743
+      },
+      "security_id": "SEC-US-META",
+      "shares": 54,
+      "stop": 174.771698,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2019-12-31",
+        "holding_sessions": 60,
+        "mae_pct": -0.01451532725766358,
+        "mfe_pct": 0.13261806130903064,
+        "net_r": 1.3460646230323121,
+        "pnl_pct": 0.10768516984258492
+      },
+      "delta_r": 0.0,
+      "entry_price": 1207.0,
+      "entry_session": "2019-10-07",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2019-12-31",
+        "holding_sessions": 60,
+        "mae_pct": -0.01451532725766358,
+        "mfe_pct": 0.13261806130903064,
+        "net_r": 1.3460646230323121,
+        "pnl_pct": 0.10768516984258492
+      },
+      "security_id": "SEC-US-GOOGL",
+      "shares": 8,
+      "stop": 1110.44,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2020-01-30",
+        "holding_sessions": 60,
+        "mae_pct": -0.007636109276026759,
+        "mfe_pct": 0.27703726732211575,
+        "net_r": 3.2446343216881055,
+        "pnl_pct": 0.25957074573504846
+      },
+      "delta_r": 0.0,
+      "entry_price": 257.33,
+      "entry_session": "2019-11-04",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2020-01-30",
+        "holding_sessions": 60,
+        "mae_pct": -0.007636109276026759,
+        "mfe_pct": 0.27703726732211575,
+        "net_r": 3.2446343216881055,
+        "pnl_pct": 0.25957074573504846
+      },
+      "security_id": "SEC-US-AAPL",
+      "shares": 81,
+      "stop": 236.7436,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2020-01-30",
+        "holding_sessions": 60,
+        "mae_pct": -0.012219380505825495,
+        "mfe_pct": 0.500710429099176,
+        "net_r": 4.802365728900261,
+        "pnl_pct": 0.38418925831202055
+      },
+      "delta_r": 0.0,
+      "entry_price": 35.19,
+      "entry_session": "2019-11-04",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2020-01-30",
+        "holding_sessions": 60,
+        "mae_pct": -0.012219380505825495,
+        "mfe_pct": 0.500710429099176,
+        "net_r": 4.802365728900261,
+        "pnl_pct": 0.38418925831202055
+      },
+      "security_id": "SEC-US-AMD",
+      "shares": 598,
+      "stop": 32.3748,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2020-01-31",
+        "holding_sessions": 60,
+        "mae_pct": -0.024447537845832645,
+        "mfe_pct": 0.21115364538019854,
+        "net_r": 1.4485949190882224,
+        "pnl_pct": 0.1158875935270578
+      },
+      "delta_r": 0.0,
+      "entry_price": 57.47,
+      "entry_session": "2019-11-05",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2020-01-31",
+        "holding_sessions": 60,
+        "mae_pct": -0.024447537845832645,
+        "mfe_pct": 0.21115364538019854,
+        "net_r": 1.4485949190882224,
+        "pnl_pct": 0.1158875935270578
+      },
+      "security_id": "SEC-US-INTC",
+      "shares": 368,
+      "stop": 52.8724,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2019-11-20",
+        "holding_sessions": 12,
+        "mae_pct": -0.08847239016525599,
+        "mfe_pct": 0.002015316404675671,
+        "net_r": -1.0249999999999995,
+        "pnl_pct": -0.08199999999999996
+      },
+      "delta_r": 1.8741434905280143,
+      "entry_price": 49.62,
+      "entry_session": "2019-11-05",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2020-01-31",
+        "holding_sessions": 60,
+        "mae_pct": -0.1021765417170496,
+        "mfe_pct": 0.22047561467150345,
+        "net_r": 0.8491434905280149,
+        "pnl_pct": 0.06793147924224119
+      },
+      "security_id": "SEC-US-MU",
+      "shares": 426,
+      "stop": 45.6504,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2020-03-03",
+        "holding_sessions": 60,
+        "mae_pct": -0.013274845458868367,
+        "mfe_pct": 0.5041369472182595,
+        "net_r": 3.2887184973846852,
+        "pnl_pct": 0.263097479790775
+      },
+      "delta_r": 0.0,
+      "entry_price": 210.3,
+      "entry_session": "2019-12-05",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2020-03-03",
+        "holding_sessions": 60,
+        "mae_pct": -0.013274845458868367,
+        "mfe_pct": 0.5041369472182595,
+        "net_r": 3.2887184973846852,
+        "pnl_pct": 0.263097479790775
+      },
+      "security_id": "SEC-US-NVDA",
+      "shares": 101,
+      "stop": 193.476,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2020-02-27",
+        "holding_sessions": 38,
+        "mae_pct": -0.10033218503937014,
+        "mfe_pct": 0.1470226377952757,
+        "net_r": -1.0250000000000004,
+        "pnl_pct": -0.08199999999999996
+      },
+      "delta_r": -0.10574557086614211,
+      "entry_price": 81.28,
+      "entry_session": "2020-01-03",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2020-03-30",
+        "holding_sessions": 60,
+        "mae_pct": -0.2733759842519685,
+        "mfe_pct": 0.1470226377952757,
+        "net_r": -1.1307455708661425,
+        "pnl_pct": -0.09045964566929132
+      },
+      "security_id": "SEC-US-LITE",
+      "shares": 279,
+      "stop": 74.7776,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2020-02-27",
+        "holding_sessions": 17,
+        "mae_pct": -0.10528395619284181,
+        "mfe_pct": 0.07654962176809299,
+        "net_r": -1.0249999999999995,
+        "pnl_pct": -0.08199999999999996
+      },
+      "delta_r": 1.0564525234277964,
+      "entry_price": 177.14,
+      "entry_session": "2020-02-04",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2020-04-29",
+        "holding_sessions": 60,
+        "mae_pct": -0.24901208084001347,
+        "mfe_pct": 0.07654962176809299,
+        "net_r": 0.03145252342779683,
+        "pnl_pct": 0.0025162018742237464
+      },
+      "security_id": "SEC-US-MSFT",
+      "shares": 132,
+      "stop": 162.9688,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2020-02-24",
+        "holding_sessions": 13,
+        "mae_pct": -0.10361028684470819,
+        "mfe_pct": 0.013816765578635204,
+        "net_r": -1.025,
+        "pnl_pct": -0.08199999999999996
+      },
+      "delta_r": -0.11855526706231467,
+      "entry_price": 323.52,
+      "entry_session": "2020-02-05",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2020-04-30",
+        "holding_sessions": 60,
+        "mae_pct": -0.3404426310583579,
+        "mfe_pct": 0.013816765578635204,
+        "net_r": -1.1435552670623146,
+        "pnl_pct": -0.09148442136498514
+      },
+      "security_id": "SEC-US-AAPL",
+      "shares": 73,
+      "stop": 297.6384,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "GAP_STOP",
+        "exit_session": "2020-02-27",
+        "holding_sessions": 16,
+        "mae_pct": -0.1606681248757208,
+        "mfe_pct": 0.17856432690395718,
+        "net_r": -1.0382702306640932,
+        "pnl_pct": -0.09963372439848872
+      },
+      "delta_r": 1.4525812015685409,
+      "entry_price": 50.29,
+      "entry_session": "2020-02-05",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2020-04-30",
+        "holding_sessions": 60,
+        "mae_pct": -0.2692384171803539,
+        "mfe_pct": 0.17856432690395718,
+        "net_r": 0.41431097090444763,
+        "pnl_pct": 0.039757804732551305
+      },
+      "security_id": "SEC-US-AMD",
+      "shares": 394,
+      "stop": 45.464108,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2020-03-12",
+        "holding_sessions": 8,
+        "mae_pct": -0.2045686314501326,
+        "mfe_pct": 0.023862941056496112,
+        "net_r": -1.012323520178476,
+        "pnl_pct": -0.16429129104629825
+      },
+      "delta_r": 1.4662478060590098,
+      "entry_price": 49.03,
+      "entry_session": "2020-03-03",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2020-05-27",
+        "holding_sessions": 60,
+        "mae_pct": -0.25045890271262494,
+        "mfe_pct": 0.19579849071996747,
+        "net_r": 0.4539242858805338,
+        "pnl_pct": 0.07366795839282081
+      },
+      "security_id": "SEC-US-AMD",
+      "shares": 114,
+      "stop": 41.072858,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2020-03-11",
+        "holding_sessions": 7,
+        "mae_pct": -0.14393112647023165,
+        "mfe_pct": 0.0662665211592095,
+        "net_r": -1.016519870116603,
+        "pnl_pct": -0.12306632714926646
+      },
+      "delta_r": 0.1346448538411159,
+      "entry_price": 82.47,
+      "entry_session": "2020-03-03",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2020-05-27",
+        "holding_sessions": 60,
+        "mae_pct": -0.2838607978658906,
+        "mfe_pct": 0.0662665211592095,
+        "net_r": -0.881875016275487,
+        "pnl_pct": -0.10676536922517277
+      },
+      "security_id": "SEC-US-LITE",
+      "shares": 91,
+      "stop": 72.48566,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2020-03-06",
+        "holding_sessions": 4,
+        "mae_pct": -0.10241657077100119,
+        "mfe_pct": 0.0069044879171460405,
+        "net_r": -1.020020525069948,
+        "pnl_pct": -0.10189747986191033
+      },
+      "delta_r": 1.490721730713338,
+      "entry_price": 173.8,
+      "entry_session": "2020-03-03",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2020-05-27",
+        "holding_sessions": 60,
+        "mae_pct": -0.2375143843498274,
+        "mfe_pct": 0.07888377445339456,
+        "net_r": 0.47070120564339013,
+        "pnl_pct": 0.047021864211737485
+      },
+      "security_id": "SEC-US-MSFT",
+      "shares": 52,
+      "stop": 156.437818,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2020-03-20",
+        "holding_sessions": 8,
+        "mae_pct": -0.17805256137568037,
+        "mfe_pct": 0.013807274955838444,
+        "net_r": -1.0129773099415202,
+        "pnl_pct": -0.1561151447420599
+      },
+      "delta_r": 2.0701754385964906,
+      "entry_price": 277.39,
+      "entry_session": "2020-03-11",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2020-06-04",
+        "holding_sessions": 60,
+        "mae_pct": -0.23353401348282188,
+        "mfe_pct": 0.17891776920581126,
+        "net_r": 1.05719812865497,
+        "pnl_pct": 0.1629302426186956
+      },
+      "security_id": "SEC-US-AAPL",
+      "shares": 20,
+      "stop": 234.64,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2020-07-29",
+        "holding_sessions": 60,
+        "mae_pct": -0.09376754632229078,
+        "mfe_pct": 0.44469399213924765,
+        "net_r": 3.249239452463403,
+        "pnl_pct": 0.42210630731798626
+      },
+      "delta_r": 0.0,
+      "entry_price": 53.43,
+      "entry_session": "2020-05-05",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2020-07-29",
+        "holding_sessions": 60,
+        "mae_pct": -0.09376754632229078,
+        "mfe_pct": 0.44469399213924765,
+        "net_r": 3.249239452463403,
+        "pnl_pct": 0.42210630731798626
+      },
+      "security_id": "SEC-US-AMD",
+      "shares": 127,
+      "stop": 46.488948,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2020-07-29",
+        "holding_sessions": 60,
+        "mae_pct": -0.027350238068873822,
+        "mfe_pct": 0.2008083268741001,
+        "net_r": 1.6324853283135845,
+        "pnl_pct": 0.1305988262650868
+      },
+      "delta_r": 0.0,
+      "entry_price": 180.62,
+      "entry_session": "2020-05-05",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2020-07-29",
+        "holding_sessions": 60,
+        "mae_pct": -0.027350238068873822,
+        "mfe_pct": 0.2008083268741001,
+        "net_r": 1.6324853283135845,
+        "pnl_pct": 0.1305988262650868
+      },
+      "security_id": "SEC-US-MSFT",
+      "shares": 61,
+      "stop": 166.1704,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2020-07-29",
+        "holding_sessions": 60,
+        "mae_pct": -0.014146952313263683,
+        "mfe_pct": 0.4615693640640337,
+        "net_r": 4.044142256298026,
+        "pnl_pct": 0.4153350932412765
+      },
+      "delta_r": 0.0,
+      "entry_price": 295.47,
+      "entry_session": "2020-05-05",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2020-07-29",
+        "holding_sessions": 60,
+        "mae_pct": -0.014146952313263683,
+        "mfe_pct": 0.4615693640640337,
+        "net_r": 4.044142256298026,
+        "pnl_pct": 0.4153350932412765
+      },
+      "security_id": "SEC-US-NVDA",
+      "shares": 29,
+      "stop": 265.125108,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2020-08-03",
+        "holding_sessions": 60,
+        "mae_pct": -0.017765999214762518,
+        "mfe_pct": 0.4610185185185187,
+        "net_r": 5.296211228896747,
+        "pnl_pct": 0.4236968983117393
+      },
+      "delta_r": 0.0,
+      "entry_price": 305.64,
+      "entry_session": "2020-05-08",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2020-08-03",
+        "holding_sessions": 60,
+        "mae_pct": -0.017765999214762518,
+        "mfe_pct": 0.4610185185185187,
+        "net_r": 5.296211228896747,
+        "pnl_pct": 0.4236968983117393
+      },
+      "security_id": "SEC-US-AAPL",
+      "shares": 36,
+      "stop": 281.1888,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2020-09-02",
+        "holding_sessions": 60,
+        "mae_pct": -0.05355387523629496,
+        "mfe_pct": 0.3430056710775047,
+        "net_r": 4.164272211720229,
+        "pnl_pct": 0.33314177693761815
+      },
+      "delta_r": 0.0,
+      "entry_price": 2645.0,
+      "entry_session": "2020-06-10",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2020-09-02",
+        "holding_sessions": 60,
+        "mae_pct": -0.05355387523629496,
+        "mfe_pct": 0.3430056710775047,
+        "net_r": 4.164272211720229,
+        "pnl_pct": 0.33314177693761815
+      },
+      "security_id": "SEC-US-AMZN",
+      "shares": 4,
+      "stop": 2433.4,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2020-10-27",
+        "holding_sessions": 60,
+        "mae_pct": -0.053398391863102246,
+        "mfe_pct": 0.2662130895929262,
+        "net_r": 0.853805580372483,
+        "pnl_pct": 0.0683044464297986
+      },
+      "delta_r": 0.0,
+      "entry_price": 436.53,
+      "entry_session": "2020-08-04",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2020-10-27",
+        "holding_sessions": 60,
+        "mae_pct": -0.053398391863102246,
+        "mfe_pct": 0.2662130895929262,
+        "net_r": 0.853805580372483,
+        "pnl_pct": 0.0683044464297986
+      },
+      "security_id": "SEC-US-AAPL",
+      "shares": 54,
+      "stop": 401.6076,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2020-10-27",
+        "holding_sessions": 60,
+        "mae_pct": -0.08031685550987655,
+        "mfe_pct": 0.148079815501855,
+        "net_r": -0.23693093427783413,
+        "pnl_pct": -0.021492630101273336
+      },
+      "delta_r": 0.0,
+      "entry_price": 498.65,
+      "entry_session": "2020-08-04",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2020-10-27",
+        "holding_sessions": 60,
+        "mae_pct": -0.08031685550987655,
+        "mfe_pct": 0.148079815501855,
+        "net_r": -0.23693093427783413,
+        "pnl_pct": -0.021492630101273336
+      },
+      "security_id": "SEC-US-NFLX",
+      "shares": 42,
+      "stop": 453.416143,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2020-10-27",
+        "holding_sessions": 60,
+        "mae_pct": -0.02300904977375573,
+        "mfe_pct": 0.3330993212669682,
+        "net_r": 2.634219457013572,
+        "pnl_pct": 0.21073755656108584
+      },
+      "delta_r": 0.0,
+      "entry_price": 442.0,
+      "entry_session": "2020-08-04",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2020-10-27",
+        "holding_sessions": 60,
+        "mae_pct": -0.02300904977375573,
+        "mfe_pct": 0.3330993212669682,
+        "net_r": 2.634219457013572,
+        "pnl_pct": 0.21073755656108584
+      },
+      "security_id": "SEC-US-NVDA",
+      "shares": 54,
+      "stop": 406.64,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2020-09-17",
+        "holding_sessions": 31,
+        "mae_pct": -0.12664783427495285,
+        "mfe_pct": 0.10969868173258024,
+        "net_r": -1.0158662099030848,
+        "pnl_pct": -0.12805404896421835
+      },
+      "delta_r": 0.2007135312476196,
+      "entry_price": 84.96,
+      "entry_session": "2020-08-05",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2020-10-28",
+        "holding_sessions": 60,
+        "mae_pct": -0.1307674199623352,
+        "mfe_pct": 0.10969868173258024,
+        "net_r": -0.8151526786554653,
+        "pnl_pct": -0.10275329566854974
+      },
+      "security_id": "SEC-US-AMD",
+      "shares": 180,
+      "stop": 74.250448,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2020-12-28",
+        "holding_sessions": 60,
+        "mae_pct": -0.06453198377742486,
+        "mfe_pct": 0.10863988483113096,
+        "net_r": 0.49158723439338076,
+        "pnl_pct": 0.03932697875147051
+      },
+      "delta_r": 0.0,
+      "entry_price": 3153.63,
+      "entry_session": "2020-10-02",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2020-12-28",
+        "holding_sessions": 60,
+        "mae_pct": -0.06453198377742486,
+        "mfe_pct": 0.10863988483113096,
+        "net_r": 0.49158723439338076,
+        "pnl_pct": 0.03932697875147051
+      },
+      "security_id": "SEC-US-AMZN",
+      "shares": 7,
+      "stop": 2901.3396,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2020-12-28",
+        "holding_sessions": 60,
+        "mae_pct": -0.024463075686229407,
+        "mfe_pct": 0.13847096206117682,
+        "net_r": 0.7287807879927544,
+        "pnl_pct": 0.05844944680525255
+      },
+      "delta_r": 0.0,
+      "entry_price": 261.21,
+      "entry_session": "2020-10-02",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2020-12-28",
+        "holding_sessions": 60,
+        "mae_pct": -0.024463075686229407,
+        "mfe_pct": 0.13847096206117682,
+        "net_r": 0.7287807879927544,
+        "pnl_pct": 0.05844944680525255
+      },
+      "security_id": "SEC-US-META",
+      "shares": 94,
+      "stop": 240.260518,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2021-02-01",
+        "holding_sessions": 60,
+        "mae_pct": -0.03264797507788164,
+        "mfe_pct": 0.23651090342679137,
+        "net_r": 0.9959449194856949,
+        "pnl_pct": 0.09033644859813084
+      },
+      "delta_r": 0.0,
+      "entry_price": 80.25,
+      "entry_session": "2020-11-04",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2021-02-01",
+        "holding_sessions": 60,
+        "mae_pct": -0.03264797507788164,
+        "mfe_pct": 0.23651090342679137,
+        "net_r": 0.9959449194856949,
+        "pnl_pct": 0.09033644859813084
+      },
+      "security_id": "SEC-US-AMD",
+      "shares": 274,
+      "stop": 72.970983,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2021-02-01",
+        "holding_sessions": 60,
+        "mae_pct": -0.059693410758630994,
+        "mfe_pct": 0.09726086225890151,
+        "net_r": -0.1501080269482384,
+        "pnl_pct": -0.01307231547696863
+      },
+      "delta_r": 0.0,
+      "entry_price": 535.57,
+      "entry_session": "2020-11-04",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2021-02-01",
+        "holding_sessions": 60,
+        "mae_pct": -0.059693410758630994,
+        "mfe_pct": 0.09726086225890151,
+        "net_r": -0.1501080269482384,
+        "pnl_pct": -0.01307231547696863
+      },
+      "security_id": "SEC-US-NVDA",
+      "shares": 42,
+      "stop": 488.929323,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2021-02-02",
+        "holding_sessions": 60,
+        "mae_pct": -0.04370495972869859,
+        "mfe_pct": 0.23183552352691827,
+        "net_r": 1.7214412859290196,
+        "pnl_pct": 0.14420601949978828
+      },
+      "delta_r": 0.0,
+      "entry_price": 117.95,
+      "entry_session": "2020-11-05",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2021-02-02",
+        "holding_sessions": 60,
+        "mae_pct": -0.04370495972869859,
+        "mfe_pct": 0.23183552352691827,
+        "net_r": 1.7214412859290196,
+        "pnl_pct": 0.14420601949978828
+      },
+      "security_id": "SEC-US-AAPL",
+      "shares": 206,
+      "stop": 108.069268,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2021-01-14",
+        "holding_sessions": 5,
+        "mae_pct": -0.08833066229361553,
+        "mfe_pct": 0.002385300585143968,
+        "net_r": -1.0249999999999997,
+        "pnl_pct": -0.08199999999999996
+      },
+      "delta_r": 2.7680108829339183,
+      "entry_price": 268.31,
+      "entry_session": "2021-01-08",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2021-04-06",
+        "holding_sessions": 60,
+        "mae_pct": -0.08833066229361553,
+        "mfe_pct": 0.16041146435093734,
+        "net_r": 1.7430108829339184,
+        "pnl_pct": 0.13944087063471344
+      },
+      "security_id": "SEC-US-META",
+      "shares": 96,
+      "stop": 246.8452,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2021-01-27",
+        "holding_sessions": 13,
+        "mae_pct": -0.09946692512721111,
+        "mfe_pct": 0.05706324206445346,
+        "net_r": -1.0249999999999995,
+        "pnl_pct": -0.08199999999999996
+      },
+      "delta_r": 2.6582868912042628,
+      "entry_price": 82.54,
+      "entry_session": "2021-01-08",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2021-04-06",
+        "holding_sessions": 60,
+        "mae_pct": -0.09946692512721111,
+        "mfe_pct": 0.1643057911315724,
+        "net_r": 1.6332868912042635,
+        "pnl_pct": 0.1306629512963411
+      },
+      "security_id": "SEC-US-MU",
+      "shares": 314,
+      "stop": 75.9368,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2021-04-28",
+        "holding_sessions": 60,
+        "mae_pct": -0.02830420871277395,
+        "mfe_pct": 0.19320698990893415,
+        "net_r": 0.5598602232864711,
+        "pnl_pct": 0.05670046763475267
+      },
+      "delta_r": 0.0,
+      "entry_price": 81.26,
+      "entry_session": "2021-02-02",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2021-04-28",
+        "holding_sessions": 60,
+        "mae_pct": -0.02830420871277395,
+        "mfe_pct": 0.19320698990893415,
+        "net_r": 0.5598602232864711,
+        "pnl_pct": 0.05670046763475267
+      },
+      "security_id": "SEC-US-MU",
+      "shares": 244,
+      "stop": 73.030303,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2021-04-30",
+        "holding_sessions": 60,
+        "mae_pct": -0.07351850325558396,
+        "mfe_pct": 0.08691172834418537,
+        "net_r": 0.49424503420423804,
+        "pnl_pct": 0.03953960273633905
+      },
+      "delta_r": 0.0,
+      "entry_price": 242.66,
+      "entry_session": "2021-02-04",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2021-04-30",
+        "holding_sessions": 60,
+        "mae_pct": -0.07351850325558396,
+        "mfe_pct": 0.08691172834418537,
+        "net_r": 0.49424503420423804,
+        "pnl_pct": 0.03953960273633905
+      },
+      "security_id": "SEC-US-MSFT",
+      "shares": 103,
+      "stop": 223.2472,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2021-02-22",
+        "holding_sessions": 11,
+        "mae_pct": -0.08554787040407719,
+        "mfe_pct": 0.003836912995995645,
+        "net_r": -1.0248582325136095,
+        "pnl_pct": -0.08245624317437206
+      },
+      "delta_r": 0.5647320772098334,
+      "entry_price": 137.35,
+      "entry_session": "2021-02-05",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2021-05-03",
+        "holding_sessions": 60,
+        "mae_pct": -0.1539133600291227,
+        "mfe_pct": 0.003836912995995645,
+        "net_r": -0.46012615530377615,
+        "pnl_pct": -0.037020021842009476
+      },
+      "security_id": "SEC-US-AAPL",
+      "shares": 182,
+      "stop": 126.299335,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2021-02-23",
+        "holding_sessions": 10,
+        "mae_pct": -0.13163365794944748,
+        "mfe_pct": 0.030966188860925614,
+        "net_r": -1.0222892245781439,
+        "pnl_pct": -0.09172945617682449
+      },
+      "delta_r": -0.6535829154154555,
+      "entry_price": 91.39,
+      "entry_session": "2021-02-09",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2021-05-05",
+        "holding_sessions": 60,
+        "mae_pct": -0.19181529707845502,
+        "mfe_pct": 0.030966188860925614,
+        "net_r": -1.6758721399935994,
+        "pnl_pct": -0.15037509574351682
+      },
+      "security_id": "SEC-US-AMD",
+      "shares": 245,
+      "stop": 83.189625,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2021-03-03",
+        "holding_sessions": 16,
+        "mae_pct": -0.10751797777293526,
+        "mfe_pct": 0.07195467422096313,
+        "net_r": -1.025,
+        "pnl_pct": -0.08199999999999996
+      },
+      "delta_r": 1.1062322946175642,
+      "entry_price": 573.625,
+      "entry_session": "2021-02-09",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2021-05-05",
+        "holding_sessions": 60,
+        "mae_pct": -0.1934451950315973,
+        "mfe_pct": 0.1309235127478754,
+        "net_r": 0.08123229461756425,
+        "pnl_pct": 0.006498583569405138
+      },
+      "security_id": "SEC-US-NVDA",
+      "shares": 43,
+      "stop": 527.735,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2021-06-28",
+        "holding_sessions": 60,
+        "mae_pct": -0.00090585194327375,
+        "mfe_pct": 0.1465943227068438,
+        "net_r": 1.7422845399715876,
+        "pnl_pct": 0.13938276319772713
+      },
+      "delta_r": 0.0,
+      "entry_price": 2147.15,
+      "entry_session": "2021-04-05",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2021-06-28",
+        "holding_sessions": 60,
+        "mae_pct": -0.00090585194327375,
+        "mfe_pct": 0.1465943227068438,
+        "net_r": 1.7422845399715876,
+        "pnl_pct": 0.13938276319772713
+      },
+      "security_id": "SEC-US-GOOGL",
+      "shares": 11,
+      "stop": 1975.378,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2021-06-28",
+        "holding_sessions": 60,
+        "mae_pct": -0.029457364341085368,
+        "mfe_pct": 0.4481882098431582,
+        "net_r": 5.411991771927697,
+        "pnl_pct": 0.43942779881016736
+      },
+      "delta_r": 0.0,
+      "entry_price": 554.7,
+      "entry_session": "2021-04-05",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2021-06-28",
+        "holding_sessions": 60,
+        "mae_pct": -0.029457364341085368,
+        "mfe_pct": 0.4481882098431582,
+        "net_r": 5.411991771927697,
+        "pnl_pct": 0.43942779881016736
+      },
+      "security_id": "SEC-US-NVDA",
+      "shares": 43,
+      "stop": 509.661018,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2021-07-06",
+        "holding_sessions": 60,
+        "mae_pct": -0.07583760941744655,
+        "mfe_pct": 0.0818744340476909,
+        "net_r": 0.8918427407183818,
+        "pnl_pct": 0.07134741925747057
+      },
+      "delta_r": 0.0,
+      "entry_price": 132.52,
+      "entry_session": "2021-04-12",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2021-07-06",
+        "holding_sessions": 60,
+        "mae_pct": -0.07583760941744655,
+        "mfe_pct": 0.0818744340476909,
+        "net_r": 0.8918427407183818,
+        "pnl_pct": 0.07134741925747057
+      },
+      "security_id": "SEC-US-AAPL",
+      "shares": 190,
+      "stop": 121.9184,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2021-08-02",
+        "holding_sessions": 60,
+        "mae_pct": -0.0558397779099743,
+        "mfe_pct": 0.15292484632163394,
+        "net_r": 1.6223329367440007,
+        "pnl_pct": 0.12978663493952003
+      },
+      "delta_r": 0.0,
+      "entry_price": 252.15,
+      "entry_session": "2021-05-07",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2021-08-02",
+        "holding_sessions": 60,
+        "mae_pct": -0.0558397779099743,
+        "mfe_pct": 0.15292484632163394,
+        "net_r": 1.6223329367440007,
+        "pnl_pct": 0.12978663493952003
+      },
+      "security_id": "SEC-US-MSFT",
+      "shares": 99,
+      "stop": 231.978,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "GAP_STOP",
+        "exit_session": "2021-05-11",
+        "holding_sessions": 2,
+        "mae_pct": -0.09570335491465576,
+        "mfe_pct": 0.0005885815185402432,
+        "net_r": -1.1218405851366373,
+        "pnl_pct": -0.0924061212477929
+      },
+      "delta_r": 0.5130521026561525,
+      "entry_price": 84.95,
+      "entry_session": "2021-05-10",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2021-08-03",
+        "holding_sessions": 60,
+        "mae_pct": -0.14643908181283105,
+        "mfe_pct": 0.009476162448499137,
+        "net_r": -0.6087884824804848,
+        "pnl_pct": -0.050145968216598
+      },
+      "security_id": "SEC-US-MU",
+      "shares": 285,
+      "stop": 77.95266,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2021-08-31",
+        "holding_sessions": 60,
+        "mae_pct": -0.026878526878526876,
+        "mfe_pct": 0.13679536679536697,
+        "net_r": 1.5594965844965847,
+        "pnl_pct": 0.12475972675972669
+      },
+      "delta_r": 0.0,
+      "entry_price": 336.7,
+      "entry_session": "2021-06-08",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2021-08-31",
+        "holding_sessions": 60,
+        "mae_pct": -0.026878526878526876,
+        "mfe_pct": 0.13679536679536697,
+        "net_r": 1.5594965844965847,
+        "pnl_pct": 0.12475972675972669
+      },
+      "security_id": "SEC-US-META",
+      "shares": 75,
+      "stop": 309.764,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2021-09-27",
+        "holding_sessions": 60,
+        "mae_pct": -0.0007348761672756332,
+        "mfe_pct": 0.18760657734470154,
+        "net_r": 1.7941230207064565,
+        "pnl_pct": 0.1435298416565165
+      },
+      "delta_r": 0.0,
+      "entry_price": 2463.0,
+      "entry_session": "2021-07-02",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2021-09-27",
+        "holding_sessions": 60,
+        "mae_pct": -0.0007348761672756332,
+        "mfe_pct": 0.18760657734470154,
+        "net_r": 1.7941230207064565,
+        "pnl_pct": 0.1435298416565165
+      },
+      "security_id": "SEC-US-GOOGL",
+      "shares": 10,
+      "stop": 2265.96,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2021-07-16",
+        "holding_sessions": 10,
+        "mae_pct": -0.11580775557879419,
+        "mfe_pct": 0.021275554821704734,
+        "net_r": -1.0250000000000006,
+        "pnl_pct": -0.08200000000000007
+      },
+      "delta_r": 1.7484512692559346,
+      "entry_price": 817.605,
+      "entry_session": "2021-07-02",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2021-09-27",
+        "holding_sessions": 60,
+        "mae_pct": -0.12595935690217164,
+        "mfe_pct": 0.12734144238354705,
+        "net_r": 0.723451269255934,
+        "pnl_pct": 0.057876101540474734
+      },
+      "security_id": "SEC-US-NVDA",
+      "shares": 32,
+      "stop": 752.1966,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2021-10-26",
+        "holding_sessions": 60,
+        "mae_pct": -0.0798890429958391,
+        "mfe_pct": 0.17614424410540908,
+        "net_r": 1.4064098225901656,
+        "pnl_pct": 0.13466204345816002
+      },
+      "delta_r": 0.0,
+      "entry_price": 108.15,
+      "entry_session": "2021-08-03",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2021-10-26",
+        "holding_sessions": 60,
+        "mae_pct": -0.0798890429958391,
+        "mfe_pct": 0.17614424410540908,
+        "net_r": 1.4064098225901656,
+        "pnl_pct": 0.13466204345816002
+      },
+      "security_id": "SEC-US-AMD",
+      "shares": 207,
+      "stop": 97.794768,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2021-10-26",
+        "holding_sessions": 60,
+        "mae_pct": -0.0495440729483283,
+        "mfe_pct": 0.2797872340425531,
+        "net_r": 2.696054441365485,
+        "pnl_pct": 0.25033029381965544
+      },
+      "delta_r": 0.0,
+      "entry_price": 197.4,
+      "entry_session": "2021-08-03",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2021-10-26",
+        "holding_sessions": 60,
+        "mae_pct": -0.0495440729483283,
+        "mfe_pct": 0.2797872340425531,
+        "net_r": 2.696054441365485,
+        "pnl_pct": 0.25033029381965544
+      },
+      "security_id": "SEC-US-NVDA",
+      "shares": 117,
+      "stop": 179.07129,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2021-12-08",
+        "holding_sessions": 60,
+        "mae_pct": -0.07587548638132291,
+        "mfe_pct": 0.15508144826221737,
+        "net_r": 1.30760238739036,
+        "pnl_pct": 0.10460819099122887
+      },
+      "delta_r": 0.0,
+      "entry_price": 303.26,
+      "entry_session": "2021-09-15",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2021-12-08",
+        "holding_sessions": 60,
+        "mae_pct": -0.07587548638132291,
+        "mfe_pct": 0.15508144826221737,
+        "net_r": 1.30760238739036,
+        "pnl_pct": 0.10460819099122887
+      },
+      "security_id": "SEC-US-MSFT",
+      "shares": 91,
+      "stop": 278.9992,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2021-10-12",
+        "holding_sessions": 12,
+        "mae_pct": -0.092723088577922,
+        "mfe_pct": 0.01527994168179414,
+        "net_r": -1.025,
+        "pnl_pct": -0.08199999999999996
+      },
+      "delta_r": 0.12969368648246837,
+      "entry_price": 349.805,
+      "entry_session": "2021-09-27",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2021-12-20",
+        "holding_sessions": 60,
+        "mae_pct": -0.14380869341490266,
+        "mfe_pct": 0.01527994168179414,
+        "net_r": -0.8953063135175315,
+        "pnl_pct": -0.0716245050814025
+      },
+      "security_id": "SEC-US-META",
+      "shares": 78,
+      "stop": 321.8206,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2021-12-28",
+        "holding_sessions": 60,
+        "mae_pct": -0.03611710754226416,
+        "mfe_pct": 0.11037029137139087,
+        "net_r": 0.961177970807698,
+        "pnl_pct": 0.07689423766461578
+      },
+      "delta_r": 0.0,
+      "entry_price": 2719.21,
+      "entry_session": "2021-10-04",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2021-12-28",
+        "holding_sessions": 60,
+        "mae_pct": -0.03611710754226416,
+        "mfe_pct": 0.11037029137139087,
+        "net_r": 0.961177970807698,
+        "pnl_pct": 0.07689423766461578
+      },
+      "security_id": "SEC-US-GOOGL",
+      "shares": 9,
+      "stop": 2501.6732,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "GAP_STOP",
+        "exit_session": "2022-01-21",
+        "holding_sessions": 56,
+        "mae_pct": -0.09894663465262199,
+        "mfe_pct": 0.34176283789017115,
+        "net_r": -1.1437165982495554,
+        "pnl_pct": -0.09149732785996456
+      },
+      "delta_r": -0.7566222600882955,
+      "entry_price": 258.22,
+      "entry_session": "2021-11-02",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2022-01-27",
+        "holding_sessions": 60,
+        "mae_pct": -0.19092246921229972,
+        "mfe_pct": 0.34176283789017115,
+        "net_r": -1.9003388583378509,
+        "pnl_pct": -0.1520271086670283
+      },
+      "security_id": "SEC-US-NVDA",
+      "shares": 110,
+      "stop": 237.5624,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2022-01-20",
+        "holding_sessions": 53,
+        "mae_pct": -0.08029694720096958,
+        "mfe_pct": 0.24581395348837232,
+        "net_r": -1.0249999999999995,
+        "pnl_pct": -0.08199999999999985
+      },
+      "delta_r": -0.6816907810014408,
+      "entry_price": 132.01,
+      "entry_session": "2021-11-04",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2022-01-31",
+        "holding_sessions": 60,
+        "mae_pct": -0.24740549958336489,
+        "mfe_pct": 0.24581395348837232,
+        "net_r": -1.7066907810014402,
+        "pnl_pct": -0.13653526248011505
+      },
+      "security_id": "SEC-US-AMD",
+      "shares": 218,
+      "stop": 121.4492,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2021-12-01",
+        "holding_sessions": 12,
+        "mae_pct": -0.09418922985460221,
+        "mfe_pct": 0.028997922890045436,
+        "net_r": -1.0250000000000001,
+        "pnl_pct": -0.08199999999999996
+      },
+      "delta_r": -3.9238698833735812,
+      "entry_price": 681.235,
+      "entry_session": "2021-11-15",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2022-02-09",
+        "holding_sessions": 60,
+        "mae_pct": -0.4840840532268601,
+        "mfe_pct": 0.028997922890045436,
+        "net_r": -4.948869883373582,
+        "pnl_pct": -0.3959095906698863
+      },
+      "security_id": "SEC-US-NFLX",
+      "shares": 43,
+      "stop": 626.7362,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2022-01-06",
+        "holding_sessions": 15,
+        "mae_pct": -0.09224739988946395,
+        "mfe_pct": 0.039391046575893096,
+        "net_r": -1.0247645097686557,
+        "pnl_pct": -0.08276073456262889
+      },
+      "delta_r": -4.5178790125808534,
+      "entry_price": 597.09,
+      "entry_session": "2021-12-16",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2022-03-14",
+        "holding_sessions": 60,
+        "mae_pct": -0.44762096166407084,
+        "mfe_pct": 0.039391046575893096,
+        "net_r": -5.542643522349509,
+        "pnl_pct": -0.4476279622837429
+      },
+      "security_id": "SEC-US-NFLX",
+      "shares": 48,
+      "stop": 548.868573,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "GAP_STOP",
+        "exit_session": "2022-01-24",
+        "holding_sessions": 8,
+        "mae_pct": -0.12162162162162171,
+        "mfe_pct": 0.00601862366568251,
+        "net_r": -1.1676868044515079,
+        "pnl_pct": -0.09341494435612074
+      },
+      "delta_r": 0.8758233022938866,
+      "entry_price": 176.12,
+      "entry_session": "2022-01-12",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2022-04-07",
+        "holding_sessions": 60,
+        "mae_pct": -0.14649102884397003,
+        "mfe_pct": 0.021065182829888673,
+        "net_r": -0.29186350215762125,
+        "pnl_pct": -0.023349080172609726
+      },
+      "security_id": "SEC-US-AAPL",
+      "shares": 162,
+      "stop": 162.0304,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2023-04-28",
+        "holding_sessions": 60,
+        "mae_pct": -0.02757142857142858,
+        "mfe_pct": 0.33876190476190504,
+        "net_r": 2.749303128879843,
+        "pnl_pct": 0.3195714285714286
+      },
+      "delta_r": 0.0,
+      "entry_price": 210.0,
+      "entry_session": "2023-02-02",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2023-04-28",
+        "holding_sessions": 60,
+        "mae_pct": -0.02757142857142858,
+        "mfe_pct": 0.33876190476190504,
+        "net_r": 2.749303128879843,
+        "pnl_pct": 0.3195714285714286
+      },
+      "security_id": "SEC-US-NVDA",
+      "shares": 44,
+      "stop": 185.590178,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2023-05-02",
+        "holding_sessions": 60,
+        "mae_pct": -0.055349827953465436,
+        "mfe_pct": 0.1186629526462395,
+        "net_r": 1.3018064886121572,
+        "pnl_pct": 0.10414451908897249
+      },
+      "delta_r": 0.0,
+      "entry_price": 152.575,
+      "entry_session": "2023-02-06",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2023-05-02",
+        "holding_sessions": 60,
+        "mae_pct": -0.055349827953465436,
+        "mfe_pct": 0.1186629526462395,
+        "net_r": 1.3018064886121572,
+        "pnl_pct": 0.10414451908897249
+      },
+      "security_id": "SEC-US-AAPL",
+      "shares": 88,
+      "stop": 140.369,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2023-02-22",
+        "holding_sessions": 10,
+        "mae_pct": -0.08118594436310389,
+        "mfe_pct": 0.013030746705710028,
+        "net_r": -1.0249999999999997,
+        "pnl_pct": -0.08199999999999996
+      },
+      "delta_r": 2.504849926793561,
+      "entry_price": 273.2,
+      "entry_session": "2023-02-08",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2023-05-04",
+        "holding_sessions": 60,
+        "mae_pct": -0.09849926793557817,
+        "mfe_pct": 0.13418740849194744,
+        "net_r": 1.4798499267935614,
+        "pnl_pct": 0.11838799414348489
+      },
+      "security_id": "SEC-US-MSFT",
+      "shares": 49,
+      "stop": 251.344,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "GAP_STOP",
+        "exit_session": "2023-03-02",
+        "holding_sessions": 16,
+        "mae_pct": -0.10944747335015059,
+        "mfe_pct": 0.014403124745707485,
+        "net_r": -1.0863263796801004,
+        "pnl_pct": -0.09875319391325577
+      },
+      "delta_r": 0.9175220209760742,
+      "entry_price": 61.445,
+      "entry_session": "2023-02-08",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2023-05-04",
+        "holding_sessions": 60,
+        "mae_pct": -0.14134591911465544,
+        "mfe_pct": 0.05053299698917724,
+        "net_r": -0.16880435870402621,
+        "pnl_pct": -0.01534526812596637
+      },
+      "security_id": "SEC-US-MU",
+      "shares": 194,
+      "stop": 55.859303,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2023-02-23",
+        "holding_sessions": 6,
+        "mae_pct": -0.11869444522334072,
+        "mfe_pct": 0.01752516613857491,
+        "net_r": -1.0250000000000001,
+        "pnl_pct": -0.08199999999999996
+      },
+      "delta_r": 0.5839525558702294,
+      "entry_price": 356.63,
+      "entry_session": "2023-02-15",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2023-05-11",
+        "holding_sessions": 60,
+        "mae_pct": -0.19992681490620523,
+        "mfe_pct": 0.01752516613857491,
+        "net_r": -0.44104744412977065,
+        "pnl_pct": -0.035283795530381634
+      },
+      "security_id": "SEC-US-NFLX",
+      "shares": 38,
+      "stop": 328.0996,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2023-05-26",
+        "holding_sessions": 60,
+        "mae_pct": -0.025615607280225272,
+        "mfe_pct": 0.324715492287561,
+        "net_r": 4.008665093778501,
+        "pnl_pct": 0.3206932075022799
+      },
+      "delta_r": 0.0,
+      "entry_price": 252.19,
+      "entry_session": "2023-03-03",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2023-05-26",
+        "holding_sessions": 60,
+        "mae_pct": -0.025615607280225272,
+        "mfe_pct": 0.324715492287561,
+        "net_r": 4.008665093778501,
+        "pnl_pct": 0.3206932075022799
+      },
+      "security_id": "SEC-US-MSFT",
+      "shares": 53,
+      "stop": 232.0148,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2023-05-30",
+        "holding_sessions": 60,
+        "mae_pct": -0.0701063829787234,
+        "mfe_pct": 0.42898936170212765,
+        "net_r": 4.9297872340425535,
+        "pnl_pct": 0.3943829787234041
+      },
+      "delta_r": 0.0,
+      "entry_price": 188.0,
+      "entry_session": "2023-03-06",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2023-05-30",
+        "holding_sessions": 60,
+        "mae_pct": -0.0701063829787234,
+        "mfe_pct": 0.42898936170212765,
+        "net_r": 4.9297872340425535,
+        "pnl_pct": 0.3943829787234041
+      },
+      "security_id": "SEC-US-META",
+      "shares": 71,
+      "stop": 172.96,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2023-06-21",
+        "holding_sessions": 60,
+        "mae_pct": -0.036421920317508794,
+        "mfe_pct": 0.3697145473973438,
+        "net_r": 3.0949170183857775,
+        "pnl_pct": 0.29383269729812245
+      },
+      "delta_r": 0.0,
+      "entry_price": 327.55,
+      "entry_session": "2023-03-27",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2023-06-21",
+        "holding_sessions": 60,
+        "mae_pct": -0.036421920317508794,
+        "mfe_pct": 0.3697145473973438,
+        "net_r": 3.0949170183857775,
+        "pnl_pct": 0.29383269729812245
+      },
+      "security_id": "SEC-US-NFLX",
+      "shares": 35,
+      "stop": 296.452268,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2023-07-27",
+        "holding_sessions": 60,
+        "mae_pct": -0.05020920502092063,
+        "mfe_pct": 0.6768479776847978,
+        "net_r": 7.481973500697345,
+        "pnl_pct": 0.598557880055788
+      },
+      "delta_r": 0.0,
+      "entry_price": 286.8,
+      "entry_session": "2023-05-02",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2023-07-27",
+        "holding_sessions": 60,
+        "mae_pct": -0.05020920502092063,
+        "mfe_pct": 0.6768479776847978,
+        "net_r": 7.481973500697345,
+        "pnl_pct": 0.598557880055788
+      },
+      "security_id": "SEC-US-NVDA",
+      "shares": 49,
+      "stop": 263.856,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2023-08-01",
+        "holding_sessions": 60,
+        "mae_pct": -0.0031768443346275044,
+        "mfe_pct": 0.5628897517354985,
+        "net_r": 3.355791814831581,
+        "pnl_pct": 0.38169219908224505
+      },
+      "delta_r": 0.0,
+      "entry_price": 84.99,
+      "entry_session": "2023-05-05",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2023-08-01",
+        "holding_sessions": 60,
+        "mae_pct": -0.0031768443346275044,
+        "mfe_pct": 0.5628897517354985,
+        "net_r": 3.355791814831581,
+        "pnl_pct": 0.38169219908224505
+      },
+      "security_id": "SEC-US-AMD",
+      "shares": 115,
+      "stop": 75.323125,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2023-08-28",
+        "holding_sessions": 60,
+        "mae_pct": -0.05053913298613666,
+        "mfe_pct": 0.19636176923641147,
+        "net_r": 0.7818656935377354,
+        "pnl_pct": 0.06254925548301893
+      },
+      "delta_r": 0.0,
+      "entry_price": 272.66,
+      "entry_session": "2023-06-02",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2023-08-28",
+        "holding_sessions": 60,
+        "mae_pct": -0.05053913298613666,
+        "mfe_pct": 0.19636176923641147,
+        "net_r": 0.7818656935377354,
+        "pnl_pct": 0.06254925548301893
+      },
+      "security_id": "SEC-US-META",
+      "shares": 109,
+      "stop": 250.8472,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2023-09-06",
+        "holding_sessions": 60,
+        "mae_pct": -0.0497571367703451,
+        "mfe_pct": 0.11625783675208479,
+        "net_r": 0.16445157952401396,
+        "pnl_pct": 0.013156126361921096
+      },
+      "delta_r": 0.0,
+      "entry_price": 328.58,
+      "entry_session": "2023-06-12",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2023-09-06",
+        "holding_sessions": 60,
+        "mae_pct": -0.0497571367703451,
+        "mfe_pct": 0.11625783675208479,
+        "net_r": 0.16445157952401396,
+        "pnl_pct": 0.013156126361921096
+      },
+      "security_id": "SEC-US-MSFT",
+      "shares": 91,
+      "stop": 302.2936,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2023-08-17",
+        "holding_sessions": 26,
+        "mae_pct": -0.10160671140939603,
+        "mfe_pct": 0.08501118568232657,
+        "net_r": -1.025,
+        "pnl_pct": -0.08199999999999996
+      },
+      "delta_r": -1.0808165548098452,
+      "entry_price": 447.0,
+      "entry_session": "2023-07-13",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2023-10-05",
+        "holding_sessions": 60,
+        "mae_pct": -0.17843400447427293,
+        "mfe_pct": 0.08501118568232657,
+        "net_r": -2.105816554809845,
+        "pnl_pct": -0.16846532438478756
+      },
+      "security_id": "SEC-US-NFLX",
+      "shares": 69,
+      "stop": 411.24,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2023-08-02",
+        "holding_sessions": 1,
+        "mae_pct": -0.10134739308728768,
+        "mfe_pct": 8.368901163291476e-05,
+        "net_r": -1.0219813837970035,
+        "pnl_pct": -0.09298608251736551
+      },
+      "delta_r": -1.1555516331189482,
+      "entry_price": 119.49,
+      "entry_session": "2023-08-02",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2023-10-25",
+        "holding_sessions": 60,
+        "mae_pct": -0.20947359611682992,
+        "mfe_pct": 8.368901163291476e-05,
+        "net_r": -2.1775330169159517,
+        "pnl_pct": -0.19812519876140255
+      },
+      "security_id": "SEC-US-AMD",
+      "shares": 227,
+      "stop": 108.618073,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2023-10-26",
+        "holding_sessions": 52,
+        "mae_pct": -0.10493289946140039,
+        "mfe_pct": 0.12805206463195695,
+        "net_r": -1.0212181180633992,
+        "pnl_pct": -0.0962590664272891
+      },
+      "delta_r": 1.3330806459907472,
+      "entry_price": 445.6,
+      "entry_session": "2023-08-15",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2023-11-07",
+        "holding_sessions": 60,
+        "mae_pct": -0.11952401256732503,
+        "mfe_pct": 0.12805206463195695,
+        "net_r": 0.3118625279273479,
+        "pnl_pct": 0.029395870736086183
+      },
+      "security_id": "SEC-US-NVDA",
+      "shares": 57,
+      "stop": 403.59816,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2023-09-21",
+        "holding_sessions": 13,
+        "mae_pct": -0.12073394495412837,
+        "mfe_pct": 0.025871559633027452,
+        "net_r": -1.019521994123342,
+        "pnl_pct": -0.1044485504587156
+      },
+      "delta_r": 2.1650511171774562,
+      "entry_price": 109.0,
+      "entry_session": "2023-09-05",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2023-11-28",
+        "holding_sessions": 60,
+        "mae_pct": -0.1457339449541285,
+        "mfe_pct": 0.14460825688073387,
+        "net_r": 1.1455291230541143,
+        "pnl_pct": 0.1173577981651377
+      },
+      "security_id": "SEC-US-AMD",
+      "shares": 216,
+      "stop": 97.833108,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2023-09-13",
+        "holding_sessions": 6,
+        "mae_pct": -0.08452776353625646,
+        "mfe_pct": 0.006196919373174792,
+        "net_r": -1.0249999999999995,
+        "pnl_pct": -0.08199999999999996
+      },
+      "delta_r": 1.79634872160674,
+      "entry_price": 448.61,
+      "entry_session": "2023-09-06",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2023-11-29",
+        "holding_sessions": 60,
+        "mae_pct": -0.23155970664942827,
+        "mfe_pct": 0.07599028109047934,
+        "net_r": 0.7713487216067405,
+        "pnl_pct": 0.06170789772853924
+      },
+      "security_id": "SEC-US-NFLX",
+      "shares": 67,
+      "stop": 412.7212,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2023-10-26",
+        "holding_sessions": 33,
+        "mae_pct": -0.08790193582084671,
+        "mfe_pct": 0.07903241602193734,
+        "net_r": -1.0250000000000001,
+        "pnl_pct": -0.08199999999999996
+      },
+      "delta_r": 1.4880357784089076,
+      "entry_price": 306.33,
+      "entry_session": "2023-09-12",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2023-12-05",
+        "holding_sessions": 60,
+        "mae_pct": -0.08790193582084671,
+        "mfe_pct": 0.1194463487089088,
+        "net_r": 0.46303577840890753,
+        "pnl_pct": 0.037042862272712584
+      },
+      "security_id": "SEC-US-META",
+      "shares": 97,
+      "stop": 281.8236,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2023-10-25",
+        "holding_sessions": 29,
+        "mae_pct": -0.09356428467893896,
+        "mfe_pct": 0.02348166400927676,
+        "net_r": -1.025,
+        "pnl_pct": -0.08199999999999996
+      },
+      "delta_r": 0.7291274097695327,
+      "entry_price": 137.98,
+      "entry_session": "2023-09-15",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2023-12-08",
+        "holding_sessions": 60,
+        "mae_pct": -0.12881794462965646,
+        "mfe_pct": 0.02348166400927676,
+        "net_r": -0.2958725902304672,
+        "pnl_pct": -0.023669807218437366
+      },
+      "security_id": "SEC-US-GOOGL",
+      "shares": 215,
+      "stop": 126.9416,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2024-02-01",
+        "holding_sessions": 60,
+        "mae_pct": -0.010981168562088417,
+        "mfe_pct": 0.33440766149454393,
+        "net_r": 3.6201384338249927,
+        "pnl_pct": 0.3044828030756481
+      },
+      "delta_r": 0.0,
+      "entry_price": 434.38,
+      "entry_session": "2023-11-06",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2024-02-01",
+        "holding_sessions": 60,
+        "mae_pct": -0.010981168562088417,
+        "mfe_pct": 0.33440766149454393,
+        "net_r": 3.6201384338249927,
+        "pnl_pct": 0.3044828030756481
+      },
+      "security_id": "SEC-US-NFLX",
+      "shares": 62,
+      "stop": 397.845143,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2024-02-01",
+        "holding_sessions": 60,
+        "mae_pct": -0.008512846558977216,
+        "mfe_pct": 0.40217955371043046,
+        "net_r": 3.8476064268528014,
+        "pnl_pct": 0.38988905696209497
+      },
+      "delta_r": 0.0,
+      "entry_price": 452.845,
+      "entry_session": "2023-11-06",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2024-02-01",
+        "holding_sessions": 60,
+        "mae_pct": -0.008512846558977216,
+        "mfe_pct": 0.40217955371043046,
+        "net_r": 3.8476064268528014,
+        "pnl_pct": 0.38988905696209497
+      },
+      "security_id": "SEC-US-NVDA",
+      "shares": 49,
+      "stop": 406.95691,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2024-02-02",
+        "holding_sessions": 60,
+        "mae_pct": -0.010723522361698046,
+        "mfe_pct": 0.5327067432031791,
+        "net_r": 6.201345171260961,
+        "pnl_pct": 0.49610761370087686
+      },
+      "delta_r": 0.0,
+      "entry_price": 317.06,
+      "entry_session": "2023-11-07",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2024-02-02",
+        "holding_sessions": 60,
+        "mae_pct": -0.010723522361698046,
+        "mfe_pct": 0.5327067432031791,
+        "net_r": 6.201345171260961,
+        "pnl_pct": 0.49610761370087686
+      },
+      "security_id": "SEC-US-META",
+      "shares": 90,
+      "stop": 291.6952,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2024-02-08",
+        "holding_sessions": 60,
+        "mae_pct": -0.019773533885414918,
+        "mfe_pct": 0.562616190637147,
+        "net_r": 4.706267732510523,
+        "pnl_pct": 0.42904613824573246
+      },
+      "delta_r": 0.0,
+      "entry_price": 118.34,
+      "entry_session": "2023-11-13",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2024-02-08",
+        "holding_sessions": 60,
+        "mae_pct": -0.019773533885414918,
+        "mfe_pct": 0.562616190637147,
+        "net_r": 4.706267732510523,
+        "pnl_pct": 0.42904613824573246
+      },
+      "security_id": "SEC-US-AMD",
+      "shares": 214,
+      "stop": 107.551553,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2024-02-08",
+        "holding_sessions": 60,
+        "mae_pct": -0.029443011079071102,
+        "mfe_pct": 0.1669449081803005,
+        "net_r": 1.3153020185157072,
+        "pnl_pct": 0.10522416148125657
+      },
+      "delta_r": 0.0,
+      "entry_price": 131.78,
+      "entry_session": "2023-11-13",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2024-02-08",
+        "holding_sessions": 60,
+        "mae_pct": -0.029443011079071102,
+        "mfe_pct": 0.1669449081803005,
+        "net_r": 1.3153020185157072,
+        "pnl_pct": 0.10522416148125657
+      },
+      "security_id": "SEC-US-GOOGL",
+      "shares": 219,
+      "stop": 121.2376,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "GAP_STOP",
+        "exit_session": "2024-04-25",
+        "holding_sessions": 57,
+        "mae_pct": -0.1167957776453562,
+        "mfe_pct": 0.13218247212054157,
+        "net_r": -1.3013897165233688,
+        "pnl_pct": -0.10411117732186947
+      },
+      "delta_r": 0.23330424789308046,
+      "entry_price": 469.88,
+      "entry_session": "2024-02-05",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2024-04-30",
+        "holding_sessions": 60,
+        "mae_pct": -0.1167957776453562,
+        "mfe_pct": 0.13218247212054157,
+        "net_r": -1.0680854686302883,
+        "pnl_pct": -0.08544683749042303
+      },
+      "security_id": "SEC-US-META",
+      "shares": 72,
+      "stop": 432.2896,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2024-04-30",
+        "holding_sessions": 60,
+        "mae_pct": -0.028977647489923042,
+        "mfe_pct": 0.4276877977281055,
+        "net_r": 3.306073653352873,
+        "pnl_pct": 0.26448589226823005
+      },
+      "delta_r": 0.0,
+      "entry_price": 682.25,
+      "entry_session": "2024-02-05",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2024-04-30",
+        "holding_sessions": 60,
+        "mae_pct": -0.028977647489923042,
+        "mfe_pct": 0.4276877977281055,
+        "net_r": 3.306073653352873,
+        "pnl_pct": 0.26448589226823005
+      },
+      "security_id": "SEC-US-NVDA",
+      "shares": 50,
+      "stop": 627.67,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2024-04-17",
+        "holding_sessions": 46,
+        "mae_pct": -0.10887190178364614,
+        "mfe_pct": 0.3163076210331248,
+        "net_r": -1.0190797964865907,
+        "pnl_pct": -0.1068229210099606
+      },
+      "delta_r": -0.0082415041703634,
+      "entry_price": 172.68,
+      "entry_session": "2024-02-12",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2024-05-07",
+        "holding_sessions": 60,
+        "mae_pct": -0.18256312253880014,
+        "mfe_pct": 0.3163076210331248,
+        "net_r": -1.0273213006569542,
+        "pnl_pct": -0.10768681955061388
+      },
+      "security_id": "SEC-US-AMD",
+      "shares": 151,
+      "stop": 154.579178,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "GAP_STOP",
+        "exit_session": "2024-04-05",
+        "holding_sessions": 38,
+        "mae_pct": -0.11246831067066154,
+        "mfe_pct": 0.07461857570868857,
+        "net_r": -1.1176092557170505,
+        "pnl_pct": -0.0951090112929246
+      },
+      "delta_r": -2.314145917665154,
+      "entry_price": 43.39,
+      "entry_session": "2024-02-12",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2024-05-07",
+        "holding_sessions": 60,
+        "mae_pct": -0.3081355150956442,
+        "mfe_pct": 0.07461857570868857,
+        "net_r": -3.4317551733822045,
+        "pnl_pct": -0.29204378889144966
+      },
+      "security_id": "SEC-US-INTC",
+      "shares": 744,
+      "stop": 39.697493,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2024-04-22",
+        "holding_sessions": 45,
+        "mae_pct": -0.09203450875282693,
+        "mfe_pct": 0.07044141050339214,
+        "net_r": -1.0250000000000006,
+        "pnl_pct": -0.08200000000000018
+      },
+      "delta_r": 1.4112572242231325,
+      "entry_price": 596.95,
+      "entry_session": "2024-02-16",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2024-05-13",
+        "holding_sessions": 60,
+        "mae_pct": -0.09203450875282693,
+        "mfe_pct": 0.07044141050339214,
+        "net_r": 0.386257224223132,
+        "pnl_pct": 0.030900577937850615
+      },
+      "security_id": "SEC-US-NFLX",
+      "shares": 58,
+      "stop": 549.194,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2024-07-30",
+        "holding_sessions": 60,
+        "mae_pct": -0.0014840989399294013,
+        "mfe_pct": 0.23231448763250895,
+        "net_r": 1.1219262815440105,
+        "pnl_pct": 0.09796466431095419
+      },
+      "delta_r": 0.0,
+      "entry_price": 566.0,
+      "entry_session": "2024-05-03",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2024-07-30",
+        "holding_sessions": 60,
+        "mae_pct": -0.0014840989399294013,
+        "mfe_pct": 0.23231448763250895,
+        "net_r": 1.1219262815440105,
+        "pnl_pct": 0.09796466431095419
+      },
+      "security_id": "SEC-US-NFLX",
+      "shares": 54,
+      "stop": 516.577858,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2024-07-31",
+        "holding_sessions": 60,
+        "mae_pct": -0.027283901839413538,
+        "mfe_pct": 0.19256771587866006,
+        "net_r": 0.35764314224034066,
+        "pnl_pct": 0.04135133236753141
+      },
+      "delta_r": 0.0,
+      "entry_price": 455.58,
+      "entry_session": "2024-05-06",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2024-07-31",
+        "holding_sessions": 60,
+        "mae_pct": -0.027283901839413538,
+        "mfe_pct": 0.19256771587866006,
+        "net_r": 0.35764314224034066,
+        "pnl_pct": 0.04135133236753141
+      },
+      "security_id": "SEC-US-META",
+      "shares": 51,
+      "stop": 402.905035,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "GAP_STOP",
+        "exit_session": "2024-07-25",
+        "holding_sessions": 56,
+        "mae_pct": -0.12209884788779424,
+        "mfe_pct": 0.31520287193187513,
+        "net_r": -1.170154478078401,
+        "pnl_pct": -0.1094052429454
+      },
+      "delta_r": 0.2696669345477276,
+      "entry_price": 119.78,
+      "entry_session": "2024-05-06",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2024-07-31",
+        "holding_sessions": 60,
+        "mae_pct": -0.1460594423109034,
+        "mfe_pct": 0.31520287193187513,
+        "net_r": -0.9004875435306734,
+        "pnl_pct": -0.0841923526465187
+      },
+      "security_id": "SEC-US-MU",
+      "shares": 241,
+      "stop": 108.581,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2024-07-31",
+        "holding_sessions": 60,
+        "mae_pct": -0.012965656113659296,
+        "mfe_pct": 0.5747846515270163,
+        "net_r": 2.577250012458657,
+        "pnl_pct": 0.3072068464034008
+      },
+      "delta_r": 0.0,
+      "entry_price": 893.9,
+      "entry_session": "2024-05-06",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2024-07-31",
+        "holding_sessions": 60,
+        "mae_pct": -0.012965656113659296,
+        "mfe_pct": 0.5747846515270163,
+        "net_r": 2.577250012458657,
+        "pnl_pct": 0.3072068464034008
+      },
+      "security_id": "SEC-US-NVDA",
+      "shares": 25,
+      "stop": 787.34759,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "GAP_STOP",
+        "exit_session": "2024-07-24",
+        "holding_sessions": 13,
+        "mae_pct": -0.09518418073145696,
+        "mfe_pct": 0.009768556307433007,
+        "net_r": -1.097632244134916,
+        "pnl_pct": -0.08781057953079341
+      },
+      "delta_r": -0.4969851760183255,
+      "entry_price": 189.895,
+      "entry_session": "2024-07-08",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2024-09-30",
+        "holding_sessions": 60,
+        "mae_pct": -0.22370257247426217,
+        "mfe_pct": 0.009768556307433007,
+        "net_r": -1.5946174201532415,
+        "pnl_pct": -0.1275693936122595
+      },
+      "security_id": "SEC-US-GOOGL",
+      "shares": 192,
+      "stop": 174.7034,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2024-10-30",
+        "holding_sessions": 60,
+        "mae_pct": -0.0954456914942956,
+        "mfe_pct": 0.33967164455987353,
+        "net_r": 1.499436957936465,
+        "pnl_pct": 0.2905053334570076
+      },
+      "delta_r": 0.0,
+      "entry_price": 107.81,
+      "entry_session": "2024-08-07",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2024-10-30",
+        "holding_sessions": 60,
+        "mae_pct": -0.0954456914942956,
+        "mfe_pct": 0.33967164455987353,
+        "net_r": 1.499436957936465,
+        "pnl_pct": 0.2905053334570076
+      },
+      "security_id": "SEC-US-NVDA",
+      "shares": 131,
+      "stop": 86.922573,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2024-11-04",
+        "holding_sessions": 60,
+        "mae_pct": -0.006228209191759038,
+        "mfe_pct": 0.2250396196513471,
+        "net_r": 2.441521394611725,
+        "pnl_pct": 0.19532171156893807
+      },
+      "delta_r": 0.0,
+      "entry_price": 631.0,
+      "entry_session": "2024-08-12",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2024-11-04",
+        "holding_sessions": 60,
+        "mae_pct": -0.006228209191759038,
+        "mfe_pct": 0.2250396196513471,
+        "net_r": 2.441521394611725,
+        "pnl_pct": 0.19532171156893807
+      },
+      "security_id": "SEC-US-NFLX",
+      "shares": 54,
+      "stop": 580.52,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2024-11-06",
+        "holding_sessions": 60,
+        "mae_pct": -0.061470287467333073,
+        "mfe_pct": 0.14276786728780833,
+        "net_r": 0.8148842086940099,
+        "pnl_pct": 0.08225178956936707
+      },
+      "delta_r": 0.0,
+      "entry_price": 528.06,
+      "entry_session": "2024-08-14",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2024-11-06",
+        "holding_sessions": 60,
+        "mae_pct": -0.061470287467333073,
+        "mfe_pct": 0.14276786728780833,
+        "net_r": 0.8148842086940099,
+        "pnl_pct": 0.08225178956936707
+      },
+      "security_id": "SEC-US-META",
+      "shares": 51,
+      "stop": 474.759323,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2025-01-03",
+        "holding_sessions": 60,
+        "mae_pct": -0.024508280424454965,
+        "mfe_pct": 0.15592949429472114,
+        "net_r": 0.9950683745504625,
+        "pnl_pct": 0.07960546996403695
+      },
+      "delta_r": 0.0,
+      "entry_price": 225.23,
+      "entry_session": "2024-10-09",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2025-01-03",
+        "holding_sessions": 60,
+        "mae_pct": -0.024508280424454965,
+        "mfe_pct": 0.15592949429472114,
+        "net_r": 0.9950683745504625,
+        "pnl_pct": 0.07960546996403695
+      },
+      "security_id": "SEC-US-AAPL",
+      "shares": 158,
+      "stop": 207.2116,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2024-10-23",
+        "holding_sessions": 7,
+        "mae_pct": -0.1206250000000001,
+        "mfe_pct": 0.003875000000000073,
+        "net_r": -1.0197841181754843,
+        "pnl_pct": -0.10309118750000001
+      },
+      "delta_r": -0.20621295501153258,
+      "entry_price": 160.0,
+      "entry_session": "2024-10-15",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2025-01-10",
+        "holding_sessions": 60,
+        "mae_pct": -0.2305625,
+        "mfe_pct": 0.003875000000000073,
+        "net_r": -1.225997073187017,
+        "pnl_pct": -0.12393749999999992
+      },
+      "security_id": "SEC-US-ARM",
+      "shares": 177,
+      "stop": 143.82541,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2025-01-31",
+        "holding_sessions": 60,
+        "mae_pct": -0.014294497387027483,
+        "mfe_pct": 0.5985244389794036,
+        "net_r": 3.2488082181119444,
+        "pnl_pct": 0.3054085459575777
+      },
+      "delta_r": 0.0,
+      "entry_price": 65.06,
+      "entry_session": "2024-11-04",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2025-01-31",
+        "holding_sessions": 60,
+        "mae_pct": -0.014294497387027483,
+        "mfe_pct": 0.5985244389794036,
+        "net_r": 3.2488082181119444,
+        "pnl_pct": 0.3054085459575777
+      },
+      "security_id": "SEC-US-LITE",
+      "shares": 462,
+      "stop": 58.943948,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2024-12-16",
+        "holding_sessions": 28,
+        "mae_pct": -0.08764689423615013,
+        "mfe_pct": 0.06945998880805804,
+        "net_r": -1.0250000000000006,
+        "pnl_pct": -0.08200000000000007
+      },
+      "delta_r": -1.1247202014549507,
+      "entry_price": 142.96,
+      "entry_session": "2024-11-06",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2025-02-04",
+        "holding_sessions": 60,
+        "mae_pct": -0.20942921096810296,
+        "mfe_pct": 0.07120872971460535,
+        "net_r": -2.1497202014549512,
+        "pnl_pct": -0.17197761611639617
+      },
+      "security_id": "SEC-US-NVDA",
+      "shares": 248,
+      "stop": 131.5232,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2025-02-05",
+        "holding_sessions": 60,
+        "mae_pct": -0.0018301188937378532,
+        "mfe_pct": 0.2949370976617991,
+        "net_r": 3.6502754776866277,
+        "pnl_pct": 0.2920220382149301
+      },
+      "delta_r": 0.0,
+      "entry_price": 781.37,
+      "entry_session": "2024-11-07",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2025-02-05",
+        "holding_sessions": 60,
+        "mae_pct": -0.0018301188937378532,
+        "mfe_pct": 0.2949370976617991,
+        "net_r": 3.6502754776866277,
+        "pnl_pct": 0.2920220382149301
+      },
+      "security_id": "SEC-US-NFLX",
+      "shares": 46,
+      "stop": 718.8604,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2025-03-03",
+        "holding_sessions": 60,
+        "mae_pct": -0.02436974789915969,
+        "mfe_pct": 0.24606722689075622,
+        "net_r": 1.2470588235294087,
+        "pnl_pct": 0.09976470588235276
+      },
+      "delta_r": 0.0,
+      "entry_price": 595.0,
+      "entry_session": "2024-12-03",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2025-03-03",
+        "holding_sessions": 60,
+        "mae_pct": -0.02436974789915969,
+        "mfe_pct": 0.24606722689075622,
+        "net_r": 1.2470588235294087,
+        "pnl_pct": 0.09976470588235276
+      },
+      "security_id": "SEC-US-META",
+      "shares": 63,
+      "stop": 547.4,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "GAP_STOP",
+        "exit_session": "2025-01-27",
+        "holding_sessions": 15,
+        "mae_pct": -0.1664881079922862,
+        "mfe_pct": 0.09370759231483472,
+        "net_r": -1.2039432081524184,
+        "pnl_pct": -0.11063509749303613
+      },
+      "delta_r": -1.137876424133178,
+      "entry_price": 140.01,
+      "entry_session": "2025-01-03",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2025-04-01",
+        "holding_sessions": 60,
+        "mae_pct": -0.25962431254910356,
+        "mfe_pct": 0.09370759231483472,
+        "net_r": -2.3418196322855964,
+        "pnl_pct": -0.21519905721019916
+      },
+      "security_id": "SEC-US-NVDA",
+      "shares": 232,
+      "stop": 127.143928,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2025-01-21",
+        "holding_sessions": 9,
+        "mae_pct": -0.09712733558317554,
+        "mfe_pct": 0.010577002222405207,
+        "net_r": -1.0249999999999992,
+        "pnl_pct": -0.08199999999999996
+      },
+      "delta_r": -1.0341180344061243,
+      "entry_price": 242.98,
+      "entry_session": "2025-01-07",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2025-04-03",
+        "holding_sessions": 60,
+        "mae_pct": -0.17071363898263225,
+        "mfe_pct": 0.029920158037698652,
+        "net_r": -2.0591180344061235,
+        "pnl_pct": -0.1647294427524899
+      },
+      "security_id": "SEC-US-AAPL",
+      "shares": 157,
+      "stop": 223.5416,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2025-02-24",
+        "holding_sessions": 13,
+        "mae_pct": -0.1839080459770115,
+        "mfe_pct": 0.09195402298850586,
+        "net_r": -1.010995496901671,
+        "pnl_pct": -0.18389264367816083
+      },
+      "delta_r": -0.610145178474609,
+      "entry_price": 87.0,
+      "entry_session": "2025-02-05",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2025-05-01",
+        "holding_sessions": 60,
+        "mae_pct": -0.47528735632183905,
+        "mfe_pct": 0.09195402298850586,
+        "net_r": -1.62114067537628,
+        "pnl_pct": -0.29487356321839076
+      },
+      "security_id": "SEC-US-LITE",
+      "shares": 191,
+      "stop": 71.17534,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2025-03-06",
+        "holding_sessions": 20,
+        "mae_pct": -0.10801988351672343,
+        "mfe_pct": 0.05618780199827356,
+        "net_r": -1.0239209977405983,
+        "pnl_pct": -0.08560855269032719
+      },
+      "delta_r": 2.7636891088174584,
+      "entry_price": 1007.87,
+      "entry_session": "2025-02-06",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2025-05-02",
+        "holding_sessions": 60,
+        "mae_pct": -0.18531159772589711,
+        "mfe_pct": 0.15038645857104593,
+        "net_r": 1.7397681110768601,
+        "pnl_pct": 0.14545949378392065
+      },
+      "security_id": "SEC-US-NFLX",
+      "shares": 36,
+      "stop": 923.603448,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2025-02-25",
+        "holding_sessions": 7,
+        "mae_pct": -0.1686073736459276,
+        "mfe_pct": 0.007362407517247815,
+        "net_r": -1.0138905511469578,
+        "pnl_pct": -0.14598276777073627
+      },
+      "delta_r": -0.5331078444126458,
+      "entry_price": 160.165,
+      "entry_session": "2025-02-14",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2025-05-12",
+        "holding_sessions": 60,
+        "mae_pct": -0.5005150938095089,
+        "mfe_pct": 0.007362407517247815,
+        "net_r": -1.5469983955596036,
+        "pnl_pct": -0.22274111072956004
+      },
+      "security_id": "SEC-US-ARM",
+      "shares": 132,
+      "stop": 137.104,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2025-02-25",
+        "holding_sessions": 6,
+        "mae_pct": -0.11913357400722024,
+        "mfe_pct": 0.015360656898138147,
+        "net_r": -1.0183616571892768,
+        "pnl_pct": -0.11092263042401085
+      },
+      "delta_r": 0.2636880584890332,
+      "entry_price": 141.27,
+      "entry_session": "2025-02-18",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2025-05-13",
+        "holding_sessions": 60,
+        "mae_pct": -0.3867770935088837,
+        "mfe_pct": 0.015360656898138147,
+        "net_r": -0.7546735987002436,
+        "pnl_pct": -0.08220103348198493
+      },
+      "security_id": "SEC-US-NVDA",
+      "shares": 198,
+      "stop": 125.8825,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2025-03-10",
+        "holding_sessions": 3,
+        "mae_pct": -0.09433626543209883,
+        "mfe_pct": 0.003954475308642014,
+        "net_r": -1.0220168056519991,
+        "pnl_pct": -0.09283969907407397
+      },
+      "delta_r": 1.0002548241394897,
+      "entry_price": 648.0,
+      "entry_session": "2025-03-06",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2025-05-30",
+        "holding_sessions": 60,
+        "mae_pct": -0.2587577160493827,
+        "mfe_pct": 0.02344907407407404,
+        "net_r": -0.021761981512509476,
+        "pnl_pct": -0.0019768518518519223
+      },
+      "security_id": "SEC-US-META",
+      "shares": 49,
+      "stop": 589.135875,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2025-08-27",
+        "holding_sessions": 60,
+        "mae_pct": -0.00955402155053664,
+        "mfe_pct": 0.18665713498499503,
+        "net_r": 1.3984226183827415,
+        "pnl_pct": 0.11187380947061931
+      },
+      "delta_r": 0.0,
+      "entry_price": 671.445,
+      "entry_session": "2025-06-03",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2025-08-27",
+        "holding_sessions": 60,
+        "mae_pct": -0.00955402155053664,
+        "mfe_pct": 0.18665713498499503,
+        "net_r": 1.3984226183827415,
+        "pnl_pct": 0.11187380947061931
+      },
+      "security_id": "SEC-US-META",
+      "shares": 53,
+      "stop": 617.7294,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2025-08-27",
+        "holding_sessions": 60,
+        "mae_pct": -0.0616131227097968,
+        "mfe_pct": 0.09942043004582479,
+        "net_r": 0.012196586521515165,
+        "pnl_pct": 0.0009757269217212112
+      },
+      "delta_r": 0.0,
+      "entry_price": 1219.87,
+      "entry_session": "2025-06-03",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2025-08-27",
+        "holding_sessions": 60,
+        "mae_pct": -0.0616131227097968,
+        "mfe_pct": 0.09942043004582479,
+        "net_r": 0.012196586521515165,
+        "pnl_pct": 0.0009757269217212112
+      },
+      "security_id": "SEC-US-NFLX",
+      "shares": 29,
+      "stop": 1122.2804,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2025-08-28",
+        "holding_sessions": 60,
+        "mae_pct": -0.0021118534482758022,
+        "mfe_pct": 0.1970905172413795,
+        "net_r": 1.2268857758620686,
+        "pnl_pct": 0.0981508620689655
+      },
+      "delta_r": 0.0,
+      "entry_price": 464.0,
+      "entry_session": "2025-06-04",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2025-08-28",
+        "holding_sessions": 60,
+        "mae_pct": -0.0021118534482758022,
+        "mfe_pct": 0.1970905172413795,
+        "net_r": 1.2268857758620686,
+        "pnl_pct": 0.0981508620689655
+      },
+      "security_id": "SEC-US-MSFT",
+      "shares": 76,
+      "stop": 426.88,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2025-09-09",
+        "holding_sessions": 60,
+        "mae_pct": -0.011405109489051046,
+        "mfe_pct": 0.29477821448624364,
+        "net_r": 2.456049971925887,
+        "pnl_pct": 0.19648399775407066
+      },
+      "delta_r": 0.0,
+      "entry_price": 142.48,
+      "entry_session": "2025-06-13",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2025-09-09",
+        "holding_sessions": 60,
+        "mae_pct": -0.011405109489051046,
+        "mfe_pct": 0.29477821448624364,
+        "net_r": 2.456049971925887,
+        "pnl_pct": 0.19648399775407066
+      },
+      "security_id": "SEC-US-NVDA",
+      "shares": 251,
+      "stop": 131.0816,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2025-10-03",
+        "holding_sessions": 60,
+        "mae_pct": -0.013125067794771628,
+        "mfe_pct": 0.9361438333875691,
+        "net_r": 8.954017847965904,
+        "pnl_pct": 0.7748738474888817
+      },
+      "delta_r": 0.0,
+      "entry_price": 92.19,
+      "entry_session": "2025-07-11",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2025-10-03",
+        "holding_sessions": 60,
+        "mae_pct": -0.013125067794771628,
+        "mfe_pct": 0.9361438333875691,
+        "net_r": 8.954017847965904,
+        "pnl_pct": 0.7748738474888817
+      },
+      "security_id": "SEC-US-LITE",
+      "shares": 372,
+      "stop": 84.211948,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2025-10-22",
+        "holding_sessions": 35,
+        "mae_pct": -0.09049215173315894,
+        "mfe_pct": 0.035889470241988075,
+        "net_r": -1.0249999999999997,
+        "pnl_pct": -0.08199999999999996
+      },
+      "delta_r": -0.6534499672988887,
+      "entry_price": 1223.2,
+      "entry_session": "2025-09-04",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2025-11-26",
+        "holding_sessions": 60,
+        "mae_pct": -0.15533028122956194,
+        "mfe_pct": 0.035889470241988075,
+        "net_r": -1.6784499672988884,
+        "pnl_pct": -0.13427599738391105
+      },
+      "security_id": "SEC-US-NFLX",
+      "shares": 32,
+      "stop": 1125.344,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2025-11-25",
+        "holding_sessions": 58,
+        "mae_pct": -0.084998133851926,
+        "mfe_pct": 0.08770895947512147,
+        "net_r": -1.025,
+        "pnl_pct": -0.08199999999999996
+      },
+      "delta_r": 0.6034435342880162,
+      "entry_price": 509.07,
+      "entry_session": "2025-09-05",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2025-11-28",
+        "holding_sessions": 60,
+        "mae_pct": -0.084998133851926,
+        "mfe_pct": 0.08770895947512147,
+        "net_r": -0.4215564657119837,
+        "pnl_pct": -0.033724517256958686
+      },
+      "security_id": "SEC-US-MSFT",
+      "shares": 79,
+      "stop": 468.3444,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2025-12-03",
+        "holding_sessions": 60,
+        "mae_pct": -0.08371040723981904,
+        "mfe_pct": 0.6331166687049041,
+        "net_r": 3.758819068831694,
+        "pnl_pct": 0.32856133056133063
+      },
+      "delta_r": 0.0,
+      "entry_price": 163.54,
+      "entry_session": "2025-09-10",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2025-12-03",
+        "holding_sessions": 60,
+        "mae_pct": -0.08371040723981904,
+        "mfe_pct": 0.6331166687049041,
+        "net_r": 3.758819068831694,
+        "pnl_pct": 0.32856133056133063
+      },
+      "security_id": "SEC-US-AMD",
+      "shares": 227,
+      "stop": 149.24484,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2025-12-04",
+        "holding_sessions": 60,
+        "mae_pct": -0.06272261798753342,
+        "mfe_pct": 0.18093221282279592,
+        "net_r": 0.2330977292965246,
+        "pnl_pct": 0.018647818343721978
+      },
+      "delta_r": 0.0,
+      "entry_price": 179.68,
+      "entry_session": "2025-09-11",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2025-12-04",
+        "holding_sessions": 60,
+        "mae_pct": -0.06272261798753342,
+        "mfe_pct": 0.18093221282279592,
+        "net_r": 0.2330977292965246,
+        "pnl_pct": 0.018647818343721978
+      },
+      "security_id": "SEC-US-NVDA",
+      "shares": 227,
+      "stop": 165.3056,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2025-11-21",
+        "holding_sessions": 14,
+        "mae_pct": -0.13302421896101546,
+        "mfe_pct": 0.17304402628972726,
+        "net_r": -1.0172229808092155,
+        "pnl_pct": -0.11812391734941918
+      },
+      "delta_r": 8.476226622763345,
+      "entry_price": 222.14,
+      "entry_session": "2025-11-04",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2026-01-30",
+        "holding_sessions": 60,
+        "mae_pct": -0.13302421896101546,
+        "mfe_pct": 1.0510263797605117,
+        "net_r": 7.459003641954129,
+        "pnl_pct": 0.8661687224272983
+      },
+      "security_id": "SEC-US-MU",
+      "shares": 135,
+      "stop": 196.344233,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2026-02-03",
+        "holding_sessions": 60,
+        "mae_pct": -0.11640407024454291,
+        "mfe_pct": 0.903824060397177,
+        "net_r": 4.6111066007411345,
+        "pnl_pct": 0.7832453635319219
+      },
+      "delta_r": 0.0,
+      "entry_price": 243.72,
+      "entry_session": "2025-11-06",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2026-02-03",
+        "holding_sessions": 60,
+        "mae_pct": -0.11640407024454291,
+        "mfe_pct": 0.903824060397177,
+        "net_r": 4.6111066007411345,
+        "pnl_pct": 0.7832453635319219
+      },
+      "security_id": "SEC-US-LITE",
+      "shares": 84,
+      "stop": 202.321573,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2026-02-23",
+        "holding_sessions": 60,
+        "mae_pct": -0.09159743723368385,
+        "mfe_pct": 0.07050672879433484,
+        "net_r": -0.5060917918671217,
+        "pnl_pct": -0.046480549339382615
+      },
+      "delta_r": 0.0,
+      "entry_price": 326.21,
+      "entry_session": "2025-11-25",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2026-02-23",
+        "holding_sessions": 60,
+        "mae_pct": -0.09159743723368385,
+        "mfe_pct": 0.07050672879433484,
+        "net_r": -0.5060917918671217,
+        "pnl_pct": -0.046480549339382615
+      },
+      "security_id": "SEC-US-GOOGL",
+      "shares": 109,
+      "stop": 296.250178,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2026-02-27",
+        "holding_sessions": 60,
+        "mae_pct": -0.07143605101677519,
+        "mfe_pct": 0.9083750445035499,
+        "net_r": 4.2366561447056075,
+        "pnl_pct": 0.725722046535006
+      },
+      "delta_r": 0.0,
+      "entry_price": 238.745,
+      "entry_session": "2025-12-02",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2026-02-27",
+        "holding_sessions": 60,
+        "mae_pct": -0.07143605101677519,
+        "mfe_pct": 0.9083750445035499,
+        "net_r": 4.2366561447056075,
+        "pnl_pct": 0.725722046535006
+      },
+      "security_id": "SEC-US-MU",
+      "shares": 82,
+      "stop": 197.848948,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2026-01-07",
+        "holding_sessions": 3,
+        "mae_pct": -0.10021933158157625,
+        "mfe_pct": 0.016395578622771412,
+        "net_r": -1.0239288837876446,
+        "pnl_pct": -0.08558099850159617
+      },
+      "delta_r": -0.3934135785048367,
+      "entry_price": 230.245,
+      "entry_session": "2026-01-05",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2026-03-31",
+        "holding_sessions": 60,
+        "mae_pct": -0.18252296466807094,
+        "mfe_pct": 0.1594605746053117,
+        "net_r": -1.4173424622924813,
+        "pnl_pct": -0.11846289821711653
+      },
+      "security_id": "SEC-US-AMD",
+      "shares": 180,
+      "stop": 211.000893,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2026-03-31",
+        "holding_sessions": 60,
+        "mae_pct": -0.06347679730704492,
+        "mfe_pct": 0.31281558066842985,
+        "net_r": 0.6795849829759357,
+        "pnl_pct": 0.0590723731666265
+      },
+      "delta_r": 0.0,
+      "entry_price": 41.59,
+      "entry_session": "2026-01-05",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2026-03-31",
+        "holding_sessions": 60,
+        "mae_pct": -0.06347679730704492,
+        "mfe_pct": 0.31281558066842985,
+        "net_r": 0.6795849829759357,
+        "pnl_pct": 0.0590723731666265
+      },
+      "security_id": "SEC-US-INTC",
+      "shares": 961,
+      "stop": 37.974823,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2026-05-01",
+        "holding_sessions": 60,
+        "mae_pct": -0.025698042272248034,
+        "mfe_pct": 1.258332951263124,
+        "net_r": 5.218512354645614,
+        "pnl_pct": 1.175639723075512
+      },
+      "delta_r": 0.0,
+      "entry_price": 436.22,
+      "entry_session": "2026-02-05",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2026-05-01",
+        "holding_sessions": 60,
+        "mae_pct": -0.025698042272248034,
+        "mfe_pct": 1.258332951263124,
+        "net_r": 5.218512354645614,
+        "pnl_pct": 1.175639723075512
+      },
+      "security_id": "SEC-US-LITE",
+      "shares": 36,
+      "stop": 337.94725,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2026-03-30",
+        "holding_sessions": 18,
+        "mae_pct": -0.20082789764174624,
+        "mfe_pct": 0.18248871048670323,
+        "net_r": -1.013412287266899,
+        "pnl_pct": -0.15111699698946313
+      },
+      "delta_r": 10.632720866361074,
+      "entry_price": 398.6,
+      "entry_session": "2026-03-05",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2026-05-29",
+        "holding_sessions": 60,
+        "mae_pct": -0.21816357250376328,
+        "mfe_pct": 1.4614902157551426,
+        "net_r": 9.619308579094175,
+        "pnl_pct": 1.4344024084295033
+      },
+      "security_id": "SEC-US-MU",
+      "shares": 61,
+      "stop": 339.161965,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2026-07-29",
+        "holding_sessions": 60,
+        "mae_pct": -0.05997613166440019,
+        "mfe_pct": 0.6228525436429742,
+        "net_r": 1.527725061039332,
+        "pnl_pct": 0.19019560933640478
+      },
+      "delta_r": 0.0,
+      "entry_price": 360.31,
+      "entry_session": "2026-05-04",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2026-07-29",
+        "holding_sessions": 60,
+        "mae_pct": -0.05997613166440019,
+        "mfe_pct": 0.6228525436429742,
+        "net_r": 1.527725061039332,
+        "pnl_pct": 0.19019560933640478
+      },
+      "security_id": "SEC-US-AMD",
+      "shares": 82,
+      "stop": 315.452858,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2026-07-28",
+        "holding_sessions": 59,
+        "mae_pct": -0.16212946158499708,
+        "mfe_pct": 0.4352692075015123,
+        "net_r": -1.0145778283401188,
+        "pnl_pct": -0.1391946460980037
+      },
+      "delta_r": -0.2714076945152728,
+      "entry_price": 99.18,
+      "entry_session": "2026-05-04",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2026-07-29",
+        "holding_sessions": 60,
+        "mae_pct": -0.1753377697116354,
+        "mfe_pct": 0.4352692075015123,
+        "net_r": -1.2859855228553916,
+        "pnl_pct": -0.17643032869530162
+      },
+      "security_id": "SEC-US-INTC",
+      "shares": 273,
+      "stop": 85.573035,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2026-07-29",
+        "holding_sessions": 60,
+        "mae_pct": -0.005066000713521257,
+        "mfe_pct": 1.2386728505173026,
+        "net_r": 2.452216931462413,
+        "pnl_pct": 0.3164980378166249
+      },
+      "delta_r": 0.0,
+      "entry_price": 560.6,
+      "entry_session": "2026-05-04",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2026-07-29",
+        "holding_sessions": 60,
+        "mae_pct": -0.005066000713521257,
+        "mfe_pct": 1.2386728505173026,
+        "net_r": 2.452216931462413,
+        "pnl_pct": 0.3164980378166249
+      },
+      "security_id": "SEC-US-MU",
+      "shares": 51,
+      "stop": 488.245553,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2026-06-02",
+        "holding_sessions": 19,
+        "mae_pct": -0.09081916067420004,
+        "mfe_pct": 0.03643673350327847,
+        "net_r": -1.0250000000000008,
+        "pnl_pct": -0.08200000000000007
+      },
+      "delta_r": -0.20150540907303682,
+      "entry_price": 394.245,
+      "entry_session": "2026-05-06",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2026-07-31",
+        "holding_sessions": 60,
+        "mae_pct": -0.20070007229007347,
+        "mfe_pct": 0.03643673350327847,
+        "net_r": -1.2265054090730376,
+        "pnl_pct": -0.09812043272584303
+      },
+      "security_id": "SEC-US-GOOGL",
+      "shares": 121,
+      "stop": 362.7054,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2026-06-01",
+        "holding_sessions": 14,
+        "mae_pct": -0.20782141559372636,
+        "mfe_pct": 0.06624240102923706,
+        "net_r": -1.0102120699710782,
+        "pnl_pct": -0.1978466800231775
+      },
+      "delta_r": 0.09651618657419614,
+      "entry_price": 1018.23,
+      "entry_session": "2026-05-12",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2026-08-06",
+        "holding_sessions": 60,
+        "mae_pct": -0.4158097875725524,
+        "mfe_pct": 0.06624240102923706,
+        "net_r": -0.913695883396882,
+        "pnl_pct": -0.17894430531412364
+      },
+      "security_id": "SEC-US-LITE",
+      "shares": 19,
+      "stop": 818.813035,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2026-07-02",
+        "holding_sessions": 22,
+        "mae_pct": -0.240736582079497,
+        "mfe_pct": 0.12233593190251613,
+        "net_r": -1.0092454739933043,
+        "pnl_pct": -0.21832206217317385
+      },
+      "delta_r": 1.0192793240372389,
+      "entry_price": 935.13,
+      "entry_session": "2026-06-02",
+      "no_stop": {
+        "data_quality": "good",
+        "exit_reason": "TIME_EXIT",
+        "exit_session": "2026-08-26",
+        "holding_sessions": 60,
+        "mae_pct": -0.36389592890828004,
+        "mfe_pct": 0.12233593190251613,
+        "net_r": 0.010033850043934619,
+        "pnl_pct": 0.0021705431330403275
+      },
+      "security_id": "SEC-US-LITE",
+      "shares": 19,
+      "stop": 732.84075,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "good",
+        "exit_reason": "STOP",
+        "exit_session": "2026-07-28",
+        "holding_sessions": 13,
+        "mae_pct": -0.25509761388286334,
+        "mfe_pct": 0.01729346141927479,
+        "net_r": -1.0078836541702074,
+        "pnl_pct": -0.25568946389835756
+      },
+      "delta_r": null,
+      "entry_price": 322.7,
+      "entry_session": "2026-07-10",
+      "no_stop": {
+        "data_quality": "right_censored",
+        "exit_reason": "DATA_END",
+        "exit_session": "2026-09-18",
+        "holding_sessions": 50,
+        "mae_pct": -0.3201425472575148,
+        "mfe_pct": 0.01729346141927479,
+        "net_r": null,
+        "pnl_pct": null
+      },
+      "security_id": "SEC-US-ARM",
+      "shares": 48,
+      "stop": 240.83441,
+      "stopped": true
+    },
+    {
+      "actual": {
+        "data_quality": "right_censored",
+        "exit_reason": "DATA_END",
+        "exit_session": "2026-09-18",
+        "holding_sessions": 32,
+        "mae_pct": -0.09080589066966638,
+        "mfe_pct": 0.15565692112405682,
+        "net_r": null,
+        "pnl_pct": null
+      },
+      "delta_r": null,
+      "entry_price": 484.495,
+      "entry_session": "2026-08-05",
+      "no_stop": {
+        "data_quality": "right_censored",
+        "exit_reason": "DATA_END",
+        "exit_session": "2026-09-18",
+        "holding_sessions": 32,
+        "mae_pct": -0.09080589066966638,
+        "mfe_pct": 0.15565692112405682,
+        "net_r": null,
+        "pnl_pct": null
+      },
+      "security_id": "SEC-US-AMD",
+      "shares": 17,
+      "stop": 381.246035,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "right_censored",
+        "exit_reason": "DATA_END",
+        "exit_session": "2026-09-18",
+        "holding_sessions": 32,
+        "mae_pct": -0.06585338303399968,
+        "mfe_pct": 0.17745397040551247,
+        "net_r": null,
+        "pnl_pct": null
+      },
+      "delta_r": null,
+      "entry_price": 885.3,
+      "entry_session": "2026-08-05",
+      "no_stop": {
+        "data_quality": "right_censored",
+        "exit_reason": "DATA_END",
+        "exit_session": "2026-09-18",
+        "holding_sessions": 32,
+        "mae_pct": -0.06585338303399968,
+        "mfe_pct": 0.17745397040551247,
+        "net_r": null,
+        "pnl_pct": null
+      },
+      "security_id": "SEC-US-MU",
+      "shares": 8,
+      "stop": 669.34825,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "right_censored",
+        "exit_reason": "DATA_END",
+        "exit_session": "2026-09-18",
+        "holding_sessions": 26,
+        "mae_pct": -0.16126490000985128,
+        "mfe_pct": 0.09713328736085103,
+        "net_r": null,
+        "pnl_pct": null
+      },
+      "delta_r": null,
+      "entry_price": 101.51,
+      "entry_session": "2026-08-13",
+      "no_stop": {
+        "data_quality": "right_censored",
+        "exit_reason": "DATA_END",
+        "exit_session": "2026-09-18",
+        "holding_sessions": 26,
+        "mae_pct": -0.16126490000985128,
+        "mfe_pct": 0.09713328736085103,
+        "net_r": null,
+        "pnl_pct": null
+      },
+      "security_id": "SEC-US-INTC",
+      "shares": 100,
+      "stop": 83.289483,
+      "stopped": false
+    },
+    {
+      "actual": {
+        "data_quality": "right_censored",
+        "exit_reason": "DATA_END",
+        "exit_session": "2026-09-18",
+        "holding_sessions": 23,
+        "mae_pct": -0.13726244941052257,
+        "mfe_pct": 0.12920112616575752,
+        "net_r": null,
+        "pnl_pct": null
+      },
+      "delta_r": null,
+      "entry_price": 909.28,
+      "entry_session": "2026-08-18",
+      "no_stop": {
+        "data_quality": "right_censored",
+        "exit_reason": "DATA_END",
+        "exit_session": "2026-09-18",
+        "holding_sessions": 23,
+        "mae_pct": -0.13726244941052257,
+        "mfe_pct": 0.12920112616575752,
+        "net_r": null,
+        "pnl_pct": null
+      },
+      "security_id": "SEC-US-LITE",
+      "shares": 8,
+      "stop": 693.101608,
+      "stopped": false
+    }
+  ],
+  "verdict": {
+    "checks": {
+      "delta_positive": true,
+      "leave_one_out_positive": true,
+      "no_single_security_over_50pct": false,
+      "no_stop_never_leaked_a_stop_exit": true,
+      "survivors_arms_identical": true
+    },
+    "note": "top2/top5 占比为描述性；判定用登记的两条数值门槛。",
+    "token": "CONCENTRATED",
+    "top2_share_of_delta": 0.803697099807128,
+    "top5_trade_share_of_delta": 1.1052189372529324
+  }
+}
