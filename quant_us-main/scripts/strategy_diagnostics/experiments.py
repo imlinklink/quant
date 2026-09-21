@@ -165,6 +165,46 @@ def run(path, variant='baseline'):
     return result
 
 
+def step_account_session(state, *, session, prices, acts, due, manifest, fee_bp,
+                         store=None, scope=None, saved=None):
+    """**一个账户的一个交易日**。回测（`_run`）与三臂前向 runner 共用这一处。
+
+    做的事按顺序：建当日 bars → 持仓分红必须有派发日（否则中止，不静默）→ `step`
+    → 四条账户级断言（不变量 / 估值完整 / NAV 会计恒等式）→ 落账（序号幂等）。
+
+    `store=None` 表示只推进不落账（回测里的 observer-off 控制账户就这么用）。
+
+    抽出来的理由与前向 runner 的登记有关：三臂只允许差"宇宙"，所以"一天怎么走"
+    必须是**同一份实现** —— 另一份就是分叉的开始。
+    """
+    date = str(session.date())
+    bars = {str(r.security_id): {k: to_micro(getattr(r, 'raw_' + k))
+                                 for k in ('open', 'high', 'low', 'close')}
+            for r in prices[prices.session.eq(session)].itertuples(index=False)}
+    for a in acts[date]:
+        if (a['security_id'] in state.positions and a['action_type'] == 'cash_dividend'
+                and not a['pay_date']):
+            raise ValueError(f'HELD_DIVIDEND_PAY_DATE_MISSING:{date}:{a["security_id"]}')
+    result = step(state, session=date, bars=bars, corporate_actions=acts[date], intents=due,
+                  manifest=manifest, fee_bp=fee_bp)
+    if result.state.invariants():
+        raise ValueError(f'ACCOUNT_INVARIANTS:{result.state.invariants()}')
+    if result.nav['valuation_status'] != 'OK':
+        raise ValueError(f'HELD_PRICE_MISSING:{date}')
+    market_value = sum(p.shares * bars[sid]['close'] for sid, p in result.state.positions.items())
+    cash = (result.state.cash_available + result.state.cash_reserved + result.state.unsettled_cash
+            + sum(result.state.dividend_receivable.values()))
+    if cash + market_value != result.nav['equity']:
+        raise ValueError('NAV_ACCOUNTING_MISMATCH')
+    if store is not None:
+        if result.state.sequence in (saved or {}):
+            if saved[result.state.sequence] != result.state.state_hash():
+                raise ValueError('RESUME_STATE_CONFLICT')
+        else:
+            store.save_state(scope, result.state, result.nav, result.events)
+    return result
+
+
 def _run(path, data):
     root = path.parent
     prices, market, calendar, quality, actions = load(data, root)
@@ -218,31 +258,19 @@ def _run(path, data):
         for o in fresh:
             store.put_opportunity(o)
             schedule[o.planned_execution_session].append(o)
-        bars = {str(r.security_id): {k: to_micro(getattr(r, 'raw_' + k)) for k in ('open','high','low','close')}
-                for r in prices[prices.session.eq(session)].itertuples(index=False)}
-        for a in acts[date]:
-            if a['security_id'] in state.positions and a['action_type'] == 'cash_dividend' and not a['pay_date']:
-                raise ValueError(f'HELD_DIVIDEND_PAY_DATE_MISSING:{date}:{a["security_id"]}')
         due = schedule.pop(date, [])
-        call = dict(session=date, bars=bars, corporate_actions=acts[date], intents=due,
-                    manifest=m, fee_bp=data['cost_policy']['fee_bp'])
-        result, ref = step(state, **call), step(ref_state, **call)
+        call = dict(session=session, prices=prices, acts=acts, due=due, manifest=m,
+                    fee_bp=data['cost_policy']['fee_bp'])
+        result = step_account_session(state, store=store, scope=scope, saved=saved, **call)
+        ref = step_account_session(ref_state, **call)
         if result.state.state_hash() != ref.state.state_hash():
             raise ValueError(f'OBSERVER_CHANGED_STATE:{date}')
-        if result.state.invariants():
-            raise ValueError(f'ACCOUNT_INVARIANTS:{result.state.invariants()}')
-        if result.nav['valuation_status'] != 'OK':
-            raise ValueError(f'HELD_PRICE_MISSING:{date}')
+        bars = {str(r.security_id): {k: to_micro(getattr(r, 'raw_' + k))
+                                     for k in ('open', 'high', 'low', 'close')}
+                for r in prices[prices.session.eq(session)].itertuples(index=False)}
         mv = sum(p.shares * bars[sid]['close'] for sid, p in result.state.positions.items())
         cash = (result.state.cash_available + result.state.cash_reserved + result.state.unsettled_cash
                 + sum(result.state.dividend_receivable.values()))
-        if cash + mv != result.nav['equity']:
-            raise ValueError('NAV_ACCOUNTING_MISMATCH')
-        if result.state.sequence in saved:
-            if saved[result.state.sequence] != result.state.state_hash():
-                raise ValueError('RESUME_STATE_CONFLICT')
-        else:
-            store.save_state(scope, result.state, result.nav, result.events)
         events.extend(result.events)
         navs.append(result.nav)
         reasons = {e['opportunity_id']: e['reason'] for e in result.events if e['type'] == 'missed'}
