@@ -1,0 +1,130 @@
+{
+  "schema_version": "diagnostic-preregistration-v1",
+  "registration_id": "EXIT-STOP-20260921",
+  "registered_at": "2026-09-21",
+  "study_basis": "SD-P0P1-20260921-010",
+  "study_manifest_hash": "9b74a132fac70e70d4de4ed1103e69f7a688b49f2d4df864842881e9b6efedde",
+  "code_revision_at_registration": "3fd7b38",
+  "design_refs": ["§3 H3", "§5.4", "§6.2", "§8.1", "§8.2", "§8.4", "§9.1", "§9.2", "§9.3", "§15 P2"],
+
+  "prior_exposure": {
+    "blind": false,
+    "what_was_seen": [
+      "010 的退出分类汇总：TIME_EXIT 111 笔 +460918 USD；STOP 72 笔 −155494；GAP_STOP 14 笔 −38438；RIGHT_CENSORED 4 笔",
+      "010 的止损后 60 日内回到入场价的比例 69.88%（描述性）",
+      "010 的账户级指标：收益 266.15%、最大回撤 −13.87%、年换手与暴露"
+    ],
+    "why_disclosed": "本假设是**看着这些汇总选出来的**。登记不能制造盲测；它固定的是『改什么、怎么判定』，防止看完结果再调口径或换窗口。按 §8.4，被查看过的区间不得再称为未见样本外。"
+  },
+
+  "hypothesis": {
+    "id": "H3-FIXED-STOP-TOO-TIGHT",
+    "statement": "初始固定止损距离 max(8% × 入场价, 2.5 × ATR14) 可能过紧：它在趋势内的正常回撤处离场，牺牲了本可持有到 H60 的趋势收益。",
+    "competing_explanation": "止损的净贡献可能为正 —— 它避开的是继续下跌的交易，而『止损后价格回到入场价』只说明波动大，不说明该持有（§3 明列『止损后短期反弹』为不足为证的现象）。",
+    "not_claimed": [
+      "不主张加入追踪止损",
+      "不主张调整 H60 持有期",
+      "不主张放宽入场条件或仓位上限"
+    ]
+  },
+
+  "filter_under_test": {
+    "name": "initial_price_stop",
+    "definition": "medium_initial_stop(entry_price, atr14) = entry_price − max(0.08 × entry_price, 2.5 × atr14)；影子引擎侧为 paper_engine.initial_stop_micro 的同一公式",
+    "single_change_rule": "本诊断**只**动这一处。入场、市场门/周线门/日线择时、等待窗、H60 期限退出、费用、公司行动、五仓上限、单笔风险预算全部逐字保留。"
+  },
+
+  "step1_opportunity_level": {
+    "purpose": "剔出『止损本身』的贡献，先不看账户路径依赖。",
+    "paired_population": "010 实际成交的全部 201 笔入场（同一入场日、同一入场价、同一股数、同一费用、同一 ATR）",
+    "counterfactual": "对每一笔，用**同一条价格路径**算两种结局：(A) 实际（含止损，按引擎现有跳空/日内止损规则）；(B) 反事实（关闭止损触发，持有到 H60 收盘退出，数据不足则右删失）。",
+    "size_held_constant": true,
+    "why_size_constant": "§5.4 要求先算『固定单位风险的机会级结果』。反事实保持原股数（= 原单笔风险预算 / 原止损距离），使两臂的入场规模完全相同，差异只来自出场。",
+    "metrics": [
+      "逐笔净损益（USD 与 net_R = 含费损益 / 冻结的初始风险金额）",
+      "最大不利波动 MAE：入场后最低价相对入场价，以 % 与 R 表示",
+      "最大有利波动 MFE（作描述，不作为可实现卖点）",
+      "持有期（按参考交易日历，入场日与退出日都算）",
+      "反事实下的退出原因分布（H60 时间退出 / 右删失）"
+    ],
+    "required_breakdown": [
+      "全部 201 笔的两臂净损益差（不是只看被止损的那 86 笔）",
+      "被止损的 86 笔中：反事实下转盈 vs 反事实下仍亏（两个方向都要报，§5.4）",
+      "未被止损的 115 笔：两臂应当**完全相同** —— 不等即说明反事实实现有误，必须先修"
+    ],
+    "cost_stress": "同时报 1× 与 2× 费用（§9.1 预注册的双倍成本情景）",
+    "outputs": "逐笔 parquet/json + 汇总表；报告里给出分布而不仅是均值"
+  },
+
+  "step2_account_level": {
+    "purpose": "机会级收益差**不能相加**作为组合增量（§5.4）：多个机会竞争同一份现金与仓位，延长持有还会改变后续机会。",
+    "engine": "portfolio_shadow.paper_engine.step（真实现金、T+1、公司行动、五仓上限、回撤阶梯、单笔风险预算），与 010 同一引擎同一起点",
+    "arms": {
+      "A": "baseline（现状，止损距离 = max(8%, 2.5×ATR)）",
+      "B": "仅把止损距离乘一个预先登记的系数（见 step3 的网格），其余不变"
+    },
+    "must_answer": [
+      "延长持有是否挤掉后续机会：MAX_POSITIONS / DUPLICATE_ACTIVE_SECURITY 拒绝数的变化，以及被挤掉的机会清单",
+      "收益改善是否伴随更大回撤或更肥的尾部：最大回撤、最差单笔 net_R、亏损笔的集中度",
+      "现金闲置与暴露的变化（描述，不是损失结论）"
+    ],
+    "required_checks": ["账户不变量", "NAV 会计恒等式", "重放一致", "跨引擎基线对账（沿用 010 的 baseline_parity）"]
+  },
+
+  "step3_frozen_challenger": {
+    "precondition": "step1 与 step2 **都**判为『支持』时才冻结",
+    "change": "止损距离 = max(k_floor × 入场价, k_atr × ATR14)。**单一标量放宽**：只调这两个系数，其余规则一字不改。",
+    "registered_grid": [
+      {"label": "S1.5", "k_floor": 0.08, "k_atr": 3.75},
+      {"label": "S2.0", "k_floor": 0.08, "k_atr": 5.0}
+    ],
+    "grid_frozen": "网格**在此登记**。看到结果后不得扩大网格、不得加入第三个值、不得改成同时调 k_floor。要试新值必须另立登记。",
+    "position_sizing": "仓位按新止损距离重算以**维持原单笔风险预算**（risk_sized_shares_micro 的 distance 自动变宽 ⇒ 股数自动变少），不额外放宽风险。",
+    "selection_rule": "沿用已冻结的规则基线协议：MDD ≤ 20% 硬界 → MDD ≤ 18% guardrail → 在合格者里取 CAGR 最高；无合格者记 no_qualified_baseline。",
+    "new_experiment_identity": "必须新建 experiment_id / study_id；不得改写 010。"
+  },
+
+  "decision_rules": {
+    "step1_supported": [
+      "全部匹配机会的两臂净损益差 > 0",
+      "该增量**不集中**：单一证券贡献 ≤ 50% 的增量，且剔除最大贡献证券后仍 > 0",
+      "在 2× 费用下仍 > 0"
+    ],
+    "step2_supported": [
+      "账户级净增量 > 0",
+      "abs(MDD_challenger) − abs(MDD_baseline) ≤ 0.03（§9.3 回撤预算建议）",
+      "2× 费用下仍 > 0，且最差单笔 net_R 不劣于基线"
+    ],
+    "not_supported": [
+      "改善集中在 ≤ 2 只证券或 ≤ 5 笔交易 ⇒ 保留原策略（§8.2 CONCENTRATED）",
+      "剔除最大贡献证券后转负 ⇒ 保留原策略",
+      "回撤超预算或尾部显著更肥 ⇒ 保留原策略（RISK_REJECTED）",
+      "两臂无实质差异 ⇒ 保留原策略（NO_IMPROVEMENT）"
+    ],
+    "forbidden": [
+      "看到结果后扩大参数网格或加入第二个变量",
+      "在同一窗口上反复重试直到出现赢家",
+      "把机会级收益差直接当成组合增量",
+      "用『止损后反弹』本身作为止损过紧的证据"
+    ],
+    "verdict_tokens": ["DATA_INVALID", "ENGINEERING_BLOCKED", "INSUFFICIENT_SAMPLE", "NO_IMPROVEMENT", "RISK_REJECTED", "CONCENTRATED", "INCONCLUSIVE", "EVIDENCE_SUPPORTED"]
+  },
+
+  "validation": {
+    "exploratory_window": {"start": "2015-01-02", "end": "2026-08-31"},
+    "exploratory_status": "已被策略研究与本次诊断查看 ⇒ 只能用于**定位问题**，不得作为验证",
+    "validation_kind": "prospective",
+    "validation_window": {"start": "注册日之后的第一个交易日", "end": "首次评估点"},
+    "first_assessment_at": "≥ 30 个独立成熟组 且 ≥ 60 个交易日，两者都满足才作判定（§9.3）；否则继续观察或报 INSUFFICIENT_SAMPLE",
+    "independence_unit": "证券 × 候选轮次；Position 按整笔 trade，多期限不重复计数",
+    "selection_bias_note": "本诊断是一次已登记的尝试；历史稳健性切片（分年/分证券）用于描述，不冒充独立新实验。"
+  },
+
+  "stop_conditions": [
+    "发现数据/时序/会计阻塞 ⇒ 停在工程修复，不出收益结论（§15 P0）",
+    "反事实实现后『未被止损的 115 笔两臂不相等』⇒ 实现有误，先修再算",
+    "跨引擎基线对账不再 VERIFIED ⇒ 先修"
+  ],
+
+  "result_tokens": ["DATA_INVALID", "ENGINEERING_BLOCKED", "INSUFFICIENT_SAMPLE", "NO_IMPROVEMENT", "RISK_REJECTED", "CONCENTRATED", "INCONCLUSIVE", "EVIDENCE_SUPPORTED"]
+}
