@@ -417,8 +417,9 @@ class CommandSeparationTests(unittest.TestCase):
         """过去的执行日不能用今天生成的模型结果补填前瞻记录。"""
         from types import SimpleNamespace
         from scripts.portfolio_shadow.cli import cmd_run_forward
-        args = SimpleNamespace(manifest=self._freeze(use_real_model=True,
-                                                     knowledge_cutoff='unknown'),
+        args = SimpleNamespace(
+            manifest=self._freeze(use_real_model=True, model_budget_micro=5_000_000,
+                                  knowledge_cutoff='unknown'),
                                output=str(self.out), to_session='2026-01-06', evidence=None)
         with self.assertRaises(ValueError) as ctx:
             cmd_run_forward(args)
