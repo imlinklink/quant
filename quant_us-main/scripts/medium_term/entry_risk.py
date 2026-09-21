@@ -35,6 +35,30 @@ def risk_sized_shares(entry_price: float, initial_stop: float, equity: float, ca
     return float(quantity if allow_fractional else math.floor(quantity))
 
 
+def fee_micro(gross_micro: int, fee_bp: int) -> int:
+    """整数微费用：向下取整到 1e-6 美元。**唯一一份定义**（两个引擎都调它）。"""
+    return gross_micro * fee_bp // 10000
+
+
+def risk_sized_shares_micro(entry_price_micro: int, stop_micro: int, nav_micro: int,
+                            cash_micro: int, *, risk_bp: int, max_weight_bp: int,
+                            fee_bp: int) -> int:
+    """定仓：min(单笔风险预算 / 止损距离, 单票市值上限, 现金约束)，向下取整。
+
+    **整数微版本，两个引擎共用这一份**：历史引擎（`simulate_multi_asset_portfolio`
+    的 `shadow_precision` 分支）与影子引擎（`paper_engine.step`）。共用的理由不只是省代码：
+    两边各写一份正是"同一件事两份定义"的来源，而它的误差会以"两引擎对不上"的形式表现出来，
+    读的人却会先怀疑会计而不是公式。
+    """
+    distance = entry_price_micro - stop_micro
+    if distance <= 0 or nav_micro <= 0 or cash_micro < 0:
+        return 0
+    risk_shares = nav_micro * risk_bp // 10000 // distance
+    weight_shares = nav_micro * max_weight_bp // 10000 // entry_price_micro
+    cash_shares = cash_micro * 10000 // (entry_price_micro * (10000 + fee_bp))
+    return min(risk_shares, weight_shares, cash_shares)
+
+
 def attach_initial_stops(candidates: pd.DataFrame, features: pd.DataFrame,
                          raw_bars: pd.DataFrame) -> pd.DataFrame:
     """用信号日已知 ATR 和次日原始开盘价生成止损，不读取次日收盘。"""

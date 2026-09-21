@@ -114,7 +114,11 @@ def _hist_actions(corporate_actions):
 
 
 def _shadow_actions(actions):
-    """历史 actions DataFrame（cash_amount 美元、无 pay_date）→ 影子 actions list。"""
+    """历史 actions DataFrame（cash_amount 美元）→ 影子 actions list。
+
+    **必须带上 `pay_date`**：影子引擎拿它当 `dividend_receivable` 的字典键，丢了它分红就
+    永远转不成现金 —— 对拍会"通过"，但通过的原因是两边都算错了同一件事。
+    """
     out = []
     for r in actions.itertuples():
         d = {'security_id': str(r.security_id),
@@ -124,13 +128,33 @@ def _shadow_actions(actions):
             d['ratio'] = r.ratio
         if getattr(r, 'cash_amount', None) is not None:
             d['cash_amount_micro'] = to_micro(r.cash_amount)
+        pay = getattr(r, 'pay_date', None)
+        d['pay_date'] = None if pay is None or pd.isna(pay) else str(pd.Timestamp(pay).date())
         out.append(d)
+    return out
+
+
+def _with_pay_date(actions):
+    """给行动表补统一的 `pay_date` 列（缺则取 `effective_at`）。
+
+    富途直取的行动表把派发日写在 `effective_at` 里（`ACTION_COLUMNS` 没有 `pay_date`），
+    而两个引擎都按 `pay_date` 做"应收 → 现金"的结算键：历史侧读 `event['pay_date']`，
+    影子侧读 `act['pay_date']`。不统一这一列，两边都把分红**永远挂在应收里**，
+    等于对拍**根本没有检验过支付日那条路径**（实测 study 里有 63 条记应收 / 60 条支付）。
+    """
+    if actions is None or actions.empty:
+        return actions
+    if 'pay_date' in actions.columns:
+        return actions
+    out = actions.copy()
+    out['pay_date'] = out['effective_at'] if 'effective_at' in out.columns else None
     return out
 
 
 def verify_matrix_parity(matrix, prices, actions, *, horizon, risk_bp,
                          initial_cash=100_000.0, tol=0.02, scope='SHADOW:parity:R') -> dict:
     """真实矩阵奇偶校验：同一 matrix（entry/exit）+ prices + actions 喂两引擎，逐日 diff。"""
+    actions = _with_pay_date(actions)
     matrix = matrix[matrix.portfolio_accepted.astype(bool)].copy()
     matrix['entry_session'] = pd.to_datetime(matrix.entry_session).dt.normalize()
     prices = prices.copy()

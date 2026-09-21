@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 
+from scripts.medium_term.entry_risk import fee_micro, risk_sized_shares_micro
+
 from .risk_policy import budget_bp, entry_allowed, evaluate_ladder
 from .schema import AccountState, Position
 
@@ -20,19 +22,6 @@ def initial_stop_micro(entry_price_micro: int, atr14_micro: int) -> int:
     min_dist = entry_price_micro * 8 // 100
     atr_dist = atr14_micro * 5 // 2
     return entry_price_micro - max(min_dist, atr_dist)
-
-
-def risk_sized_shares_micro(entry_price_micro: int, stop_micro: int, nav_micro: int,
-                            cash_micro: int, *, risk_bp: int, max_weight_bp: int,
-                            fee_bp: int) -> int:
-    """定仓：min(单笔风险预算 / 止损距离, 单票市值上限, 现金约束)，向下取整。"""
-    distance = entry_price_micro - stop_micro
-    if distance <= 0 or nav_micro <= 0 or cash_micro < 0:
-        return 0
-    risk_shares = nav_micro * risk_bp // 10000 // distance
-    weight_shares = nav_micro * max_weight_bp // 10000 // entry_price_micro
-    cash_shares = cash_micro * 10000 // (entry_price_micro * (10000 + fee_bp))
-    return min(risk_shares, weight_shares, cash_shares)
 
 
 @dataclass
@@ -49,7 +38,9 @@ def _fill(session, side, security_id, shares, price_micro, fee, reason, opportun
 
 
 def _fee(gross_micro: int, fee_bp: int) -> int:
-    return gross_micro * fee_bp // 10000
+    # 定义已移到 `medium_term.entry_risk.fee_micro`：历史引擎的 `shadow_precision`
+    # 分支要用同一份。留这个别名是因为本模块内部 5 处调用点都叫 `_fee`。
+    return fee_micro(gross_micro, fee_bp)
 
 
 def step(state: AccountState, *, session: str, bars: dict, corporate_actions: list,
