@@ -117,6 +117,30 @@ def audit_draft(data):
     return errors
 
 
+def _reject_already_prefixed(kind, source):
+    """拒绝"从一个已冻结的 study 里再冻一份"—— 它会**静默改写业务身份**。
+
+    价格文件没有 `security_id` 列时，`inputs.load` 按**文件名**还原它
+    （`{i}-US_AAPL.csv.gz` → `SEC-US-AAPL`：掐掉第一个 `-` 之前的部分、去扩展名、再映射）。
+    而 `freeze` 给每个输入加 `{i}-` 前缀 —— 于是拿 009 的冻结副本当输入，会写出
+    `0-0-US_AAPL.csv.gz`，还原出来是 `0-SEC-US-AAPL`，与质量表的证券 id 一个都对不上。
+
+    后果**没有任何报错**：每个候选都以 `SECURITY_NOT_VERIFIED` 被排除、成交为 0、
+    报告照出。实测（2026-09-21）就是这样把 SD-P0P1-20260921-010 冻成了一份空基线，
+    是"零分歧的对账跑不出来"才暴露的。故这里前置拒绝，并要求指向**原始输入**。
+    """
+    import re
+    if kind != 'prices' or not re.fullmatch(r'\d+-.*', source.name):
+        return
+    import pandas as pd
+    if 'security_id' in pd.read_csv(source, nrows=0).columns:
+        return  # 自带证券 id ⇒ 文件名不承载身份，加前缀无害
+    raise ValueError(
+        f'FREEZE_SOURCE_ALREADY_PREFIXED:{source.name}:'
+        '该输入的文件名承载证券身份（无 security_id 列），加前缀会静默改写它；'
+        '请指向原始输入，并核对哈希与既有 study 的 input_index 一致')
+
+
 def freeze(data, output):
     errors = audit_draft(data)
     if errors:
@@ -137,6 +161,7 @@ def freeze(data, output):
             records[kind] = []
             for i, source in enumerate(paths):
                 source = Path(source)
+                _reject_already_prefixed(kind, source)
                 relative = f'inputs/{kind}/{i}-{source.name}'
                 destination = stage / relative
                 destination.parent.mkdir(parents=True, exist_ok=True)

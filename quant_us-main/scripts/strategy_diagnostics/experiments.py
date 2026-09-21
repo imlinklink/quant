@@ -292,7 +292,7 @@ def _run(path, data):
     parity, baseline_entries = baseline_parity.evaluate(
         data, root, prices, quality, actions, trades,
         risk_policy=m.risk_policy, horizon=int(m.execution_policy['horizon']),
-        initial_cash=m.initial_cash)
+        initial_cash_micro=m.initial_cash)   # Manifest 存整数微美元，compare 内部折成美元
     checks['baseline_parity'] = parity
     checks['baseline_entries'] = baseline_entries
     # 对账**覆盖不到**的东西必须点名，否则"对齐了"会被读成全口径对齐。

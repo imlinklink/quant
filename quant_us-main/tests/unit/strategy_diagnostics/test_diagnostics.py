@@ -259,7 +259,7 @@ def test_baseline_parity_verifies_when_engines_agree(monkeypatch):
     matrix, prices, actions, horizon = _parity_fixture()
     record = baseline_parity.compare(matrix, prices, actions, horizon=horizon,
                                      risk_policy={'single_position_risk_bp': 100},
-                                     initial_cash=100_000.)
+                                     initial_cash_micro=100_000_000_000)
     assert record['n_diffs'] == 0
     # 历史引擎从**第一笔 entry 所在会话**起算（`evaluation_start`/`entry_session.min()`），
     # 故是 10 − 2 = 8 个会话，不是 10
@@ -282,7 +282,23 @@ def test_baseline_parity_catches_a_divergence(monkeypatch):
     with pytest.raises(ValueError, match='BASELINE_PARITY_DIVERGED'):
         baseline_parity.compare(matrix, prices, actions, horizon=horizon,
                                 risk_policy={'single_position_risk_bp': 100},
-                                initial_cash=100_000.)
+                                initial_cash_micro=100_000_000_000)
+
+
+def test_baseline_parity_rejects_a_unit_mixup():
+    """单位搞错（差 1e6）必须**对不上**，而不是悄悄通过。
+
+    实测踩过：`Manifest.initial_cash` 存的是整数微美元，而 `simulate_multi_asset_portfolio`
+    收的是美元。混用会让试算账户以 1000 亿美元起步、影子账户仍是 10 万 ⇒
+    `2631/2631` 个会话全部对不上、最大差 $4.58e11。故参数名带单位 `_micro`，且这里钉住
+    "传错就报错"——否则下次有人把 1e6 写漏，检查会静默地比两个不同规模的账户。
+    """
+    from scripts.strategy_diagnostics import baseline_parity
+    matrix, prices, actions, horizon = _parity_fixture()
+    with pytest.raises(ValueError, match='BASELINE_PARITY_DIVERGED'):
+        baseline_parity.compare(matrix, prices, actions, horizon=horizon,
+                                risk_policy={'single_position_risk_bp': 100},
+                                initial_cash_micro=100_000)      # 差 1e6 倍
 
 
 def test_entry_reconciliation_declares_the_acceptance_difference():
@@ -311,6 +327,31 @@ def test_unsettled_cash_is_zero_without_t1_settlement():
                                         allow_fractional=False, max_positions=5)
     assert (out.equity.unsettled_cash == 0).all()
     assert (out.equity.dividend_receivable == 0).all()
+
+
+def test_freezing_from_a_frozen_copy_is_rejected(tmp_path):
+    """从已冻结的 study 再冻一份会**静默改写证券身份**，必须前置拒绝。
+
+    实测（2026-09-21）：把 009 冻结目录里的副本当输入，`freeze` 的 `{i}-` 前缀被叠加成
+    `0-0-US_AAPL.csv.gz`，而 `inputs.load` 按**文件名**还原证券 id ⇒ 得到
+    `0-SEC-US-AAPL`，与质量表一个都对不上 ⇒ 每个候选以 `SECURITY_NOT_VERIFIED` 被排除、
+    **成交 0 笔**，而报告照常产出、没有任何报错。是"零分歧的对账跑不出来"才暴露的。
+    """
+    from scripts.strategy_diagnostics.manifest import _reject_already_prefixed
+    prefixed = tmp_path / '0-US_AAPL.csv.gz'
+    pd.DataFrame({'session': ['2025-01-02'], 'raw_close': [1.0]}).to_csv(prefixed, index=False)
+    with pytest.raises(ValueError, match='FREEZE_SOURCE_ALREADY_PREFIXED'):
+        _reject_already_prefixed('prices', prefixed)
+    # 自带 security_id 列 ⇒ 文件名不承载身份，加前缀无害，放行
+    explicit = tmp_path / '0-explicit.csv.gz'
+    pd.DataFrame({'security_id': ['SEC-US-AAPL'], 'raw_close': [1.0]}).to_csv(
+        explicit, index=False)
+    _reject_already_prefixed('prices', explicit)
+    # 未加前缀的原件放行；非 prices 类不看文件名
+    plain = tmp_path / 'US_AAPL.csv.gz'
+    pd.DataFrame({'raw_close': [1.0]}).to_csv(plain, index=False)
+    _reject_already_prefixed('prices', plain)
+    _reject_already_prefixed('quality', prefixed)
 
 
 def test_tampered_input_fails(study):

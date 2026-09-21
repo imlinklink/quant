@@ -29,7 +29,7 @@ TOLERANCE_USD = 0.0
 
 
 def evaluate(data, root, prices, quality, actions, trades, *, risk_policy, horizon,
-             initial_cash):
+             initial_cash_micro):
     """P0 的「基线对齐」一步到位：造批处理矩阵 → 跨引擎对账 → 条目对账。
 
     **不静默降级**：批处理管线跑不出条目时（夹具数据太短等）不是"跳过"，而是
@@ -44,7 +44,7 @@ def evaluate(data, root, prices, quality, actions, trades, *, risk_policy, horiz
                  'note': '批处理管线未产出可对账的条目 ⇒ 本 study 不能作为 P0 基线。'},
                 {'status': 'NOT_EVALUATED'})
     record = compare(cell, prices, actions, horizon=horizon, risk_policy=risk_policy,
-                     initial_cash=initial_cash)
+                     initial_cash_micro=initial_cash_micro)
     record.update(info)
     record['status'] = 'VERIFIED'
     entries = reconcile_entries(
@@ -89,12 +89,18 @@ def batch_b3_matrix(data, root, prices, quality, actions, *, top_n, horizon):
                                   cell.exit_reason.value_counts().items()}}
 
 
-def compare(matrix, prices, actions, *, horizon, risk_policy, initial_cash):
-    """逐日对账，返回可直接进 `checks` 的记录。非零分歧即抛（§15 P0 是"一致"）。"""
+def compare(matrix, prices, actions, *, horizon, risk_policy, initial_cash_micro):
+    """逐日对账，返回可直接进 `checks` 的记录。非零分歧即抛（§15 P0 是"一致"）。
+
+    `initial_cash_micro` —— **单位写进参数名**，因为这里踩过一次：`Manifest.initial_cash`
+    存的是**整数微美元**，而 `simulate_multi_asset_portfolio` 收的是**美元**。两者混用会让
+    试算账户以 1000 亿美元起步、而影子账户是 10 万 ⇒ 每个会话都对不上（实测
+    `2631/2631`，最大差 $4.58e11）。命名带单位比注释可靠。
+    """
     result = verify_matrix_parity(
         matrix, prices, actions, horizon=horizon,
         risk_bp=int(risk_policy['single_position_risk_bp']),
-        initial_cash=float(initial_cash), tol=TOLERANCE_USD)
+        initial_cash=float(initial_cash_micro) / 1_000_000, tol=TOLERANCE_USD)
     diffs = result['diffs']
     record = {
         'method': 'cross_engine_daily_equity',
