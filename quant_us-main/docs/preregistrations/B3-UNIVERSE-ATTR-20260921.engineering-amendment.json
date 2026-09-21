@@ -1,0 +1,46 @@
+{
+  "amendment_id": "B3-UNIVERSE-ATTR-20260921-engineering-01",
+  "original_registration_sha256": "fe56d341448cff924b5f2f82eeac8c6d58c63149d3b5867f3f22b5eaf77d4537",
+  "returns_examined": false,
+  "purpose": "开算前澄清「三臂只差宇宙」的输入基：把「复现冻结基线」从 A 臂里分出来作为独立控制；三臂共用同一输入基。原登记的门槛与结论形式不变。",
+
+  "problem": {
+    "tension": "原登记把两件事压在 A 臂上：① A = 「现状 13 只」；② 控制项「A 臂必须复现 RISK-RULE-20260916-001」。",
+    "why_incompatible": "冻结基线当年用的是 research_quality_intervals-v3（15 verified）与 futu-survivor39-20260912 的行动表。而 B/C 的宇宙必须用 v4（32 verified，§3.2 才把 17 只老公司放回来）与 futu-actions39-20260920c（§3.1 补全）。若 A 用旧输入、B/C 用新输入，则 A 与 B 之间**不止差一个宇宙** —— 还差质量口径与行动覆盖，归因读不出来。"
+  },
+
+  "resolution": {
+    "separate_the_control_from_the_arm": {
+      "harness_fidelity_control": "用**冻结基线当年的配置**（v3 + futu-survivor39-20260912 + 13 只 + audited blocked + 同窗）跑一次，要求 final_equity == 448722.3536857565 且 max_drawdown == -0.1390344329（相对差 0）。它**只证明 harness 忠实**，不参与三臂比较。",
+      "arm_A_redefined": "A = 「现状 13 只硬编码」但**与 B/C 共用同一输入基**（v4 质量 + futu-actions39-20260920c 行动 + 同一 blocked 构造 + 同窗同参）。",
+      "consequence": "A 的数字**不是**冻结基线那个数字（输入基变了），这点必须随结论披露；A 的作用是「在同一输入基上，13 只宇宙」这一臂。"
+    },
+    "common_input_basis_all_three_arms": {
+      "quality": "data/survivor_sample_audit/research_quality_intervals-v4.csv（32 verified；HON 保持 unverified）",
+      "actions": "data/corporate_actions_runs/futu-actions39-20260920c/corporate_actions.csv（2293 条）",
+      "market": "data/medium_term/US-MT-MOM-BASELINE-001/prepared/etf_raw_daily.csv.gz（QQQ raw，不变）",
+      "panels": "data/survivor_sample_audit/asof_panels/US_*.csv.gz（按臂取子集：A 取 13，B/C 取 32）",
+      "raw_for_gate_and_audit": "data/market_history/runs/SURVIVOR39-NONE-20260920（raw 价基；门与行动审计都用它）",
+      "adjusted_for_audit": "data/market_history/runs/SURVIVOR39-QFQ-20260912-b（qfq；行动覆盖审计的对照序列）",
+      "blocked_gate": "三臂用**同一构造**：对每只证券跑 audit_action_coverage(raw, adjusted, recorded, sid)，verdict != 'ok' 则阻断其区间。A 的 13 只与 B/C 的 32 只各自算，但**算法同一份代码**。"
+    }
+  },
+
+  "unchanged": [
+    "窗口 2016-01-05 → 2026-08-25（三臂共用）",
+    "B3 参数（b3 / H60 / 单笔 100bp / 20% 权重 / 5 仓 / top_n 5 / 等待窗 20）",
+    "成本 0.002（另报 0.2%/0.3% 单边压力）",
+    "引擎默认路径（非 shadow_precision）",
+    "宇宙定义（A=13 硬编码；B/C=NONE eligible ∩ v4 verified = 32）",
+    "门语义（排名前过滤；`members=None` 空操作）",
+    "指标块、§5 结论形式、§6 四条边界、禁止清单"
+  ],
+
+  "additional_controls": {
+    "members_none_noop": "已由单元测试 + 端到端（冻结基线 final_equity 相对差 0.000e+00）两级验证（提交 96f337e）",
+    "same_input_basis_assertion": "A 与 B/C 的 quality/actions/market/blocked 算法必须来自**同一份代码与同一批文件**；输出里记录这三项的哈希，三臂共享同一组",
+    "no_cross_arm_difference_beyond": "A 与 B 的差异必须**只有**：候选池（13 vs 32）与 members 掩码（无 vs 有）。任何其他差异都是实现错误，先修再算"
+  },
+
+  "status": "DESIGN_FROZEN_AWAITING_RUNNER"
+}
