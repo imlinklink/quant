@@ -1,0 +1,101 @@
+{
+  "schema_version": "universe-attribution-prereg-v1",
+  "registration_id": "B3-UNIVERSE-ATTR-20260921",
+  "registered_at": "2026-09-21",
+  "supersedes_draft": "docs/b3-universe-attribution-prereg-2026-09-20.md（该草案是设计；本文件是**冻结可执行版**）",
+  "design_refs": ["b3-universe-attribution-prereg-2026-09-20.md §2/§3/§4/§5/§6/§7/§8"],
+  "returns_examined": false,
+
+  "prerequisites_verified_2026_09_21": {
+    "3.0_raw_price_basis_universe": {
+      "run": "data/market_history/runs/SURVIVOR39-NONE-20260920",
+      "verified": true,
+      "evidence": [
+        "NVDA 2015-01-05 previous_raw_close = 20.13（真）vs QFQ run 的 0.4819（假）",
+        "NVDA eligible 2743/2939（QFQ 为 1960）",
+        "全体 eligible 99239（QFQ 为 98456）；PRICE_TOO_LOW 2847→1883"
+      ]
+    },
+    "3.2_quality_intervals": {
+      "file": "data/survivor_sample_audit/research_quality_intervals-v4.csv",
+      "verified": true,
+      "evidence": ["15 → 32 verified；listing_basis: reported 22 / listed_on_or_before_history_start 18"],
+      "hon_still_excluded": "SEC-US-HON = unverified (CORPORATE_ACTION_UNRESOLVED) —— §3.1 明确要求保持排除"
+    },
+    "actions_coverage": {
+      "file": "data/corporate_actions_runs/futu-actions39-20260920c/corporate_actions.csv",
+      "rows": 2293, "securities_with_actions": 33,
+      "securities_without_actions": ["ARM", "AXTI", "CRWV", "LITE", "NBIS", "SNDK"],
+      "checked_2026_09_21": "这 6 只逐一看过 previous_raw_close 的 >35% 单日跳变：全部是**向上**的真实行情跳空（ARM +47.9% @2024-02-09、AXTI +69.3%、CRWV +41.8%、NBIS +49.4%），LITE/SNDK 无跳变。**没有缺失拆股的特征**（缺失拆股会表现为向下跳变 −33%/−50%/−67%/−80%）。"
+    }
+  },
+
+  "universe": {
+    "arm_A": "13 只硬编码 TECH（p2_selection_check.TECH）—— 现状基线",
+    "arm_BC": "NONE run 的 universe_v2 中 eligible == True，且 research_quality_intervals-v4 内 verified",
+    "arm_BC_count": 32,
+    "excluded_with_reason": {
+      "SEC-US-SPY": "非股票",
+      "SEC-US-HON": "CORPORATE_ACTION_UNRESOLVED（§3.1 要求保持排除）",
+      "SEC-US-LIN/ORCL/QCOM/SNDK/TSM/UNH": "v4 仍 unverified（上市日或行动未解）"
+    },
+    "must_report": "宇宙的上市年份分布（§1.3 的教训）与每只证券被 eligible 覆盖的 session 数"
+  },
+
+  "arms": {
+    "A": {"universe": "13 只硬编码", "pit_gate": false},
+    "B": {"universe": "32 只（NONE × v4 verified）", "pit_gate": true},
+    "C": {"universe": "32 只（同上）", "pit_gate": false}
+  },
+  "arm_semantics": {
+    "B_minus_A": "后视挑选的总贡献",
+    "B_minus_C": "时点门单独的效果"
+  },
+
+  "pit_gate_semantics": {
+    "decision": "门作用在**排名之前**：在「当日合格宇宙内」排名。",
+    "why": "事后过滤（先按全体排名再剔除不合格者）会让名次与**不可交易的**标的比较 —— 那不是时点宇宙，是「先知道答案再挑池子」。因此需要给候选生成加一个成员掩码：它只影响截面成员资格，不改变动量/均线的计算序列。",
+    "not_an_exit_rule": "门**只**决定候选成员资格；持仓不因宇宙变化而退出（B3 一个字母都不改，宇宙是唯一变量）。",
+    "implementation": "`generate_monthly_candidates(..., members=...)`：在 `rank_cross_section` 之前按 (decision_session, security_id) 过滤快照。缺该参数时行为与现状一字不差（有测试钉死）。"
+  },
+
+  "held_constant": {
+    "strategy": "entry_rule=b3、exit_policy_id=H60、horizon=60、single_position_risk_bp=100、max_weight_bp=2000、max_positions=5、top_n=5、max_wait_sessions=20",
+    "window": "与冻结基线同窗（RISK-RULE-20260916-001 的 B3@60@1.0pct：2016-01-05 → 2026-08-25），三臂共用；`evaluation_start` 同值",
+    "cost": "round_trip_cost=0.002；另报单边 0.2%/0.3% 压力情景",
+    "engine": "scripts/medium_term/portfolio_engine.py::simulate_multi_asset_portfolio（默认路径，非 shadow_precision）",
+    "actions": "同一份 2293 条；HON 不参与（其宇宙成员资格本就为 false）"
+  },
+
+  "judgement": {
+    "selection": "**不做选型**。三臂各自一个配置，无需 `_select_frozen`；该判据只在未来的选型实验里用。",
+    "metric_block": ["CAGR", "max_drawdown", "Calmar", "Sharpe", "单位暴露收益", "平均暴露",
+                     "换手", "年度分布", "top1/top2 赢家集中度", "逐证券贡献",
+                     "宇宙上市年份分布", "每股 eligible 覆盖 session 数", "成交笔数", "右删失笔数"],
+    "boundaries_required": ["§6 四条全部随结论披露"],
+    "conclusion_form": "只能写成「后视挑选贡献了 X 个百分点」；不得写成策略优势/可放行/样本外证据/未来收益预期"
+  },
+
+  "controls": {
+    "arm_A_reproduces_the_frozen_baseline": "A 臂必须复现 RISK-RULE-20260916-001 的 B3@60@1.0pct（final_equity 448722.3536857565 / MDD −0.1390344329）；不相等即实现有误，先修再算",
+    "members_off_is_a_noop": "`members=None` 时 `generate_monthly_candidates` 输出与改动前逐字节相同",
+    "fail_closed": "任何一臂出现 MISSING/不可结算的持仓价格 ⇒ 停，不出结论"
+  },
+
+  "forbidden": [
+    "看到结果后改窗口、参数、宇宙成员或判据",
+    "用本实验的任何数字做选型或「进入下一步」的依据（§7②）",
+    "把 C 臂当成「没有时点门的生产配置」来推荐",
+    "在这段已查看的窗口上声称样本外"
+  ],
+
+  "execution_order": [
+    "1. [已做] 行动补齐 + HON 保持排除",
+    "2. [已做] raw 价基 39 只时点宇宙",
+    "3. [已做] v4 质量区间（32 verified）",
+    "4. [本文件] 冻结设计",
+    "5. 实现 members 掩码 + 三臂 runner（必须先有测试：members=None 不改变现状）",
+    "6. 冻结代码/数据 hash 后跑三臂",
+    "7. 一次性打开结果，写归因 + §6 边界"
+  ]
+}
