@@ -1,6 +1,10 @@
-"""行业倾斜 vs 事后挑名字：把 B−A 的 −6.04pp 拆开（登记 `SECTOR-SELECTION-SPLIT-20260921`）。
+"""行业倾斜 vs 事后挑名字：把 B−A 拆开（登记 `SECTOR-SELECTION-SPLIT-20260921`）。
 
-**描述性分解，不是因果**（§8.3：容量与路径依赖产生交互）。四臂：
+上游 = 归因实验（B−A = −6.04pp，**有**时点门）。本实验按登记把时点门在**全部**臂关闭
+（变量是池子，不是门）⇒ 本文件的 `B_32_ref` 等于归因实验的 **C** 臂，故这里的
+`B − A = −5.88pp`（与归因实验的 `C − A` 一致，不是 −6.04pp）。
+
+**描述性分解，不是因果**（§8.3：容量与路径依赖产生交互）。四臂 + 第二套行业边界 = 六臂：
 
 | 臂 | 池 | 读作 |
 |---|---|---|
@@ -8,11 +12,15 @@
 | T | 17 只（规则建立的科技子集） | 规则 + 科技 |
 | N | 15 只（规则建立的非科技） | 规则 + 非科技 |
 | B | 32 只（= T ∪ N） | 参照 |
+| Tn | 13 只（GICS 口径 IT） | 第二套边界 |
+| Nn | 19 只（非 IT） | 第二套边界 |
 
-`T − A` = 事后挑名字的效应；`N − T` = 行业倾斜的效应。
+`T − A` = 事后挑名字的效应；`N − T` = 行业倾斜的效应。**两者不能相加成 `B − A`**
+（`N − T` 比 `B − A` 还大 —— 池子小了损害不被稀释，见结果文档「不是加法的」一节）。
 
-**复用**归因实验的 `run_arm` 与 `harness_control`（同一份实现，不重写）；四臂的 PIT 门**全部关闭**
-（本实验的变量是池子，不是门）。
+**复用**归因实验的 `harness_control` 与输入基（同一份实现与文件，不重写）；四臂的 PIT 门**全部关闭**
+（本实验的变量是池子，不是门）。**不**复用 `run_arm` —— 它每臂重算最贵的两步，本文件用
+`run_arms_shared` 共享之；等价性由「A 臂必须与归因实验逐字段相同」这条控制项在运行时把守。
 """
 from __future__ import annotations
 
@@ -27,12 +35,12 @@ from scripts.medium_term.p1_account_check import (QQQ_DIVIDENDS, _load_qqq_divid
 from scripts.medium_term.p2_selection_check import (PANELS, build_entries, build_matrix,
                                                     build_timed_entries, load_panels,
                                                     market_frame, trading_calendar)
+from scripts.medium_term.portfolio_engine import simulate_multi_asset_portfolio
 from scripts.medium_term.qqq_benchmark import build_qqq_benchmark
 from scripts.medium_term.stock_cross_section import assemble_candidates, monthly_snapshots
 from scripts.strategy_diagnostics.manifest import file_hash, read, write_json
 from scripts.strategy_diagnostics.universe_attribution import (ACTIONS, ETF_RAW, QUALITY,
-                                                               _plain, harness_control,
-                                                               run_arm)
+                                                               _plain, harness_control)
 from scripts.strategy_diagnostics.forward_arms import arm_names
 
 TOP_N, HORIZON = 5, 60
