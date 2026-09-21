@@ -1,6 +1,8 @@
 """富途公司行动直取测试（技术设计 §2.2）。"""
 import unittest
 
+import pandas as pd
+
 from scripts.data.import_corporate_actions_from_futu import (build_actions, cash_from_statement,
                                                              collect_actions,
                                                              ratio_from_rate)
@@ -35,6 +37,10 @@ class FutuCorporateActionsTests(unittest.TestCase):
         self.assertEqual(aapl.iloc[0]['action_type'], 'cash_dividend')
         self.assertAlmostEqual(float(aapl.iloc[0]['cash_amount']), 0.27)
         self.assertEqual(aapl.iloc[0]['ex_date'], '2026-08-10')
+        # 派发日必须落进 `effective_at`。影子引擎拿它当 `dividend_receivable` 的字典键，
+        # 硬写 None 会让持有的证券**一分红就中止**（`HELD_DIVIDEND_PAY_DATE_MISSING`），
+        # 而不是完成分红会计 —— 而富途本来就把这个字段给了（`dividend_payable_date`）。
+        self.assertEqual(pd.Timestamp(aapl.iloc[0]['effective_at']).date().isoformat(), '2026-08-13')
         self.assertTrue(str(aapl.iloc[0]['source_published_at']).startswith('2026-07-31'))
         # 两类来源不得串号
         self.assertTrue((actions[actions.action_type == 'split']['source_id']

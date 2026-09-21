@@ -80,7 +80,13 @@ def actions_from_dividends(code, dividend_list) -> list:
         if ex_date is None or cash is None:
             continue
         rows.append({'security_id': security_id_for(code), 'action_type': 'cash_dividend',
-                     'ex_date': ex_date, 'effective_at': None, 'ratio': 0.0, 'cash_amount': cash,
+                     'ex_date': ex_date,
+                     # 派发日：影子引擎按它把"应收分红"转成可用现金（`paper_engine.step`
+                     # 拿 `pay_date` 当字典键，缺了就永远转不成现金）。富途**给了**这个字段，
+                     # 原先却硬写 None —— 于是持有的证券一分红，账户就只能靠
+                     # `HELD_DIVIDEND_PAY_DATE_MISSING` 中止，而不是完成分红会计。
+                     'effective_at': _date(item.get('dividend_payable_date')),
+                     'ratio': 0.0, 'cash_amount': cash,
                      'source_id': DIVIDEND_SOURCE, 'source_record_id': f"{code}|{ex_date}|{cash}",
                      'source_published_at': _date(item.get('pub_date')), 'source_observed_at': None})
     return rows
