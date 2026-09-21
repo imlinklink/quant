@@ -217,3 +217,54 @@ class StockCrossSectionTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class PitMembersTests(unittest.TestCase):
+    """时点宇宙掩码：**排名前**过滤，且关闭时不留痕迹。"""
+
+    def _base(self):
+        prices = cross_section_prices()
+        sessions = pd.DatetimeIndex(prices.session.unique())
+        market = pd.DataFrame({'session': sessions, 'asof_close': 101., 'asof_ma200': 100.})
+        return prices, market, generate_monthly_candidates(prices, market, top_n=2)
+
+    def test_members_none_is_indistinguishable_from_the_old_path(self):
+        """不给掩码时必须与改动前一致 —— 掩码不得留下任何痕迹。
+
+        这是"宇宙是唯一变量"的前提：若不给掩码也出现 `OUTSIDE_PIT_UNIVERSE`，
+        就说明掩码逻辑泄漏进了默认路径。
+        """
+        prices, market, base = self._base()
+        explicit = generate_monthly_candidates(prices, market, top_n=2, members=None)
+        pd.testing.assert_frame_equal(base, explicit)
+        self.assertNotIn('OUTSIDE_PIT_UNIVERSE', set(base.reject_reason.dropna()))
+
+    def test_members_filter_before_ranking(self):
+        """非成员必须在**排名之前**被排除：否则名次是与不可交易的标的比出来的。
+
+        反证点很硬：把全体里排第一的剔掉后，原来排第二的必须变成 rank 1。
+        若是"先排名再过滤"，它的 rank 仍会是 2。
+        """
+        prices, market, base = self._base()
+        decision = sorted(base.decision_session.unique())[-2]
+        row = base[base.decision_session == decision].set_index('security_id')
+        top = row['rank'].idxmin()
+        second = row['rank'].sort_values().index[1]
+        # 掩码：每个 decision session 里除 top 外都合格
+        members = pd.DataFrame(
+            [{'session': s, 'security_id': sid, 'eligible': sid != top}
+             for s in sorted(base.decision_session.unique())
+             for sid in base.security_id.unique()])
+        masked = generate_monthly_candidates(prices, market, top_n=2, members=members)
+        mr = masked[masked.decision_session == decision].set_index('security_id')
+        self.assertFalse(bool(mr.loc[top, 'eligible']))
+        self.assertEqual(mr.loc[top, 'reject_reason'], 'OUTSIDE_PIT_UNIVERSE')
+        self.assertEqual(mr.loc[second, 'rank'], 1)
+        # 非成员仍留在截面里当审计分母（不是被删掉）
+        self.assertIn(top, set(masked.security_id))
+
+    def test_members_columns_are_validated(self):
+        prices, market, _ = self._base()
+        with self.assertRaisesRegex(ValueError, 'MEMBERS_COLUMNS_MISSING'):
+            generate_monthly_candidates(prices, market, top_n=2,
+                                        members=pd.DataFrame({'security_id': ['A']}))
