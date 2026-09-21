@@ -97,6 +97,22 @@ def conclusion(result):
     return f'**结论：{verdict}。**'
 
 
+def engine_parity(result):
+    """§13 首页第 1 问「数据和运行是否足以判断」的答案，**从 checks 算出来**。
+
+    原先这里写死"工程检查均通过" —— 而"本引擎自洽"与"与旧基线一致"是两件事（§15 P0
+    要的是后者）。写死会让"对账没跑成"与"对账通过"在报告上长得一模一样。
+    """
+    parity = (result.get('checks') or {}).get('baseline_parity') or {}
+    if parity.get('status') == 'VERIFIED':
+        return (f"跨引擎基线对账：{parity['n_sessions']} 个会话逐日零分歧"
+                f"（容差 {parity['tolerance_usd']} USD）；"
+                f"未覆盖项见 `checks.json` 的 `uncovered_by_parity`。")
+    return (f"⚠ **跨引擎基线对账未完成**（{parity.get('status', 'MISSING')}："
+            f"{parity.get('reason', '')}）⇒ 本次测量只在本引擎内自洽，"
+            f"**不构成 §15 P0 的基线**。")
+
+
 def render(result):
     f, x = result['funnel'], result['exits']
     rejected = {}
@@ -105,7 +121,8 @@ def render(result):
             rejected[k] = rejected.get(k, 0) + v
     lines = [f"# 策略薄弱环节诊断：{result['study_id']}", '',
              conclusion(result), '',
-             f"来源：历史规则重建；{result['sessions']} 个交易日。工程检查均通过。",
+             f"来源：历史规则重建；{result['sessions']} 个交易日。",
+             engine_parity(result),
              f"基线收益（已扣设定费用，未建模滑点）：{pct(result['full_cost_return'])}；"
              f"最大回撤：{pct(result['max_drawdown'])}。", '',
              '## 买入漏斗', '',

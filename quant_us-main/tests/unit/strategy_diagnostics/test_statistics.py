@@ -163,7 +163,7 @@ def _capacity_row(**kw):
     return row
 
 
-def _rendered(trades=None, capacity=None):
+def _rendered(trades=None, capacity=None, checks=None):
     """用**真的**统计函数拼一个 result 再渲染，避免夹具与实现漂移。"""
     from scripts.strategy_diagnostics.report import render
     trades = [_trade()] if trades is None else trades
@@ -172,6 +172,7 @@ def _rendered(trades=None, capacity=None):
         'study_id': 'TEST-001', 'manifest_hash': 'x', 'sessions': 1,
         'full_cost_return': None, 'max_drawdown': None,
         'verdict': None, 'phase_conclusion': 'INSUFFICIENT_EVIDENCE',
+        'checks': checks or {},
         'funnel': {'candidate_count': 0, 'ready_fraction': None, 'candidate_states': {},
                    'stages': {}, 'note': 'n'},
         'exits': summarize(trades, 100_000_000),
@@ -183,6 +184,23 @@ def _rendered(trades=None, capacity=None):
         'audit': {'warnings': []}, 'limitations': [],
     }
     return render(result)
+
+
+def test_report_parity_line_is_derived_not_hardcoded():
+    """首页那句"基线是否对齐"必须从 checks 算出来。
+
+    原先写死"工程检查均通过" —— 而"本引擎自洽"与"与旧基线一致"是两件事，写死会让
+    "对账没跑成"与"对账通过"在报告上长得一模一样（本模块反复要防的形态）。
+    """
+    verified = _rendered(checks={'baseline_parity': {
+        'status': 'VERIFIED', 'n_sessions': 2631, 'n_diffs': 0, 'tolerance_usd': 0.0}})
+    assert '逐日零分歧' in verified and '2631' in verified
+    assert '未完成' not in verified
+    missed = _rendered(checks={'baseline_parity': {
+        'status': 'NOT_EVALUATED', 'reason': 'BASELINE_PARITY_NO_PREPARED_ENTRIES'}})
+    assert '未完成' in missed and '不构成 §15 P0 的基线' in missed
+    # 完全没有这条 check 时也不得默认"通过"
+    assert '未完成' in _rendered(checks={})
 
 
 def test_report_conclusion_is_derived_not_hardcoded():

@@ -96,8 +96,26 @@ def test_replay_idempotence_and_fills(study):
     # §9.3 的结果判定只有把 challenger 与 baseline 比过之后才存在。只有基线时它是 None ——
     # 按"算不出来就是 None"的纪律，不挑一个最接近的令牌充数。
     assert first['verdict'] is None
-    assert first['phase_conclusion'] == 'INSUFFICIENT_EVIDENCE'
+    # 分期结论：**夹具数据太短，批处理管线产不出可对账的条目**，所以它是
+    # `ENGINEERING_BLOCKED` 而不是 `INSUFFICIENT_EVIDENCE` —— 后者是研究结论，
+    # 前者是"工程还没就绪，先去修"。两者共用一个标签正是要防的事（§15 P0）。
+    assert first['checks']['baseline_parity']['status'] == 'NOT_EVALUATED'
+    assert first['phase_conclusion'] == 'ENGINEERING_BLOCKED'
     assert first['verdict'] in (None, *experiments.VERDICT_TOKENS)
+
+
+def test_parity_not_evaluated_is_recorded_not_silently_skipped(study):
+    """批处理管线跑不出条目时，必须**如实记下 NOT_EVALUATED**，不能悄悄跳过。
+
+    "没有这条 check" 与 "这条 check 没跑成" 在 `checks.json` 里长得一模一样 —— 除非
+    把状态写出来。真实 study 上这条是 `VERIFIED`（有零分歧的对账记录）。
+    """
+    result = experiments.run(study)
+    parity = result['checks']['baseline_parity']
+    assert parity['status'] == 'NOT_EVALUATED'
+    assert parity['reason'].startswith('BASELINE_PARITY_NO_')
+    assert parity['note']
+    assert result['checks']['baseline_entries']['status'] == 'NOT_EVALUATED'
 
 
 def test_resume_after_committed_session(study, monkeypatch):
@@ -216,6 +234,83 @@ def test_unevaluated_reason_is_caught_end_to_end(rich_study, monkeypatch):
     monkeypatch.setattr(ca.IncrementalCandidateGenerator, '_observe', regressed)
     with pytest.raises(ValueError, match='GATE_OBSERVATION_REASON_ON_UNEVALUATED'):
         experiments.run(rich_study)
+
+
+def _parity_fixture():
+    """一只能跑通两引擎对账的最小 fixture：10 个 session、1 笔 entry、持有 5 个 session。"""
+    days = pd.bdate_range('2025-01-02', periods=10)
+    close = np.array([100., 101., 102., 103., 104., 105., 106., 107., 108., 109.])
+    prices = pd.DataFrame(dict(security_id='SEC-US-A', session=days,
+                               raw_open=close, raw_high=close + .5, raw_low=close - .5,
+                               raw_close=close))
+    i, horizon = 2, 5
+    matrix = pd.DataFrame([dict(
+        entry_id='e1', security_id='SEC-US-A', entry_session=days[i],
+        entry_price=float(close[i]), initial_stop=float(close[i] - 10.), rank=0,
+        holding_sessions=horizon, exit_method='H60', exit_session=days[i + horizon - 1],
+        exit_price=float(close[i + horizon - 1]), exit_reason='TIME_EXIT',
+        exit_phase='CLOSE', portfolio_accepted=True)])
+    return matrix, prices, pd.DataFrame(), horizon
+
+
+def test_baseline_parity_verifies_when_engines_agree(monkeypatch):
+    """两引擎在同一条 entry 上必须逐日零分歧 —— 这是 §15 P0「同输入与旧基线一致」。"""
+    from scripts.strategy_diagnostics import baseline_parity
+    matrix, prices, actions, horizon = _parity_fixture()
+    record = baseline_parity.compare(matrix, prices, actions, horizon=horizon,
+                                     risk_policy={'single_position_risk_bp': 100},
+                                     initial_cash=100_000.)
+    assert record['n_diffs'] == 0
+    # 历史引擎从**第一笔 entry 所在会话**起算（`evaluation_start`/`entry_session.min()`），
+    # 故是 10 − 2 = 8 个会话，不是 10
+    assert record['n_sessions'] == 8
+    assert record['tolerance_usd'] == 0.0
+
+
+def test_baseline_parity_catches_a_divergence(monkeypatch):
+    """§14「每个关键回归应证明**在注入对应缺陷时失败**」。
+
+    把历史引擎的定仓改掉一股 —— 对账必须报出来。没有这条，`n_diffs == 0` 可能只是因为
+    这个检查从来看不见差异（本模块反复要防的形态）。
+    """
+    import scripts.medium_term.portfolio_engine as pe
+    from scripts.strategy_diagnostics import baseline_parity
+    matrix, prices, actions, horizon = _parity_fixture()
+    original = pe.risk_sized_shares_micro
+    monkeypatch.setattr(pe, 'risk_sized_shares_micro',
+                        lambda *a, **k: original(*a, **k) + 1)
+    with pytest.raises(ValueError, match='BASELINE_PARITY_DIVERGED'):
+        baseline_parity.compare(matrix, prices, actions, horizon=horizon,
+                                risk_policy={'single_position_risk_bp': 100},
+                                initial_cash=100_000.)
+
+
+def test_entry_reconciliation_declares_the_acceptance_difference():
+    """两套接受机制不同是**预期**，但差集必须看得见（§5.1 不得把容量拒绝伪装成策略拒绝）。"""
+    from scripts.strategy_diagnostics.baseline_parity import reconcile_entries
+    matrix, _prices, _actions, _h = _parity_fixture()
+    out = reconcile_entries({('SEC-US-A', '2025-01-06')}, matrix)
+    assert out['batch_accepted'] == 1 and out['study_executed'] == 1
+    assert out['in_both'] == 1 and out['n_only_study'] == 0
+    assert '预期' in out['note']
+    never = reconcile_entries(set(), matrix)
+    assert never['n_only_batch'] == 1 and never['only_batch'] == [('SEC-US-A', '2025-01-06')]
+
+
+def test_unsettled_cash_is_zero_without_t1_settlement():
+    """`open_equity` 加上 `unsettled_cash` 必须是**可证明的空操作**（§15 P0 的前提）。
+
+    它的证明就是这条：不启用 T+1 时 `unsettled_cash` 恒为 0（卖出款直接进现金），
+    故既有历史基线一字不变。反过来若这里出现非零，我改动的那行就不再是空操作。
+    """
+    from scripts.medium_term.portfolio_engine import simulate_multi_asset_portfolio
+    matrix, prices, actions, _h = _parity_fixture()
+    out = simulate_multi_asset_portfolio(prices, matrix, initial_cash=100_000.,
+                                        risk_fraction=.01, max_weight=.20,
+                                        round_trip_cost=.002, actions=actions,
+                                        allow_fractional=False, max_positions=5)
+    assert (out.equity.unsettled_cash == 0).all()
+    assert (out.equity.dividend_receivable == 0).all()
 
 
 def test_tampered_input_fails(study):

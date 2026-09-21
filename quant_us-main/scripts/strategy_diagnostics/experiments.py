@@ -16,6 +16,7 @@ from scripts.portfolio_shadow.replay import replay
 from scripts.portfolio_shadow.schema import to_micro
 from scripts.portfolio_shadow.store import ShadowStore
 from scripts.live_trading.decision_ledger.event_store import digest
+from . import baseline_parity
 from . import manifest as study_manifest
 from .inputs import load
 from .funnel import Funnel, clean
@@ -104,6 +105,48 @@ def audit(path):
                          '历史重建不代表生产运行成功；未载入真实调度日志。']}
 
 
+def _uncovered(navs, trades, state, sessions, manifest):
+    """对账**覆盖不到**的组件，逐条点名并量化。
+
+    §2.2 的告诫是双向的：对账通过只证明两套引擎在同一件事上一致，不证明那件事是对的，
+    更不证明**没被对账的组件**是对的。把它们列出来、给出占比，读的人才不会把
+    `baseline_parity: 0 diffs` 读成"全口径对齐"。
+    """
+    risk = [n.get('risk_state') for n in navs]
+    states = Counter(risk)
+    prior = {str(navs[i - 1]['session']): navs[i - 1].get('risk_state')
+             for i in range(1, len(navs))}
+    entries = len(trades)
+    under_reduced = sum(1 for t in trades
+                        if prior.get(str(t['entry_session'])) == 'REDUCED')
+    last = str(sessions[-1].date())
+    outstanding = {k: v for k, v in (state.dividend_receivable or {}).items() if v}
+    stuck = sorted(k for k in outstanding if k is not None and str(k) <= last)
+    censored = sorted(k for k in outstanding if k is None or str(k) > last)
+    return {
+        # 历史引擎里没有回撤阶梯（`grep ladder|high_water portfolio_engine.py` 为空），
+        # 故它只能被单元测试覆盖，拿不到第二实现的对账。
+        'drawdown_ladder': {
+            'covered_by_parity': False, 'sessions_by_state': dict(states),
+            'entries_under_reduced_budget': under_reduced, 'entries': entries,
+        },
+        # 同理，下面这条只有一份实现（两个引擎同键同错），只有对比"应收是否结了"才看得见。
+        'dividend_receivable_outstanding': {
+            'stuck_within_window': stuck, 'censored_after_window': censored,
+            'amount_micro': sum(outstanding.values()),
+            'note': '两个引擎都按**精确日期**匹配支付日，故支付日落在非交易日的分红'
+                    '永远转不成可用现金（钱仍在 NAV 里，只是不能再拿去建仓）。',
+        },
+        'config_divergences': [
+            '行动覆盖门：本 study 未启用（`blocked={}`），历史研究基线启用了 audited blocked。',
+            '窗口：本 study 用冻结输入的覆盖交集，历史研究基线用 P1/B2/B3 条目的 union 窗口。',
+            '回撤阶梯：本 study 启用（取自冻结父 manifest），历史研究基线没有这个概念。',
+            '条目来源：本 study 用增量生成器，对账用的是同输入的批处理矩阵（接受机制不同）。',
+        ],
+        'note': '以上各项**没有**第二实现可对账；在此如实列出，不得读成"已对齐"。',
+    }
+
+
 def run(path, variant='baseline'):
     if variant != 'baseline':
         raise ValueError('P0_P1_ONLY_BASELINE:challengers require a separately frozen protocol')
@@ -163,7 +206,10 @@ def _run(path, data):
                                  'WHERE experiment_id=? AND scope=?', (exp_id, scope)).fetchall())
     checks = {'observer_opportunities_equal': True, 'observer_states_equal': True,
               'replay_equal': True, 'invariants': True, 'accounting_identity': True,
-              'baseline_definition': '同一冻结父策略、共同空仓起点、observer-off控制；非生产收益复现'}
+              # 这五个都是**本引擎自洽**的证明。跨实现的「基线对齐」由下面的
+              # `baseline_parity` 给出 —— 两者都通过才谈得上 §15 P0。
+              'baseline_definition': '同一冻结父策略、共同空仓起点、observer-off控制；'
+                                     '跨引擎对账见 baseline_parity，未覆盖项见 uncovered_by_parity'}
     for session in sessions:
         date = str(session.date())
         fresh, reference = gen.opportunities_for(session), control.opportunities_for(session)
@@ -240,10 +286,27 @@ def _run(path, data):
     stats = {'capacity': capacity_summary(capacity, m.risk_policy),
              'concentration': concentration(trades, m.initial_cash),
              'robustness': robustness(trades)}
+    # §8.1 / §15 P0「基线对齐」：用**另一套引擎**在同一批冻结输入上重算一遍并逐日对账。
+    # 上面那些自查（重放、不变量、NAV 恒等式）都只能证明"本引擎自洽"—— 一个两边共有的
+    # 会计错误会同时通过全部自查。对账非零即抛，见 `baseline_parity.TOLERANCE_USD`。
+    parity, baseline_entries = baseline_parity.evaluate(
+        data, root, prices, quality, actions, trades,
+        risk_policy=m.risk_policy, horizon=int(m.execution_policy['horizon']),
+        initial_cash=m.initial_cash)
+    checks['baseline_parity'] = parity
+    checks['baseline_entries'] = baseline_entries
+    # 对账**覆盖不到**的东西必须点名，否则"对齐了"会被读成全口径对齐。
+    checks['uncovered_by_parity'] = _uncovered(navs, trades, state, sessions, m)
+    # 没能证明"与旧基线一致"的 study 不构成 P0 基线（§15「失败则停在工程修复，不运行收益寻优」）。
+    parity_ok = parity.get('status') == 'VERIFIED'
     result = {'study_id': data['study_id'], 'manifest_hash': data['manifest_hash'],
               'phase': 'P0_P1', 'status': 'DIAGNOSTIC_COMPLETE',
               # 只有基线 ⇒ §9.3 的判定还没轮到（不是"判定为样本不足"）。见 VERDICT_TOKENS。
-              'verdict': None, 'phase_conclusion': PHASE_CONCLUSION, 'checks': checks,
+              'verdict': None,
+              # §8.2 的分期结论。**对账没通过就不是"证据不足"，是"工程未就绪"** ——
+              # 前者是研究结论，后者是必须先修的东西，两者不能共用一个标签。
+              'phase_conclusion': PHASE_CONCLUSION if parity_ok else 'ENGINEERING_BLOCKED',
+              'checks': checks,
               'sessions': len(sessions), 'source_kind': 'historical_reconstruction',
               'full_cost_return': navs[-1]['full_cost_equity'] / m.initial_cash - 1,
               'max_drawdown': mdd, 'initial_cash_micro': m.initial_cash,
