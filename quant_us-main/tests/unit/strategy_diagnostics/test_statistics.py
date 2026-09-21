@@ -11,9 +11,10 @@ from pathlib import Path
 
 import pytest
 
-from scripts.strategy_diagnostics.exit_attribution import (KNOWN_EXIT_REASONS, summarize)
-from scripts.strategy_diagnostics.statistics import (capacity_summary, concentration,
-                                                     robustness)
+from scripts.strategy_diagnostics.exit_attribution import (KNOWN_EXIT_REASONS,
+                                                           summarize, trades_from_events)
+from scripts.strategy_diagnostics.statistics import (annual_returns, capacity_summary,
+                                                     concentration, robustness)
 
 ROOT = Path(__file__).resolve().parents[3]
 RISK = {'max_positions': 5, 'single_position_risk_bp': 100}
@@ -140,7 +141,104 @@ def test_concentration_shares_and_by_security():
     assert out['top1_trade_share_of_gain'] == pytest.approx(0.75)
     assert out['top1_security_share_of_gain'] == pytest.approx(0.75)
     assert out['top2_security_share_of_gain'] == pytest.approx(1.0)
-    assert out['by_security_micro'] == {'SEC-US-A': 3_000_000, 'SEC-US-B': 1_000_000}
+    assert out['by_security_gain_micro'] == {'SEC-US-A': 3_000_000, 'SEC-US-B': 1_000_000}
+    assert out['by_security_net_micro'] == {'SEC-US-A': 3_000_000, 'SEC-US-B': 1_000_000}
+
+
+def test_concentration_numerator_excludes_losses():
+    """分子只取**盈利**中最大的前 N —— 含亏损会把集中度系统性低估。
+
+    实测（review 指出）：一笔赚 100、一笔亏 90 时，`top3_trade_share_of_gain` 原先返回
+    **10%**（(100−90)/100），而全部盈利都来自那一笔，应当是 **100%**。集中度正是用来判断
+    "这点收益是不是靠个别标的"的指标，低估它等于把风险说小。证券轴同病：
+    原先按**净损益**排序取前 N，同样把亏损算进了分子。
+    """
+    out = concentration([_trade(net_pnl_micro=100_000_000),
+                         _trade(net_pnl_micro=-90_000_000)], 100_000_000)
+    assert out['gross_gain_micro'] == 100_000_000
+    assert out['top1_trade_share_of_gain'] == pytest.approx(1.0)
+    assert out['top3_trade_share_of_gain'] == pytest.approx(1.0)
+    assert out['top1_security_share_of_gain'] == pytest.approx(1.0)
+    assert out['top2_security_share_of_gain'] == pytest.approx(1.0)
+    # 同证券的盈利与亏损相抵后为净 0.1 亿：盈利口径与净口径必须都能看见，且不可混读
+    same = concentration([_trade(security_id='SEC-US-A', net_pnl_micro=100_000_000),
+                          _trade(security_id='SEC-US-A', net_pnl_micro=-90_000_000)], 100_000_000)
+    assert same['by_security_gain_micro'] == {'SEC-US-A': 100_000_000}
+    assert same['by_security_net_micro'] == {'SEC-US-A': 10_000_000}
+
+
+def test_holding_period_counts_zero_session_trades():
+    """`holding_sessions=0` 必须计入 —— 真值判断会把它整类丢掉，均值只会偏高。
+
+    review 指出：009 有两笔当日止损。原先 `if t.get('holding_sessions')` 把 0 判为假，
+    于是"最短的持有"从均值里消失。改成判 `None`。
+    """
+    out = summarize([_trade(holding_sessions=0, net_r=-1.0),
+                     _trade(holding_sessions=10, net_r=1.0)])
+    row = out['exit_reasons']['STOP']
+    assert row['mean_holding_sessions'] == pytest.approx(5.0)   # (0 + 10) / 2
+    assert summarize([_trade(holding_sessions=0)])['exit_reasons']['STOP'][
+        'mean_holding_sessions'] == 0.0     # 0，不是 None
+
+
+def test_holding_period_is_calendar_based_and_uniform():
+    """持有期按**参考交易日历**计，入场日与退出日都算：当日进出 = 1。
+
+    引擎自报的 `holding_sessions` 数的是"活过几个收盘"（当日止损在计数之前 ⇒ 0），
+    与时间退出的 1 起算序号混在一列里。两套口径的差异要**看得见**，不是把引擎值丢掉。
+    """
+    import pandas as pd
+    days = pd.bdate_range('2025-01-02', periods=5)
+    prices = pd.DataFrame({'security_id': 'A', 'session': days, 'raw_close': 100.0})
+    def fill(side, session, reason):
+        return {'type': 'fill', 'side': side, 'security_id': 'A', 'session': str(session.date()),
+                'shares': 10, 'price_micro': 100_000_000, 'stop_micro': 90_000_000,
+                'fee_micro': 10_000, 'reason': reason, 'opportunity_id': 'o1'}
+    same_day = trades_from_events([fill('BUY', days[0], 'ENTRY'), fill('SELL', days[0], 'STOP')],
+                                  type('S', (), {'positions': {}})(), prices, pd.DataFrame(),
+                                  days, days[-1])
+    assert same_day[0]['holding_sessions'] == 1              # 当日进出
+    assert same_day[0]['holding_sessions_engine'] == 0       # 引擎口径（活过的收盘数）
+    out = summarize(same_day)
+    assert out['holding_sessions_engine_mismatch'] == 1
+    assert out['holding_basis']
+    # 持有到第 3 个 session 收盘退出 = 3
+    held = trades_from_events([fill('BUY', days[0], 'ENTRY'), fill('SELL', days[2], 'TIME_EXIT')],
+                              type('S', (), {'positions': {}})(), prices, pd.DataFrame(),
+                              days, days[-1])
+    assert held[0]['holding_sessions'] == 3
+
+
+def test_annual_returns_come_from_nav_not_from_trade_grouping():
+    """年度**账户**收益按逐日净值算；交易损益按退出年归集**不是**年度收益。
+
+    review 指出：跨年持仓会把整笔盈亏压到退出那一年（2024-12-20 入场、2025-01-05 出场
+    的一笔，整笔记在 2025）。故两者必须分开：`annual` 由净值算，`by_exit_year` 只是
+    交易损益的归集，且字段名与 note 都要写明口径。
+    """
+    navs = [{'session': '2025-01-02', 'full_cost_equity': 100_000_000},
+            {'session': '2025-06-30', 'full_cost_equity': 110_000_000},
+            {'session': '2025-12-31', 'full_cost_equity': 120_000_000},
+            {'session': '2026-12-31', 'full_cost_equity': 90_000_000}]
+    annual = annual_returns(navs, 100_000_000)
+    assert annual['years']['2025']['return'] == pytest.approx(0.2)    # 100 → 120
+    assert annual['years']['2026']['return'] == pytest.approx(-0.25)  # 120 → 90
+    assert annual['count'] == 2 and annual['positive'] == 1
+    # 首年以**初始资金**为分母：若用当年第一行净值，会漏掉第一年的收益
+    first = annual_returns([{'session': '2024-06-30', 'full_cost_equity': 150_000_000}],
+                           100_000_000)
+    assert first['years']['2024']['return'] == pytest.approx(0.5)
+    # 交易损益归集：只含已平仓，且明说不是年度收益
+    out = robustness([_trade(entry_session='2024-12-20', exit_session='2025-01-05',
+                             net_pnl_micro=50_000_000),
+                      _trade(entry_session='2025-06-01', exit_session=None,
+                             status='right_censored', net_pnl_micro=1_000_000)])
+    assert out['by_exit_year'] == {'2025': {'count': 1, 'net_micro': 50_000_000}}
+    assert out['censored_excluded'] == 1
+    assert '不是年度账户收益' in out['basis']
+    text = _rendered()
+    assert '年度账户收益（按逐日净值）' in text
+    assert '交易损益按退出年归集（不是年度收益）' in text
 
 
 def test_robustness_groups_by_exit_year():
@@ -149,8 +247,8 @@ def test_robustness_groups_by_exit_year():
               _trade(exit_session='2025-06-01', net_pnl_micro=2_000_000)]
     out = robustness(trades)
     assert out['years'] == 2
-    assert out['by_year']['2024']['net_micro'] == 1_000_000
-    assert out['by_year']['2025']['count'] == 2
+    assert out['by_exit_year']['2024']['net_micro'] == 1_000_000
+    assert out['by_exit_year']['2025']['count'] == 2
     assert out['years_positive'] == 1
     assert out['years_positive_share'] == pytest.approx(0.5)
 
@@ -178,7 +276,11 @@ def _rendered(trades=None, capacity=None, checks=None):
         'exits': summarize(trades, 100_000_000),
         'statistics': {'capacity': capacity_summary(capacity, RISK),
                        'concentration': concentration(trades, 100_000_000),
-                       'robustness': robustness(trades)},
+                       'robustness': robustness(trades),
+                       'annual': annual_returns(
+                           [{'session': '2025-01-02', 'full_cost_equity': 100_000_000},
+                            {'session': '2025-12-31', 'full_cost_equity': 110_000_000}],
+                           100_000_000)},
         'capacity': capacity, 'pending_execution_at_window_end': 0,
         'excluded_actions': {'count': 0, 'by_reason': {}},
         'audit': {'warnings': []}, 'limitations': [],

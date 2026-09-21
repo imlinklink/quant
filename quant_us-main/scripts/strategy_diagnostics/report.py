@@ -23,6 +23,12 @@ def _exit_section(x):
         lines.append(f"| {reason} | {row['count']} | {_usd(row['net_pnl_micro'])} | "
                      f"{_num(row['mean_net_r'], 3)} | {_num(row['mean_holding_sessions'], 1)} | "
                      f"{pct(row.get('share_of_account_return'))} |")
+    if x.get('holding_basis'):
+        # 计日口径写出来：引擎自报的数是"活过几个收盘"（当日止损为 0），与其它退出类型
+        # 的 1 起算序号混在一列里，均值会系统性偏高。
+        lines += ['', f"持有期口径：{x['holding_basis']}；与引擎自报口径不同的交易 "
+                      f"{x.get('holding_sessions_engine_mismatch', 0)} 笔"
+                      f"（引擎值另存 `holding_sessions_engine`）。"]
     if x.get('unclassified_reasons'):
         # 引擎新增退出原因而统计没归类时必须看得见，否则它会静默漏出统计
         lines += ['', f"⚠ 未归类的退出原因：{x['unclassified_reasons']}（止损/期限统计未覆盖）"]
@@ -68,18 +74,35 @@ def _concentration_section(stat):
     if not stat:
         return ['## 集中度与稳健性', '', '本次运行没有输出聚合统计（旧 schema）。', '']
     con, rob = stat['concentration'], stat['robustness']
+    annual = stat.get('annual') or {}
     lines = ['## 集中度与稳健性', '',
              f"可计值交易：{con['valued']} / {con['trades']}；净损益 {_usd(con['net_micro'])}；"
              f"占账户收益 {pct(con.get('share_of_account_return'))}。",
-             f"盈利集中度：最大一笔占全部盈利 {pct(con['top1_trade_share_of_gain'])}、"
+             # 分子只取**盈利**中最大的前 N；亏损不入分子。口径写出来 —— 含亏损的分子会把
+             # 集中度系统性低估，而集中度正是用来判断"这点收益是不是靠个别标的"的。
+             f"盈利集中度（分子=盈利中最大的前 N，亏损不入分子；分母=全部盈利）："
+             f"最大一笔占 {pct(con['top1_trade_share_of_gain'])}、"
              f"前三笔 {pct(con['top3_trade_share_of_gain'])}；"
              f"最大一只证券 {pct(con['top1_security_share_of_gain'])}、"
-             f"前两只 {pct(con['top2_security_share_of_gain'])}。", '',
-             f"分年：{rob['years']} 年，其中为正 {rob['years_positive']}"
-             f"（{pct(rob['years_positive_share'])}）。"]
-    for year, row in rob['by_year'].items():
+             f"前两只 {pct(con['top2_security_share_of_gain'])}。", '']
+    if annual.get('years'):
+        lines += ['### 年度账户收益（按逐日净值）', '',
+                  f"{annual['count']} 年，其中为正 {annual['positive']}"
+                  f"（{pct(annual['positive_share'])}）。", '',
+                  '| 年 | 期初 | 期末 | 收益 | session |', '|---|---:|---:|---:|---:|']
+        for year, row in annual['years'].items():
+            lines.append(f"| {year} | {_usd(row['start_micro'])} | {_usd(row['end_micro'])} | "
+                         f"{pct(row['return'])} | {row['sessions']} |")
+        lines += ['', annual['note'], '']
+    # 交易损益按退出年归集 —— **不是**年度账户收益（跨年持仓会把整笔压到退出年）。
+    lines += ['### 交易损益按退出年归集（不是年度收益）', '',
+              f"{rob['years']} 年，其中为正 {rob['years_positive']}"
+              f"（{pct(rob['years_positive_share'])}）；"
+              f"右删失未计入 {rob['censored_excluded']} 笔。", '']
+    for year, row in rob['by_exit_year'].items():
         lines.append(f"- {year}：{row['count']} 笔，净 {_usd(row['net_micro'])}")
-    lines += ['', '集中度与分年只作描述：单一小样本下的"最赚的一笔"不构成规则缺陷。', '']
+    lines += ['', f"{rob['basis']}。", '',
+              '集中度与分年只作描述：单一小样本下的"最赚的一笔"不构成规则缺陷。', '']
     return lines
 
 

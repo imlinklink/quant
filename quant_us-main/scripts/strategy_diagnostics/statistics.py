@@ -85,16 +85,28 @@ def capacity_summary(rows, risk_policy):
 def concentration(trades, initial_cash_micro):
     """集中度：盈利是否由个别交易/证券决定（§6.2、§11.2「前三笔、前两只利润集中度」）。
 
+    **口径**：分母是全部**盈利**之和；分子是**盈利**里最大的前 N 个（按证券时=先按证券
+    汇总其**盈利**，再取前 N）。亏损一律不进分子。
+
+    原先分子取的是"净损益最大的前 N 笔/只"，其中可以含亏损 —— 于是"前三笔盈利占比"
+    在一笔赚 100、一笔亏 90 时返回 **10%**（(100−90)/100），而全部盈利都来自那一笔，
+    应当是 **100%**。分子含亏损会把集中度**系统性低估**，而集中度正是用来判断
+    "这点收益是不是靠个别标的"的指标。
+
     只统计**有净损益**的交易；右删失且无估值的不计入分母（算不出来就是 `None`）。
     """
     valued = [t for t in trades if t.get('net_pnl_micro') is not None]
     gains = [t['net_pnl_micro'] for t in valued if t['net_pnl_micro'] > 0]
     total_gain = sum(gains)
-    by_security = defaultdict(int)
+    gain_by_security = defaultdict(int)
+    net_by_security = defaultdict(int)
     for t in valued:
-        by_security[t['security_id']] += t['net_pnl_micro']
-    ordered = sorted(valued, key=lambda t: t['net_pnl_micro'], reverse=True)
-    securities = sorted(by_security.items(), key=lambda kv: kv[1], reverse=True)
+        net_by_security[t['security_id']] += t['net_pnl_micro']
+        if t['net_pnl_micro'] > 0:
+            gain_by_security[t['security_id']] += t['net_pnl_micro']
+    top_trades = sorted(gains, reverse=True)
+    top_securities = sorted(gain_by_security.values(), reverse=True)
+    net_securities = sorted(net_by_security.items(), key=lambda kv: kv[1], reverse=True)
 
     def share(values, n):
         if not values or total_gain <= 0:
@@ -113,24 +125,65 @@ def concentration(trades, initial_cash_micro):
         'share_of_account_return': (_micro(net) / (initial_cash_micro / 1e6)
                                     if initial_cash_micro and net is not None else None),
         # None（没有盈利交易）与 0.0 是两件事
-        'top1_trade_share_of_gain': share([t['net_pnl_micro'] for t in ordered], 1),
-        'top3_trade_share_of_gain': share([t['net_pnl_micro'] for t in ordered], 3),
-        'top1_security_share_of_gain': share([v for _, v in securities], 1),
-        'top2_security_share_of_gain': share([v for _, v in securities], 2),
-        'by_security_micro': dict(securities),
-        'note': '只统计有净损益的交易；没有可计值交易时集中度为 unavailable，描述性而非结论。',
+        'top1_trade_share_of_gain': share(top_trades, 1),
+        'top3_trade_share_of_gain': share(top_trades, 3),
+        'top1_security_share_of_gain': share(top_securities, 1),
+        'top2_security_share_of_gain': share(top_securities, 2),
+        'by_security_gain_micro': dict(gain_by_security),
+        'by_security_net_micro': dict(net_securities),
+        'note': '分子=盈利中最大的前N（亏损不入分子），分母=全部盈利之和；'
+                '`top*_share_of_gain` 与 `by_security_gain_micro` 同口径（只含盈利），'
+                '`by_security_net_micro` 是净损益（含亏损），两者不可混读。'
+                '没有可计值交易时集中度为 unavailable，描述性而非结论。',
     }
 
 
+def annual_returns(navs, initial_micro):
+    """**按逐年逐日净值**算年度账户收益。
+
+    这是"年度表现"该有的口径；`robustness` 里那个按退出年归集的交易损益**不是**它 ——
+    跨年持仓会把整笔盈亏压到退出那一年（实测：2024-12-20 入场、2025-01-05 出场的一笔，
+    50 万全记在 2025，2024 一分没有）。两者必须分开呈现，不能拿后者当"年度收益"。
+
+    首年以**初始资金**为分母（不是当年第一行净值），否则会漏掉第一年的收益。
+    """
+    if not navs:
+        return {'years': {}, 'note': '没有逐日净值。'}
+    frames = sorted(({'session': str(n['session']), 'equity': n['full_cost_equity']}
+                     for n in navs), key=lambda r: r['session'])
+    by_year = defaultdict(list)
+    for row in frames:
+        by_year[row['session'][:4]].append(row['equity'])
+    years, previous = {}, float(initial_micro)
+    for year in sorted(by_year):
+        values = by_year[year]
+        # 年内首个完整估值的上一条：首年用初始资金，其余年用上一年最后一条
+        start = previous
+        end = values[-1]
+        years[year] = {'start_micro': int(start), 'end_micro': int(end),
+                       'return': (end / start - 1) if start > 0 else None,
+                       'sessions': len(values)}
+        previous = end
+    positive = [y for y, row in years.items() if (row['return'] or 0) > 0]
+    return {'years': years, 'count': len(years), 'positive': len(positive),
+            'positive_share': (len(positive) / len(years)) if years else None,
+            'note': '年度账户收益 = 年末全成本权益 / 上年末（首年用初始资金）− 1，'
+                    '按逐日净值算；与 `robustness.by_exit_year` 的交易损益归集不同口径。'}
+
+
 def robustness(trades):
-    """稳健性：按年份与退出原因分组，看结论是否只靠某一段（§12 walk-forward 的精神）。"""
+    """稳健性：把已平仓交易按**退出年**归集，看结论是否只靠某一段（§12 walk-forward 的精神）。
+
+    **这不是"年度账户收益"** —— 它把整笔盈亏记在退出那一年，跨年持仓会因此错位；
+    年度收益另见 `annual_returns`（按逐日净值）。故这里把口径写进字段名与 note，
+    并只统计**已平仓**交易（右删失的没有退出年，混进来会让同一张表出现两种归集基准）。
+    """
     valued = [t for t in trades if t.get('net_pnl_micro') is not None]
     by_year = defaultdict(lambda: {'count': 0, 'net_micro': 0})
     by_reason = defaultdict(lambda: {'count': 0, 'net_micro': 0})
     for t in valued:
-        session = t.get('exit_session') or t.get('entry_session')
-        if session:
-            row = by_year[str(session)[:4]]
+        if t.get('exit_session'):
+            row = by_year[str(t['exit_session'])[:4]]
             row['count'] += 1
             row['net_micro'] += t['net_pnl_micro']
         row = by_reason[t.get('exit_reason') or 'RIGHT_CENSORED']
@@ -138,6 +191,10 @@ def robustness(trades):
         row['net_micro'] += t['net_pnl_micro']
     years = dict(sorted(by_year.items()))
     positive = [y for y, row in years.items() if row['net_micro'] > 0]
-    return {'by_year': years, 'by_exit_reason': dict(by_reason),
+    return {'by_exit_year': years, 'by_exit_reason': dict(by_reason),
             'years': len(years), 'years_positive': len(positive),
-            'years_positive_share': (len(positive) / len(years)) if years else None}
+            'years_positive_share': (len(positive) / len(years)) if years else None,
+            'censored_excluded': sum(1 for t in valued if not t.get('exit_session')),
+            'basis': '交易净损益按**退出年**归集（只含已平仓）；不是年度账户收益',
+            'note': '年度账户收益见 `annual`（按逐日净值）。分年只作描述，'
+                    '单一小样本下的"最赚的一笔"不构成规则缺陷。'}

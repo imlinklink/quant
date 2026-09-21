@@ -21,7 +21,7 @@ from . import manifest as study_manifest
 from .inputs import load
 from .funnel import Funnel, clean
 from .exit_attribution import trades_from_events, summarize
-from .statistics import capacity_summary, concentration, robustness
+from .statistics import annual_returns, capacity_summary, concentration, robustness
 
 # §9.3 的结果判定枚举（闭集）。**这些是"判定"，不是"运行状态"**：只有把 challenger 与
 # baseline 在同一口径上比过之后才谈得上取其中一个。P0/P1 只有基线，所以 `verdict` 是
@@ -285,7 +285,10 @@ def _run(path, data):
     # 于是报告里那几段是空的 —— 采集与报出是两件事。
     stats = {'capacity': capacity_summary(capacity, m.risk_policy),
              'concentration': concentration(trades, m.initial_cash),
-             'robustness': robustness(trades)}
+             'robustness': robustness(trades),
+             # 年度账户收益按**逐日净值**算；`robustness.by_exit_year` 是交易损益按退出年归集，
+             # 跨年持仓会把整笔压到退出年，两者不是一回事，必须分开呈现。
+             'annual': annual_returns(navs, m.initial_cash)}
     # §8.1 / §15 P0「基线对齐」：用**另一套引擎**在同一批冻结输入上重算一遍并逐日对账。
     # 上面那些自查（重放、不变量、NAV 恒等式）都只能证明"本引擎自洽"—— 一个两边共有的
     # 会计错误会同时通过全部自查。对账非零即抛，见 `baseline_parity.TOLERANCE_USD`。

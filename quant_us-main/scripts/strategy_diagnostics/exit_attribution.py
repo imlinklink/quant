@@ -85,7 +85,24 @@ def trades_from_events(events, state, prices, actions, calendar, end):
         t['net_pnl_micro'] = (t['cashflows_micro'] + state.positions[sid].shares * round(marks[sid] * 1e6)
                               if sid in marks else None)
         trades.append(t)
+    # 持有期统一按**参考交易日历**计（入场日与退出日都算，当日进出 = 1）。
+    #
+    # 引擎自报的 `holding_sessions` 数的是"活过几个收盘"：当日止损发生在计数之前，于是它
+    # 是 0，而时间退出是 1 起算的序号 —— 两套口径混在同一列里，且 0 还会被下面的
+    # 真值判断吃掉，导致**均值系统性偏高**（实测 009 有两笔当日止损被整段漏掉）。
+    # 日历口径对跳空止损/日内止损/时间退出/右删失**一视同仁**。
+    # 引擎那个值不丢：另存为 `holding_sessions_engine`，差异在 `summarize` 里计数。
+    position = {pd.Timestamp(s).normalize(): i for i, s in enumerate(calendar)}
+    window_end = pd.Timestamp(end).normalize()
+
+    def sessions_held(entry, exit_session):
+        i = position.get(pd.Timestamp(entry).normalize())
+        j = position.get(pd.Timestamp(exit_session).normalize() if exit_session else window_end)
+        return None if i is None or j is None else int(j - i + 1)
+
     for t in trades:
+        t['holding_sessions_engine'] = t.pop('holding_sessions')
+        t['holding_sessions'] = sessions_held(t['entry_session'], t.get('exit_session'))
         t['net_r'] = (t['net_pnl_micro'] / t['initial_risk_micro']
                       if t['net_pnl_micro'] is not None and t['initial_risk_micro'] > 0 else None)
         t['followup'] = followup(t, prices, actions, calendar, end)
@@ -108,7 +125,9 @@ def summarize(trades, initial_cash_micro=None):
             row['net_pnl_micro'] += t['net_pnl_micro']
         if t['net_r'] is not None:
             row['net_r'].append(t['net_r'])
-        if t.get('holding_sessions'):
+        if t.get('holding_sessions') is not None:
+            # **必须判 None，不能判真假**：`holding_sessions=0` 的当日止损曾经被真值判断吃掉，
+            # 于是"最短的持有"整类从均值里消失，均值只会偏高。
             row['holding'].append(t['holding_sessions'])
     for row in reasons.values():
         values, holding = row.pop('net_r'), row.pop('holding')
@@ -156,6 +175,13 @@ def summarize(trades, initial_cash_micro=None):
                                            if row['status'] == 'mature')),
             'followup_maturity': maturity,
             'stop_recovery': recovery,
+            # 两套计日口径的差异**看得见**，而不是把引擎那个值丢掉。
+            'holding_basis': '按参考交易日历计，入场日与退出日都算（当日进出 = 1）',
+            'holding_sessions_engine_mismatch': sum(
+                1 for t in trades
+                if t.get('holding_sessions_engine') is not None
+                and t.get('holding_sessions') is not None
+                and t['holding_sessions_engine'] != t['holding_sessions']),
             # 引擎新增一个退出原因而这里没归类时，它必须**看得见**，否则会静默漏出统计
             'unclassified_reasons': sorted({t['exit_reason'] for t in trades
                                             if t.get('exit_reason') and t['exit_reason'] not in classified}),
