@@ -1,0 +1,147 @@
+{
+  "arm_A_matches_attribution": true,
+  "arms": {
+    "A_13_hindsight_tech": {
+      "CAGR": 0.1515815938685674,
+      "Calmar": 1.0902449893911235,
+      "Sharpe": 1.222075412909111,
+      "accepted_entries": 190,
+      "average_gross_exposure": 0.355399737326449,
+      "final_equity": 448722.3536857565,
+      "label": "A_13_hindsight_tech",
+      "max_drawdown": -0.1390344329426565,
+      "pit_gate": false,
+      "prepared": 442,
+      "right_censored": 0,
+      "round_trips": 190,
+      "selected_rows": 515,
+      "universe_size": 13
+    },
+    "B_32_ref": {
+      "CAGR": 0.0927417754050941,
+      "Calmar": 0.4928846647084877,
+      "Sharpe": 0.7680668938533791,
+      "accepted_entries": 201,
+      "average_gross_exposure": 0.35995525223033686,
+      "final_equity": 256863.40369604126,
+      "label": "B_32_ref",
+      "max_drawdown": -0.18816121102072714,
+      "pit_gate": false,
+      "prepared": 456,
+      "right_censored": 0,
+      "round_trips": 201,
+      "selected_rows": 515,
+      "universe_size": 32
+    },
+    "N_15_rule_non_tech": {
+      "CAGR": 0.02342183609339754,
+      "Calmar": 0.16521229669017673,
+      "Sharpe": 0.37410930587084584,
+      "accepted_entries": 175,
+      "average_gross_exposure": 0.38407551824645203,
+      "final_equity": 127923.19420070725,
+      "label": "N_15_rule_non_tech",
+      "max_drawdown": -0.14176811631231423,
+      "pit_gate": false,
+      "prepared": 416,
+      "right_censored": 0,
+      "round_trips": 175,
+      "selected_rows": 515,
+      "universe_size": 15
+    },
+    "Nn_19_non_it": {
+      "CAGR": 0.04771102969860297,
+      "Calmar": 0.419703021633375,
+      "Sharpe": 0.6420794727924038,
+      "accepted_entries": 181,
+      "average_gross_exposure": 0.38460619550022096,
+      "final_equity": 164173.97882012505,
+      "label": "Nn_19_non_it",
+      "max_drawdown": -0.11367807053883972,
+      "pit_gate": false,
+      "prepared": 437,
+      "right_censored": 0,
+      "round_trips": 181,
+      "selected_rows": 515,
+      "universe_size": 19
+    },
+    "T_17_rule_tech": {
+      "CAGR": 0.14674996768831372,
+      "Calmar": 0.9131163703623706,
+      "Sharpe": 1.1346064998530296,
+      "accepted_entries": 194,
+      "average_gross_exposure": 0.3400256974376445,
+      "final_equity": 429096.72222105146,
+      "label": "T_17_rule_tech",
+      "max_drawdown": -0.16071332466646715,
+      "pit_gate": false,
+      "prepared": 450,
+      "right_censored": 0,
+      "round_trips": 194,
+      "selected_rows": 515,
+      "universe_size": 17
+    },
+    "Tn_13_gics_it": {
+      "CAGR": 0.14289852965455085,
+      "Calmar": 0.9285568981103006,
+      "Sharpe": 1.0883643955645164,
+      "accepted_entries": 193,
+      "average_gross_exposure": 0.32819152581367317,
+      "final_equity": 414013.2232677557,
+      "label": "Tn_13_gics_it",
+      "max_drawdown": -0.15389313239216962,
+      "pit_gate": false,
+      "prepared": 436,
+      "right_censored": 0,
+      "round_trips": 193,
+      "selected_rows": 515,
+      "universe_size": 13
+    }
+  },
+  "decomposition_cagr": {
+    "broad_boundary": {
+      "B_minus_A_total": -0.0588398184634733,
+      "N_minus_T_sector": -0.12332813159491618,
+      "T_minus_A_name_selection": -0.004831626180253679,
+      "check_additive": -0.0588398184634733
+    },
+    "gics_boundary": {
+      "B_minus_A_total": -0.0588398184634733,
+      "Nn_minus_Tn_sector": -0.09518749995594789,
+      "Tn_minus_A_name_selection": -0.008683064214016545
+    },
+    "note": "描述性分解；容量与路径依赖产生交互，不得读成逐笔因果（§8.3）。两套边界都给，是因为**边界是我写的判断**，敏感性必须看得见。"
+  },
+  "harness_control": {
+    "expected_final_equity": 448722.3536857565,
+    "expected_max_drawdown": -0.1390344329,
+    "final_equity": 448722.3536857565,
+    "max_drawdown": -0.1390344329426565,
+    "passed": true
+  },
+  "registration_sha256": "0ad72910e6a64a64030a49613d33dc7e6805b578d89bd1a447c436ee988b1df5",
+  "returns_examined": false,
+  "status": "DIAGNOSTIC_COMPLETE",
+  "subset_closure": {
+    "gics_reclassified_out": [
+      "SEC-US-AMZN",
+      "SEC-US-GOOGL",
+      "SEC-US-META",
+      "SEC-US-NFLX"
+    ],
+    "non_tech": 15,
+    "rule_tech_not_in_hindsight_13": [
+      "SEC-US-AVGO",
+      "SEC-US-AXTI",
+      "SEC-US-COHR",
+      "SEC-US-NBIS"
+    ],
+    "tech_broad": 17,
+    "tech_narrow": 13,
+    "universe": 32
+  },
+  "window": [
+    "2016-01-05",
+    "2026-08-25"
+  ]
+}
