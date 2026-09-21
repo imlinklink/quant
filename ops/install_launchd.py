@@ -86,6 +86,21 @@ JOBS = {
         # 启动即失败时不至于打爆日志（launchd 的重启下限是 10s）
         'throttle': 60,
     },
+    'forward-arms': {
+        'label': 'com.quant.forward-arms',
+        'argv': ['/bin/bash', str(ROOT / 'ops' / 'forward_arms_daily.sh')],
+        'workdir': str(ROOT),
+        'stdout': 'forward_arms.log',
+        'stderr': 'forward_arms.err.log',
+        # 批处理，与 shadow-daily 同类
+        'process_type': 'Background',
+        'run_at_load': False,
+        # 两次尝试：① 影子日作业最后一次尝试在 19:40，错开它；
+        # ② 若首跑撞上对方持刷新锁（`REFRESH_IN_PROGRESS`），第二次还有机会。
+        # 与 shadow-daily 的三次尝试是同一个理由：LaunchAgent 的补跑不保证在窗口内醒来。
+        'calendar': [{'Weekday': w, 'Hour': h, 'Minute': m}
+                     for w in WEEKDAYS for (h, m) in ((20, 10), (21, 10))],
+    },
     'watchdog': {
         'label': 'com.quant.watchdog',
         'argv': ['/usr/bin/python3', str(ROOT / 'ops' / 'watchdog.py'), '--once'],
