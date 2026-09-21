@@ -181,12 +181,16 @@ def step_account_session(state, *, session, prices, acts, due, manifest, fee_bp,
     bars = {str(r.security_id): {k: to_micro(getattr(r, 'raw_' + k))
                                  for k in ('open', 'high', 'low', 'close')}
             for r in prices[prices.session.eq(session)].itertuples(index=False)}
-    for a in acts[date]:
+    for a in acts.get(date, ()):
         if (a['security_id'] in state.positions and a['action_type'] == 'cash_dividend'
                 and not a['pay_date']):
             raise ValueError(f'HELD_DIVIDEND_PAY_DATE_MISSING:{date}:{a["security_id"]}')
-    result = step(state, session=date, bars=bars, corporate_actions=acts[date], intents=due,
+    result = step(state, session=date, bars=bars, corporate_actions=acts.get(date, ()), intents=due,
                   manifest=manifest, fee_bp=fee_bp)
+    if result.nav is None:
+        # 该 session 已处理过：引擎幂等返回（不推进序号/持有天数/结算）。
+        # 前向 runner 按天调用、允许重跑，故这里必须早退而不是去读 nav。
+        return result
     if result.state.invariants():
         raise ValueError(f'ACCOUNT_INVARIANTS:{result.state.invariants()}')
     if result.nav['valuation_status'] != 'OK':
