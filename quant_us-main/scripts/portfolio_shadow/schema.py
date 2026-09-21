@@ -241,6 +241,18 @@ class Position:
     exit_policy_id: str
     opportunity_id: str
     holding_sessions: int = 0
+    # ---- 机械利润保护的状态（规划 §4.3；未启用时全部保持中性值）----
+    # 成交时**冻结**的单笔风险金额（净 R 的分母，不随浮盈变化，§7）。拆股不改它：
+    # 它是一次成交的风险额，不是按当前股数重算的口径。
+    initial_risk_micro: int = 0
+    # H = 持仓期内**已完成收盘价**的最高值。拆股按同一比例缩放、除息按每股分红下调
+    # （与 stop_micro 同一会计规则），否则公司行动会让保护线相对价格失真。
+    highest_completed_close_micro: int = 0
+    # **粘性**：除息下调 H 后不得退回未激活（否则已保本的持仓会突然失去保护）。
+    protection_activated: bool = False
+    # T 收盘算出、T+1 生效的保护线；None 表示没有待生效的更新。
+    pending_stop_micro: int | None = None
+    pending_stop_effective_session: str = ''
 
 
 @dataclass
@@ -309,7 +321,15 @@ class AccountState:
                                 'initial_stop_micro': p.initial_stop_micro,
                                 'stop_micro': p.stop_micro, 'exit_policy_id': p.exit_policy_id,
                                 'opportunity_id': p.opportunity_id,
-                                'holding_sessions': p.holding_sessions}
+                                'holding_sessions': p.holding_sessions,
+                                # 利润保护状态进哈希：不进的话「重放一致」对保护线无感，
+                                # 崩溃恢复后的保护线错位不会被任何断言发现。
+                                'initial_risk_micro': p.initial_risk_micro,
+                                'highest_completed_close_micro': p.highest_completed_close_micro,
+                                'protection_activated': p.protection_activated,
+                                'pending_stop_micro': p.pending_stop_micro,
+                                'pending_stop_effective_session':
+                                    p.pending_stop_effective_session}
                           for sid, p in sorted(self.positions.items())},
         })
 

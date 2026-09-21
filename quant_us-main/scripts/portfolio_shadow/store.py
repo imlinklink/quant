@@ -60,7 +60,14 @@ def _shift_iso(value, seconds: int) -> str:
 #       （'OK' → 'COMPLETED'），body 增 model_status 保留原始词汇；put_job_run 增两道守卫。
 #   9 → 冻结身份补 start_session（manifest_hash 的输入变了，旧账本记录的哈希一律不匹配）；
 #       save_experiment 拒绝同 id 不同配置；运行时新增 verify_manifest_frozen 校验。
-SHADOW_SCHEMA_VERSION = 9
+#  10 → 机械利润保护（预登记 EXIT-PROTECT-20260921）：Position 增
+#       initial_risk_micro / highest_completed_close_micro / protection_activated /
+#       pending_stop_micro / pending_stop_effective_session / protection_version，
+#       且**全部进 state_hash**；新增 `protection_state`（每持仓每 session 无条件写，
+#       否则重放重建不出 H）与 `stop_update_applied`（T+1 实际抬线的时刻）两类 step 事件。
+#       ⇒ 本版本的代码**读不了** 9 及更早的账本，反之亦然（这是刻意：用新代码解读
+#       旧状态得出的持仓保护线会是错的）。已冻结的 012 只读不写，不受影响。
+SHADOW_SCHEMA_VERSION = 10
 
 _SHADOW_DDL = '''
 CREATE TABLE IF NOT EXISTS shadow_schema(version INTEGER PRIMARY KEY);
@@ -523,7 +530,8 @@ class ShadowStore:
                 raise ValueError(f'SEQUENCE_GAP:{scope}:seq={seq}!=latest+1={latest + 1}')
             for i, e in enumerate(events or []):
                 if e['type'] in ('fill', 'split', 'dividend_record', 'dividend_pay', 'settle',
-                                 'nav', 'model_cost', 'model_cost_settlement', 'hold', 'missed'):
+                                 'nav', 'model_cost', 'model_cost_settlement', 'hold', 'missed',
+                                 'protection_state', 'stop_update_applied'):
                     payload = {**e, '_sequence': seq, '_index': i}
                     _insert_event(con, scope, 'shadow:step', (seq, i), payload)
             con.execute('INSERT OR REPLACE INTO shadow_account_state VALUES (?,?,?,?,?)',
