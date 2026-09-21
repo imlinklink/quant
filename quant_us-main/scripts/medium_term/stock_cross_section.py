@@ -46,19 +46,35 @@ def rank_monthly_snapshot(snapshot: pd.DataFrame, decision, *, members=None) -> 
     return rank_cross_section(snapshot)
 
 
-def generate_monthly_candidates(prices: pd.DataFrame, market: pd.DataFrame, *,
-                                price_col='asof_close', market_price_col='asof_close',
-                                market_ma_col='asof_ma200', top_n=5,
-                                actions: pd.DataFrame | None = None,
-                                members: pd.DataFrame | None = None) -> pd.DataFrame:
-    """每月生成 B2 候选；QQQ 市场门关闭时保留排名但不选中。
+def monthly_snapshots(prices: pd.DataFrame, *, actions: pd.DataFrame | None = None,
+                      price_col='asof_close') -> dict:
+    """每个月末一份**原始截面**（掩码与排名**之前**）。
 
-    `members`（可选）= 时点宇宙掩码：需含 `security_id` / `session` / 布尔列 `eligible`。
-    给了它就**只在当日合格宇宙内排名**（见 `_apply_members`）。**不给时行为与改动前
-    逐字节相同**（有测试钉死）—— 这条是"宇宙是唯一变量"的前提。
+    **抽出来是为了让多臂共享这一步。** 它按 (证券, as_of) 重建整段 as-of 复权视图 —— 与
+    "面板里还有谁"无关，而实测它是整条回测的 **83%**（一个 32 只的臂 6.5 分钟里 5.3 分钟
+    在这里）。多个臂各自重算，等于把最贵的一步做 N 遍。
+
+    **为什么共享是等价的**（不是"差不多"）：掩码在**排名之前**把非成员标为不合格，而
+    `rank_cross_section` 只对合格者排序、排序键是 `(momentum_score, mom_6m, security_id)`
+    —— **完整序**，与行集合无关 ⇒ 成员的名次与"只喂成员"逐位相同。下游只消费
+    `selected` 行，故装配结果等价。
     """
-    if top_n <= 0:
-        raise ValueError('INVALID_TOP_N')
+    from .momentum_features import momentum_snapshot, point_in_time_momentum_snapshot
+    calendar = normalize_sessions(prices.session)
+    return {decision: (point_in_time_momentum_snapshot(prices, actions, decision)
+                       if actions is not None else
+                       momentum_snapshot(prices, decision, price_col=price_col))
+            for decision in month_end_sessions(calendar)}
+
+
+def assemble_candidates(snapshots: dict, prices: pd.DataFrame, market: pd.DataFrame, *,
+                        market_price_col='asof_close', market_ma_col='asof_ma200',
+                        top_n=5, members: pd.DataFrame | None = None) -> pd.DataFrame:
+    """装配候选表：掩码 → 排名 → 市场门 → `selected` / `selection_reason`。
+
+    `snapshots` 可以是**整块面板**算出来的一份（多臂共享，见 `monthly_snapshots`），
+    带 `members` 时非成员会被标为不合格而不参与排名 —— 于是每臂看到的就是"自己那个池子"。
+    """
     needed = {'session', market_price_col, market_ma_col}
     if missing := needed - set(market.columns):
         raise ValueError(f'MARKET_GATE_COLUMNS_MISSING:{",".join(sorted(missing))}')
@@ -71,12 +87,8 @@ def generate_monthly_candidates(prices: pd.DataFrame, market: pd.DataFrame, *,
     m = m.set_index('session').sort_index()
     calendar = normalize_sessions(prices.session)
     frames = []
-    for decision in month_end_sessions(calendar):
-        snap = rank_monthly_snapshot(
-            point_in_time_momentum_snapshot(prices, actions, decision)
-            if actions is not None else
-            momentum_snapshot(prices, decision, price_col=price_col),
-            decision, members=members)
+    for decision, raw in snapshots.items():
+        snap = rank_monthly_snapshot(raw, decision, members=members)
         execution = next_session(calendar, decision)
         market_row = m.loc[decision] if decision in m.index else None
         gate = bool(market_row is not None and
@@ -96,3 +108,25 @@ def generate_monthly_candidates(prices: pd.DataFrame, market: pd.DataFrame, *,
             snap.loc[snap.eligible.astype(bool), 'selection_reason'] = 'NEXT_SESSION_MISSING'
         frames.append(snap)
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
+def generate_monthly_candidates(prices: pd.DataFrame, market: pd.DataFrame, *,
+                                price_col='asof_close', market_price_col='asof_close',
+                                market_ma_col='asof_ma200', top_n=5,
+                                actions: pd.DataFrame | None = None,
+                                members: pd.DataFrame | None = None) -> pd.DataFrame:
+    """每月生成 B2 候选；QQQ 市场门关闭时保留排名但不选中。
+
+    `members`（可选）= 时点宇宙掩码：需含 `security_id` / `session` / 布尔列 `eligible`。
+    给了它就**只在当日合格宇宙内排名**（见 `_apply_members`）。**不给时行为与改动前
+    逐字节相同**（有测试钉死）—— 这条是"宇宙是唯一变量"的前提。
+
+    多臂场景请用 `monthly_snapshots` + `assemble_candidates` 共享最贵的截面重建
+    （见 `monthly_snapshots` 的说明）。
+    """
+    if top_n <= 0:
+        raise ValueError('INVALID_TOP_N')
+    return assemble_candidates(
+        monthly_snapshots(prices, actions=actions, price_col=price_col), prices, market,
+        market_price_col=market_price_col, market_ma_col=market_ma_col,
+        top_n=top_n, members=members)
