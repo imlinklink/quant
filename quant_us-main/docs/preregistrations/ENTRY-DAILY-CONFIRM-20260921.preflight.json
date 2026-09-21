@@ -1,0 +1,31 @@
+{
+  "account_experiment_started": false,
+  "blockers": [
+    "DIVIDENDS_STUCK_ON_NON_SESSION_PAY_DATES"
+  ],
+  "dividend_settlement": {
+    "amount_micro": 239715000,
+    "censored_after_window": [],
+    "note": "两个引擎都按**精确日期**匹配支付日，故支付日落在非交易日的分红永远转不成可用现金（钱仍在 NAV 里，只是不能再拿去建仓）。",
+    "stuck_within_window": [
+      "2019-06-01",
+      "2019-12-01"
+    ]
+  },
+  "evidence_sha256": {
+    "data/strategy_diagnostics/SD-P0P1-20260921-010/checks.json": "c23edea3d3ae81b5ff6798af03a2310abeb0568331a7cdcee8a3f48198c468d0",
+    "data/strategy_diagnostics/SD-P0P1-20260921-010/funnel_observations.json": "7dc52f54a90ff5aade10f7d75b5257fc921c857f90ea41f389ca9ce8a655d82c",
+    "data/strategy_diagnostics/SD-P0P1-20260921-010/study_manifest.json": "af9a2b9332f9c30ec7892b419b0404bfc22845ca86a4e8d19318b88fd3ca159a",
+    "docs/preregistrations/ENTRY-DAILY-CONFIRM-20260921.json": "9c9a2a9765aba646760f3fadb9139e72f8efce6520384c827fd71492959b755b"
+  },
+  "note": "归档证据审计不等于当前代码重放。工程阻塞消除后须重冻并重新验证基线。",
+  "population_note": "账户成交子集仅用于成交复现控制；机会级总体必须包含账户拒绝的 READY 候选。",
+  "registration_id": "ENTRY-DAILY-CONFIRM-20260921",
+  "returns_computed": false,
+  "sample_inventory": {
+    "baseline_account_executed": 195,
+    "baseline_account_rejected": 252,
+    "baseline_ready": 447
+  },
+  "status": "ENGINEERING_BLOCKED"
+}

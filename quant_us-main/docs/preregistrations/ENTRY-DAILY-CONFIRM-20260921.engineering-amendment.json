@@ -1,0 +1,44 @@
+{
+  "amendment_id": "ENTRY-DAILY-CONFIRM-20260921-engineering-01",
+  "original_registration_sha256": "9c9a2a9765aba646760f3fadb9139e72f8efce6520384c827fd71492959b755b",
+  "returns_examined": false,
+  "purpose": "仅记录工程基线迁移和开算前总体澄清；原登记及风险门槛保持不变。",
+  "baseline_migration": {
+    "from": "SD-P0P1-20260921-010",
+    "to": "SD-P0P1-20260921-011",
+    "reason": "到期分红在首个可处理交易日支付，保留原支付日期的事件键；原输入逐文件哈希一致。",
+    "activation": "新基线完成、跨引擎对拍 VERIFIED、窗口内无到期未付分红后才能启用。",
+    "new_manifest_hash": "f949d8fe133f5089631e89b16cdc107e3e3beb884689933911f91d94b9aec809"
+  },
+  "population": {
+    "unit": "security_id × candidate_round",
+    "cutoff": "2026-05-06",
+    "baseline_ready_in_010": 447,
+    "baseline_executed_in_010": 195,
+    "baseline_rejected_by_account_in_010": 252,
+    "old_196_explanation": "按入场日≤2026-06-04计数误纳入SEC-US-LITE-2026-05-29（2026-06-02成交）。登记要求按候选轮次截止，故排除。",
+    "opportunity_population": "全部合格候选，包括原账户因容量或重复持仓拒绝的READY；不能只保留账户成交子集。",
+    "account_reproduction_control": "账户成交的复现作为独立控制，不将原账户股数强加给独立机会级试验。",
+    "set_relation": "仅信号逻辑上B弱于A；ATR缺失等执行阻塞必须单列，两臂实际账户成交集合不保证包含关系。"
+  },
+  "unchanged": [
+    "候选截止日",
+    "等待窗",
+    "止损",
+    "H60",
+    "费用",
+    "风险预算",
+    "原风险门槛",
+    "H3终止结论"
+  ],
+  "status": "BASELINE_VERIFIED",
+  "implementation_details_before_returns": {
+    "bootstrap_seed": 20260921,
+    "bootstrap": "按共同参考日历从研究起点划分连续、不重叠的20-session时间块；整块有放回抽样，保留块内全部证券；2000次；10/40同算法敏感性。",
+    "point_estimate": "配对delta净R均值；MAE为正的风险消耗，使用配对MAE差的中位数。",
+    "opportunity_capital": "每个独立机会相同100000美元空仓起点，按原100bp风险、20%权重上限定整数股；账户成交子集另外对照原账本，不能要求独立机会的股数等于复利账户。",
+    "mae": "止损日只计实际退出价格，跳空按开盘；不计退出后最低价。",
+    "concentration": "单证券贡献/净增量总和，去掉最大贡献仍为正；仅实验侧同口径。前两只合计>=总增量视为集中于两只。",
+    "inconclusive": "均值正但95%下界不正为INCONCLUSIVE，不得进入账户级。"
+  }
+}
