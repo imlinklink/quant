@@ -110,6 +110,84 @@ def run_arm(kind: str, *, study_dir: Path, arm_id: str, fee_bp: int,
             'data': data}
 
 
+SLEEVE_B3 = 4
+SLEEVE_BOTTOM = 1
+
+
+def run_sleeve_arm(study_dir: Path, *, fee_bp: int = 10, limit: int | None = None) -> dict:
+    """**B3 + 抄底 sleeve**：总风险预算不变，只把容量按 sleeve 分配（登记 §fixed_total_risk）。
+
+    两个生成器共用同一个账户；某一路已占满自己的 sleeve 时，该路当日的新意图**不送进引擎**
+    （记 `SLEEVE_FULL`）。风控参数（单笔风险、最大仓位数、定仓公式）两臂逐字相同 ——
+    改的只是「谁先占槽」，不是风险。
+    """
+    study_dir = Path(study_dir)
+    data, prices, market, calendar, quality, actions, _entries = load_study(study_dir)
+    start, end = (str(pd.Timestamp(data['research_window'][k]).date()) for k in ('start', 'end'))
+    sessions = [s for s in calendar if pd.Timestamp(start) <= s <= pd.Timestamp(end)]
+    if limit:
+        sessions = sessions[:limit]
+    base = manifest_from_dict(
+        study_manifest.read(study_dir / data['input_index']['baseline'][0]['path']))
+    arm_id = f'ENTRY-SLEEVE-{fee_bp}bp' if fee_bp != 10 else 'ENTRY-SLEEVE'
+    scope = f'SHADOW:{arm_id}:R'
+    manifest = _arm_manifest(base, experiment_id=arm_id, scope=scope,
+                             start_session=str(sessions[0].date()),
+                             parent_code_hash=data['working_tree_hash'])
+    arm = {'experiment_id': arm_id, 'manifest': manifest}
+    b3 = _provider('b3', arm=arm, data=data, prices=prices, market=market, calendar=calendar,
+                   quality=quality, actions=actions, sessions=sessions)
+    bottom = _provider('bottom', arm=arm, data=data, prices=prices, market=market,
+                       calendar=calendar, quality=quality, actions=actions, sessions=sessions)
+    acts = defaultdict(list)
+    converted, _dropped = shadow_actions(actions, universe=set(prices.security_id),
+                                         session_range=(start, end))
+    for a in converted:
+        acts[a['ex_date']].append(a)
+    state = new_account_state(scope, manifest.initial_cash)
+    schedule, events, navs, rejections = defaultdict(list), [], [], []
+    stream_of: dict = {}          # opportunity_id -> 'b3' | 'bottom'
+    sleeve_full: Counter = Counter()
+    for session in sessions:
+        date = str(session.date())
+        for name, provider in (('b3', b3), ('bottom', bottom)):
+            for o in provider.opportunities_for(session):
+                stream_of[o.opportunity_id()] = name
+                schedule[o.planned_execution_session].append((name, o))
+        due = schedule.pop(date, [])
+        held = Counter(stream_of.get(p.opportunity_id, 'b3')
+                       for p in state.positions.values())
+        caps = {'b3': SLEEVE_B3, 'bottom': SLEEVE_BOTTOM}
+        allowed, dropped = [], Counter()
+        # 先按各自路内的优先序（rank, 证券）排，再按「本路还剩几个槽」截断 ——
+        # 截断发生在**路内**，不是全局，这样两路互不抢占对方的名额。
+        for name, o in sorted(due, key=lambda pair: (pair[1].rank, pair[1].security_id)):
+            if caps[name] - held[name] - dropped[name] > 0:
+                allowed.append(o)
+            else:
+                dropped[name] += 1
+        sleeve_full.update(dropped)
+        result = step_account_session(state, session=session, prices=prices, acts=acts,
+                                     due=allowed, manifest=manifest, fee_bp=fee_bp)
+        state = result.state
+        events.extend(result.events)
+        navs.append(result.nav)
+        rejections.append({'session': date,
+                           'rejections': dict(Counter(e['reason'] for e in result.events
+                                                      if e['type'] == 'missed')),
+                           'sleeve_full': dict(dropped), 'due': len(due)})
+    trades = trades_from_events(events, state, prices, actions, calendar, sessions[-1])
+    for t in trades:
+        # `trade_id` 就是机会 id（两处都用 `stable_id('opportunity', ...)`）
+        t['stream'] = stream_of.get(str(t.get('trade_id') or ''), 'unknown')
+    return {'kind': 'sleeve', 'arm_id': arm_id, 'fee_bp': fee_bp, 'scope': scope,
+            'manifest': manifest, 'state': state, 'navs': navs, 'trades': trades,
+            'events': events, 'rejections': rejections, 'stream_of': stream_of,
+            'sleeve_full': dict(sleeve_full), 'sessions': sessions, 'prices': prices,
+            'actions': actions, 'calendar': calendar, 'data': data,
+            'signals': getattr(bottom, 'signals', None)}
+
+
 def _peak_mdd(navs: list[dict], initial_cash: int) -> tuple[float, float]:
     peak, mdd = initial_cash, 0.0
     for nav in navs:
@@ -316,6 +394,95 @@ def _registration_digest() -> str:
     if not path.exists():
         raise ValueError(f'PREREGISTRATION_MISSING:{path}')
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+SLEEVE_REGISTRATION = (Path(__file__).resolve().parents[2] / 'docs/preregistrations' /
+                       'ENTRY-BOTTOM-SLEEVE-20260922.json')
+
+
+def sleeve_study(study_dir: Path, *, limit: int | None = None) -> dict:
+    """固定总风险预算下的补充价值对照（预登记 `ENTRY-BOTTOM-SLEEVE-20260922`）。"""
+    study_dir = Path(study_dir)
+    if not SLEEVE_REGISTRATION.exists():
+        raise ValueError(f'PREREGISTRATION_MISSING:{SLEEVE_REGISTRATION}')
+    data = json.loads((study_dir / 'study_manifest.json').read_text(encoding='utf-8'))
+    a = run_arm('b3', study_dir=study_dir, arm_id='ENTRY-B3-SLEEVE-BASE', fee_bp=10,
+                limit=limit)
+    b = run_sleeve_arm(study_dir, fee_bp=10, limit=limit)
+    a2 = run_arm('b3', study_dir=study_dir, arm_id='ENTRY-B3-SLEEVE-BASE-2X', fee_bp=20,
+                 limit=limit)
+    b2 = run_sleeve_arm(study_dir, fee_bp=20, limit=limit)
+    cmp_ = compare(a, b)
+    # 风控参数必须逐字相同 —— 本项的核心约束，由代码断言而不是人工核对
+    risk_same = (a['manifest'].risk_policy == b['manifest'].risk_policy
+                 and a['manifest'].execution_policy == b['manifest'].execution_policy
+                 and a['manifest'].initial_cash == b['manifest'].initial_cash)
+    by_stream = {}
+    for t in b['trades']:
+        row = by_stream.setdefault(t['stream'], {'n': 0, 'net_usd': 0.0, 'n_win': 0})
+        row['n'] += 1
+        row['net_usd'] += (t['net_pnl_micro'] or 0) / 1e6
+        row['n_win'] += 1 if (t['net_pnl_micro'] or 0) > 0 else 0
+    result = {
+        'study_id': data['study_id'], 'limit': limit,
+        'a': {k: v for k, v in cmp_['a'].items()},
+        'b': {k: v for k, v in cmp_['b'].items()},
+        'delta_terminal_return': cmp_['delta_terminal_return'],
+        'delta_mdd': cmp_['delta_mdd'], 'delta_worst_trade_r': cmp_['delta_worst_trade_r'],
+        'entries': cmp_['entries'], 'common_pnl': cmp_['common_pnl'],
+        'new_entries_pnl': cmp_['new_entries_pnl'],
+        'dropped_entries_pnl': cmp_['dropped_entries_pnl'],
+        'new_entries_top1_share': cmp_['new_entries_top1_share'],
+        'new_entries_leave_one_out': cmp_['new_entries_leave_one_out'],
+        'new_entries_by_security': cmp_['new_entries_by_security'],
+        'by_stream': by_stream,
+        'sleeve_full': b['sleeve_full'],
+        'sleeve_caps': {'b3': SLEEVE_B3, 'bottom': SLEEVE_BOTTOM},
+        'risk_budget_unchanged': bool(risk_same),
+        # `compare` 不做复现控制（那是 `run_both` 加的），这里自己调一次
+        'control_reproduction_failures': _control_reproduction(a, study_dir, a['sessions']),
+        'stress': {'delta_terminal_return': (b2['navs'][-1]['full_cost_equity']
+                                             / b2['manifest'].initial_cash
+                                             - a2['navs'][-1]['full_cost_equity']
+                                             / a2['manifest'].initial_cash)},
+        'registration_sha256': __import__('hashlib').sha256(
+            SLEEVE_REGISTRATION.read_bytes()).hexdigest(),
+    }
+    result['delta_terminal_return_2x'] = result['stress']['delta_terminal_return']
+    result['verdict'] = sleeve_verdict(result)
+    return result
+
+
+def sleeve_verdict(r: dict) -> dict:
+    checks = {
+        'reproduces_the_baseline': not r['control_reproduction_failures'],
+        'risk_budget_unchanged': bool(r['risk_budget_unchanged']),
+        'enough_new_entries': r['new_entries_pnl']['n'] >= 30,
+        'terminal_return_improved': r['delta_terminal_return'] > 0,
+        'mdd_within_budget': r['delta_mdd'] <= 0.03,
+        'worst_trade_not_worse': (r['delta_worst_trade_r'] or 0) >= 0,
+        'tail_es_not_worse': (r['b']['tail_es_r'] or 0) <= (r['a']['tail_es_r'] or 0),
+        'not_concentrated': ((r['new_entries_top1_share'] or 1.0) <= 0.5
+                             and (r['new_entries_leave_one_out'] or 0) > 0),
+        'held_under_2x_cost': r['delta_terminal_return_2x'] > 0,
+    }
+    risk_improved = checks['mdd_within_budget'] and checks['worst_trade_not_worse'] \
+        and checks['tail_es_not_worse']
+    if not (checks['reproduces_the_baseline'] and checks['risk_budget_unchanged']):
+        token = 'ENGINEERING_BLOCKED'
+    elif not checks['enough_new_entries']:
+        token = 'INSUFFICIENT_SAMPLE'
+    elif not risk_improved:
+        token = 'RISK_REJECTED'
+    elif not checks['not_concentrated']:
+        token = 'CONCENTRATED'
+    elif checks['terminal_return_improved'] and checks['held_under_2x_cost']:
+        token = 'EVIDENCE_SUPPORTED'
+    elif checks['terminal_return_improved']:
+        token = 'RISK_REJECTED'
+    else:
+        token = 'RISK_TRADEOFF'
+    return {'token': token, 'checks': checks}
 
 
 def slim(result: dict) -> dict:
