@@ -1,0 +1,163 @@
+{
+  "schema_version": "diagnostic-preregistration-v1",
+  "registration_id": "ENTRY-DAILY-CONFIRM-20260921",
+  "registered_at": "2026-09-21",
+  "hypothesis_family": "H1（某道入场过滤净贡献为负）",
+  "study_basis": "SD-P0P1-20260921-010",
+  "study_manifest_hash": "9b74a132fac70e70d4de4ed1103e69f7a688b49f2d4df864842881e9b6efedde",
+  "design_refs": ["§3 H1", "§5.2", "§5.4", "§8.2", "§8.3(B)", "§8.4", "§9.1", "§9.2", "§9.3", "§15 P2"],
+
+  "prior_exposure": {
+    "blind": false,
+    "what_was_seen": [
+      "010 的漏斗条件通过率（ranking 44.51% / daily 22.54% / weekly 63.70% / market 80.80%）与候选终态分布",
+      "010 的退出分类汇总与账户级指标（收益 266.15%、MDD −13.87%）",
+      "H3 已完成：CONCENTRATED，保留原止损（不动本判定）",
+      "决策日/信号日与入场价的可获得性（账本 + 冻结价格）"
+    ],
+    "not_yet_computed": [
+      "确认溢价（入场价 vs 决策日/周线门首次满足日收盘）从未算过",
+      "两臂的 MAE / 左尾 / 配对净 R 从未算过",
+      "仅实验侧成交那一批的规模与后果从未算过"
+    ],
+    "why_disclosed": "假设由用户指定，但立项依据里包含我已看过的汇总。登记固定的不是『盲』，而是『改什么、怎么判、门槛多少』。"
+  },
+
+  "hypothesis": {
+    "id": "H1-DAILY-CONFIRMATION",
+    "statement": "保留周线门、移除日线确认，能否改善**扣费后**的入场收益，同时**不显著恶化**不利波动与左尾损失。",
+    "mechanism_indicator_only": "「确认溢价」（入场价相对决策日/周线门首次满足日收盘的溢价）**只作机制指标**。买得更便宜本身不算成功；成功只能由扣费后收益与风险门槛共同判定。",
+    "competing_explanation": "日线确认可能在买贵的同时**避开了坏路径**（更小的 MAE、更少的止损、更薄的左尾）。若两臂的收益差为正但风险门槛任一不过，结论是『用风险换收益』，不是改进。",
+    "not_claimed": ["不改 H60", "不加入追踪止损", "不改五仓上限", "不改市场门/周线门/质量门/等待窗"]
+  },
+
+  "arms": {
+    "baseline_A": "现行 B3：等待窗内同时在**周线门成立**且**日线突破/回踩触发**的 session 记为信号日，次日开盘入场。",
+    "experimental_B": "保留周线门、**移除日线确认**：等待窗内**首个**周线门成立的 session 记为信号日，次日开盘入场。",
+    "single_difference": "只有『是否要求日线确认』这一处。月度候选、排名、质量门、市场门、等待窗长度、H60、费用、单笔风险预算与止损规则全部逐字保留。",
+    "no_same_close_execution": "两臂一律在**信号日的下一交易日开盘**成交，**不得用信号日收盘成交**（§4.2 时序）。",
+    "entry_set_relation": "B 的信号条件严格弱于 A ⇒ **B 的成交集合 ⊇ A 的成交集合**。A = 配对集；B \\ A = 仅实验侧成交。"
+  },
+
+  "execution": {
+    "stop_rule": "沿用原规则 max(8% × 入场价, 2.5 × ATR14)，**各臂用自己信号日可得 ATR**（含 scale_to_next）。",
+    "sizing": "两臂都按**原单笔风险预算**（single_position_risk_bp = 100）定仓：股数 = 风险预算 / 各自止损距离 ⇒ 止损距离不同则股数不同，但**风险相同**。",
+    "exit": "H60（自各自入场日起 60 个 session 收盘退出；数据不足则右删失）。",
+    "costs": "单边 10bp（往返 0.2%）；压力情景单边 20bp。",
+    "other": "公司行动按冻结输入同一口径；无追踪止损；无提前退出。"
+  },
+
+  "result_classes": {
+    "paired": "两臂都成交的候选（= A 的成交集合）⇒ **配对比较**，逐笔对照。",
+    "experimental_only": "仅实验侧成交（周线门曾成立但窗口内从未触发日线信号）⇒ **单列**，不得并入配对。",
+    "policy_level": "两臂各自的**全部**成交聚合为政策层面的净 R 总量（含仅实验侧），并披露两臂成交笔数差异。**不得**只保留最终获得日线确认的赢家；也**不得**把政策层面数字当作账户结果（无容量与路径依赖建模）。"
+  },
+
+  "maturity": {
+    "common_candidate_cutoff": "2026-05-06",
+    "latest_allowed_entry": "2026-06-04",
+    "rule": "只纳入决策日 ≤ 共同候选截止日的候选 ⇒ 两侧**最晚允许入场**之后都还有完整 60 个 session 的观察期。",
+    "derivation": "观察末日取 min(研究窗口末 2026-08-31, 冻结价格末) ⇒ 截止日 = 观察末日往前 (等待窗 20 + 持有 60) = 80 个交易日。",
+    "not_outcome_based": "截止规则**只看日历**，与是否提前止损、结果好坏无关 —— 不得按结果选样本。",
+    "effect_on_sample": "140 个轮次保留 136 个；基线 201 笔成交保留 **196** 笔，截掉 5 笔（2026-07-10 起）。"
+  },
+
+  "primary_metric": {
+    "name": "paired_delta_net_r",
+    "definition": "配对候选上 Δnet_R = net_R(实验) − net_R(基线)，其中 net_R = 扣费后损益 / **冻结的初始风险金额**（两臂同一分母口径：各自的止损距离/入场价）。",
+    "why_r_not_percent": "两臂止损距离不同 ⇒ 股数不同。用净收益率比较会把『风险暴露不同』混进结论；净 R 以各自承担的风险归一。净收益率(%)作为必报辅助。",
+    "interval": "配对时间块重采样，20 session 块、2000 次、固定随机种子；10/40 session 作敏感性（块长不按最好显著性选择）。",
+    "support_condition": "Δnet_R 的点估计 > 0 **且** 95% 区间下界 > 0。"
+  },
+
+  "required_secondary": [
+    "两臂的 MAE_R（止损截断后的风险消耗）与 MAE%（描述）分布",
+    "止损出场率（STOP + GAP_STOP 占比）、跳空止损笔数",
+    "左尾：net_R < −1R / < −2R 的笔数与占比；最差 5 笔之和",
+    "持有期（按参考交易日历）、退出原因分布",
+    "**确认溢价**（机制指标）：入场价 / 决策日收盘 − 1、入场价 / 周线门首次满足日收盘 − 1，以 % 与 R 表示",
+    "两臂的入场日分布（相隔多少 session）",
+    "仅实验侧成交那一批：笔数、净 R 分布、是否够 30 组",
+    "1× 与 2× 费用下的全部主/辅指标"
+  ],
+
+  "risk_gates": {
+    "note": "以下**绝对门槛是判断值**，不是从数据里推出来的；写在这里就是为了不被事后调整。",
+    "sample_size": {
+      "paired_min_groups": 30,
+      "experimental_only_min_groups": 30,
+      "min_trading_days": 60,
+      "if_short": "不足即该类只作描述并标 INSUFFICIENT_SAMPLE；**不为凑样本放宽截止日或口径**。"
+    },
+    "left_tail": {
+      "stop_out_rate": "实验臂的止损出场率不得超过基线 **+10 个百分点**（绝对）",
+      "below_minus_2r": "实验臂 net_R < −2R 的占比不得超过基线 **+3 个百分点**（绝对）",
+      "worst5": "实验臂最差 5 笔 net_R 之和不得劣于基线最差 5 笔之和"
+    },
+    "adverse_excursion": {
+      "metric": "配对 MAE_R 的中位数差（实验 − 基线）",
+      "bound": "95% 区间上界 ≤ **+0.10R**"
+    },
+    "concentration": {
+      "single_security": "配对增量的单一证券贡献 ≤ 50%",
+      "leave_one_out": "剔除最大贡献证券后仍为正",
+      "experimental_only": "仅实验侧那一批的净 R 不得由单一证券主导（≤50%）"
+    },
+    "cost_stress": "2× 费用（单边 20bp）下 Δnet_R 仍为正",
+    "direction_both_ways": "必须同时报『基线错过、实验侧赚』与『基线避开、实验侧亏』两类的笔数与金额（§5.4）"
+  },
+
+  "verdict_rules": {
+    "opportunity_level": {
+      "SUPPORTED": "主指标通过（点估计 > 0 且 95% 下界 > 0）**且**全部风险门槛通过 ⇒ 进入账户级",
+      "NO_IMPROVEMENT": "Δnet_R 点估计 ≤ 0，或 |Δ| 无实质差异",
+      "RISK_REJECTED": "收益改善但左尾/不利波动任一门槛不过（＝用风险换收益）",
+      "CONCENTRATED": "增量集中在 ≤2 只证券，或单一证券 > 50%，或剔除最大贡献后转负",
+      "INSUFFICIENT_SAMPLE": "配对 < 30 组或 < 60 交易日",
+      "ENGINEERING_BLOCKED": "控制项不过（见下）"
+    },
+    "controls_fail_closed": [
+      "A 臂必须**复现** 010 的成交（入场日、入场价、股数、止损）——不一致即实现有误，先修再算",
+      "两臂都不得用信号日收盘成交",
+      "配对样本的成熟度必须一致：任一臂被数据末端截断的候选不得进入配对，只能进『右删失』单列"
+    ],
+    "account_level": {
+      "precondition": "机会级 SUPPORTED 才做",
+      "engine": "paper_engine.step（真实现金、T+1、公司行动、五仓、回撤阶梯、单笔风险预算），与 010 同起点",
+      "primary": "共同起止日的**全成本终值收益差**（§9.1）",
+      "gates": ["abs(MDD差) ≤ 0.03", "2× 费用下仍为正", "最差单笔 net_R 不劣于基线"],
+      "must_answer": "实验侧更早入场是否**挤掉后续机会**：MAX_POSITIONS / DUPLICATE_ACTIVE_SECURITY 拒绝数变化与被挤掉的机会清单",
+      "engineering": ["账户不变量", "NAV 会计恒等式", "重放一致", "跨引擎基线对账 baseline_parity"]
+    }
+  },
+
+  "early_stop_conditions": [
+    "A 臂不能复现 010 的成交 ⇒ 停在实现修复",
+    "配对样本 < 30 组或 < 60 交易日 ⇒ INSUFFICIENT_SAMPLE，不出收益结论",
+    "发现数据/时序/会计阻塞 ⇒ ENGINEERING_BLOCKED（§15 P0）",
+    "跨引擎基线对账不再 VERIFIED ⇒ 先修"
+  ],
+
+  "forbidden": [
+    "看到结果后调整任何门槛、截止日、块长或口径",
+    "在同一窗口上反复重试直到出现赢家",
+    "只报配对而不报仅实验侧；或只保留赢家",
+    "用确认溢价（买得更便宜）本身作为成功判据",
+    "把机会级收益差当组合增量",
+    "把政策层面净 R 总量当账户结果",
+    "在同一次诊断里加入第二个改动（追踪止损、H60、仓位数）",
+    "据此扩大 max_positions"
+  ],
+
+  "validation": {
+    "exploratory_window": {"start": "2015-01-02", "end": "2026-08-31"},
+    "exploratory_status": "**已被策略研究与本次诊断查看 ⇒ 只能用于定位问题，不得作为验证**（§8.4）",
+    "validation_kind": "prospective",
+    "validation_window": {"start": "注册日之后的第一个交易日", "end": "首次评估点"},
+    "first_assessment_at": "≥ 30 个独立成熟组 且 ≥ 60 个交易日，两者都满足才作判定（§9.3）",
+    "independence_unit": "证券 × 候选轮次；多期限不重复计数",
+    "selection_bias_note": "本次尝试计入试验登记且不删除；失败方案保留（§9.2）"
+  },
+
+  "result_tokens": ["DATA_INVALID", "ENGINEERING_BLOCKED", "INSUFFICIENT_SAMPLE", "NO_IMPROVEMENT", "RISK_REJECTED", "CONCENTRATED", "INCONCLUSIVE", "EVIDENCE_SUPPORTED"]
+}
