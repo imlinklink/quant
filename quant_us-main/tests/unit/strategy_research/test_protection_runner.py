@@ -6,6 +6,7 @@
 """
 import unittest
 
+from scripts.strategy_research import entry_arms as E
 from scripts.strategy_research import runner as R
 
 
@@ -98,6 +99,61 @@ class VerdictTests(unittest.TestCase):
         self.assertEqual(v['thresholds']['non_inferiority_r'], gates['non_inferiority_bound_R'])
         self.assertEqual(v['thresholds']['min_activated_trades'], gates['min_activated_trades'])
         self.assertAlmostEqual(v['thresholds']['risk_improvement_gate'], 0.15)
+
+
+def _cmp(**over):
+    """一个"全部通过"的对照结果，按需覆盖某一项。"""
+    a = {'total_return': 2.0, 'n_trades': 200, 'mdd': -0.14, 'worst_trade_r': -1.9,
+         'tail_es_r': 1.40}
+    b = {'total_return': 2.2, 'n_trades': 260, 'mdd': -0.13, 'worst_trade_r': -1.7,
+         'tail_es_r': 1.25}
+    base = {
+        'a': a, 'b': b,
+        'delta_terminal_return': b['total_return'] - a['total_return'],
+        'delta_cagr': 0.01, 'delta_mdd': 0.01, 'delta_worst_trade_r': 0.2,
+        'delta_terminal_return_2x': 0.15,
+        'entries': {'common': 10, 'only_a': 190, 'only_b': 250},
+        'new_entries_top1_share': 0.2, 'new_entries_leave_one_out': 5000.0,
+        'control_reproduction_failures': [],
+    }
+    base.update(over)
+    return base
+
+
+class EntryVerdictTests(unittest.TestCase):
+    """买入侧判定映射：门槛写错会让结论反向，所以逐分支钉死。"""
+
+    def test_supported(self):
+        self.assertEqual(E.verdict(_cmp())['token'], 'EVIDENCE_SUPPORTED')
+
+    def test_tradeoff_when_risk_improves_but_return_does_not(self):
+        c = _cmp(delta_terminal_return=-0.1, delta_terminal_return_2x=-0.1)
+        v = E.verdict(c)
+        self.assertEqual(v['token'], 'RISK_TRADEOFF')
+        self.assertIn('防守选项', v['note'])
+
+    def test_rejected_when_return_improves_only_before_costs(self):
+        """收益改善但 2× 成本下不成立 ⇒ 不算支持（成本情景是硬门槛）。"""
+        v = E.verdict(_cmp(delta_terminal_return_2x=-0.02))
+        self.assertEqual(v['token'], 'RISK_REJECTED')
+
+    def test_risk_rejected_when_the_tail_or_mdd_gets_worse(self):
+        for over in ({'delta_mdd': 0.05}, {'delta_worst_trade_r': -0.1}):
+            self.assertEqual(E.verdict(_cmp(**over))['token'], 'RISK_REJECTED')
+
+    def test_concentrated_wins_over_a_good_headline(self):
+        v = E.verdict(_cmp(new_entries_top1_share=0.7, new_entries_leave_one_out=-10.0))
+        self.assertEqual(v['token'], 'CONCENTRATED')
+
+    def test_insufficient_sample_and_engineering_blocked(self):
+        self.assertEqual(E.verdict(_cmp(a={**_cmp()['a'], 'n_trades': 5}))['token'],
+                         'INSUFFICIENT_SAMPLE')
+        self.assertEqual(E.verdict(_cmp(control_reproduction_failures=[{'x': 1}]))['token'],
+                         'ENGINEERING_BLOCKED')
+
+    def test_gates_match_the_registration_text(self):
+        reg = E._registration_digest()
+        self.assertEqual(len(reg), 64)
 
 
 if __name__ == '__main__':
