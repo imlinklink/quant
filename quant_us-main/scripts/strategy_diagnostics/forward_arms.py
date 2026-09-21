@@ -138,7 +138,7 @@ def registration() -> dict:
     return reg
 
 
-def start(root: Path, *, start_session: str) -> dict:
+def start(root: Path, *, start_session: str, etf_raw: Path = None) -> dict:
     """三臂同日空仓起步。**任一臂账本已存在即拒绝**（不允许中途改起点）。"""
     root = Path(root).resolve()
     registration()
@@ -158,23 +158,31 @@ def start(root: Path, *, start_session: str) -> dict:
     created['registration_sha256'] = file_hash(FORWARD_REGISTRATION)
     created['baseline_manifest_sha256'] = file_hash(BASELINE_MANIFEST)
     created['frozen_code'] = frozen_code()
+    # **路径**（不是哈希）：live 快照是增长型数据，记哈希第二天就会被自己拒
+    created['etf_raw'] = str(Path(etf_raw or ETF_RAW).resolve())
     write_json(root / 'arms.json', _plain(created))
     return created
 
 
-def _load_inputs(names):
-    """三臂输入：**同一份** quality/actions/market/宇宙掩码，只有价格面板按臂取子集。"""
+def _load_inputs(names, etf_raw: Path = None):
+    """三臂输入：**同一份** quality/actions/market/宇宙掩码，只有价格面板按臂取子集。
+
+    `etf_raw` **必须指向 live 快照**（`refresh_data.refresh_live_etf` 的产物）：交易日历与
+    市场门都从它来，指到冻结产物上日历就会永远停在那个日期 —— 观察期内的每一天都会
+    被判成"没有新 session"。默认值只是为了让模块能单独跑起来。
+    """
     from scripts.medium_term.p2_selection_check import (load_panels, market_frame,
                                                         trading_calendar)
     quality = pd.read_csv(QUALITY)
     actions = pd.read_csv(ACTIONS)
     actions['security_id'] = actions.security_id.astype(str)
-    calendar = trading_calendar(ETF_RAW)
+    etf_raw = Path(etf_raw or ETF_RAW)
+    calendar = trading_calendar(etf_raw)
     mask = members_mask(names['B'], str(pd.Timestamp(calendar[0]).date()),
                         str(pd.Timestamp(calendar[-1]).date()))
     prices_by_arm = {arm: load_panels(tech=tuple(n), panels=PANELS)[0]
                      for arm, n in names.items()}
-    return prices_by_arm, market_frame(ETF_RAW), quality, actions, calendar, mask
+    return prices_by_arm, market_frame(etf_raw), quality, actions, calendar, mask
 
 
 class Arm:
@@ -243,7 +251,23 @@ class Arm:
                 'equity': None if idempotent_noop else result.nav['equity']}
 
 
-def run_day(root: Path, session) -> dict:
+def latest_available_session(names, etf_raw=None) -> str:
+    """三臂**都**有数据的最后一个交易日。
+
+    取 B 臂（32 只里最大的那份）面板的最后一个 session 与交易日历的交集 —— A 的 13 只是
+    B 的子集，所以它一并覆盖。**不做任何"猜"**：没有交集就报错，由作业脚本决定停一天。
+    """
+    prices_by_arm, _market, _q, _a, calendar, _m = _load_inputs(names, etf_raw)
+    from scripts.medium_term.p2_selection_check import load_panels
+    covered = min(pd.Timestamp(load_panels(tech=tuple(n), panels=PANELS)[0].session.max())
+                  for n in names.values())
+    options = [pd.Timestamp(s).normalize() for s in calendar if pd.Timestamp(s) <= covered]
+    if not options:
+        raise ValueError('NO_COMMON_SESSION:三臂面板与交易日历没有交集')
+    return str(max(options).date())
+
+
+def run_day(root: Path, session, etf_raw: Path = None) -> dict:
     """三臂一起推进到 `session`：**各自从 `start_session` 重放全程**，只有目标日是新的。
 
     重放是确定性的、账本是幂等落点，所以多次调用同一目标日、或崩溃后重入都安全。
@@ -256,7 +280,8 @@ def run_day(root: Path, session) -> dict:
     if target < start:
         raise ValueError(f'TARGET_BEFORE_START:{target.date()}<{start.date()}')
     names = arm_names()
-    prices_by_arm, market, quality, actions, calendar, mask = _load_inputs(names)
+    prices_by_arm, market, quality, actions, calendar, mask = _load_inputs(
+        names, etf_raw or meta.get('etf_raw'))
     range_ = [pd.Timestamp(s) for s in calendar
               if start <= pd.Timestamp(s) <= target]
     if not range_:
@@ -280,12 +305,19 @@ def main(argv=None) -> int:
     s = sub.add_parser('start', help='三臂同日空仓起步（只跑一次）')
     s.add_argument('--root', required=True)
     s.add_argument('--start-session', required=True)
+    s.add_argument('--etf-raw', help='live ETF 快照（交易日历与市场门的来源）')
     d = sub.add_parser('run-day', help='三臂各推进一个交易日')
     d.add_argument('--root', required=True)
-    d.add_argument('--session', required=True)
+    d.add_argument('--session', required=True,
+                   help='交易日；传 auto 表示取三臂都覆盖的最后一个交易日')
+    d.add_argument('--etf-raw', help='默认取 arms.json 里记的那份')
     args = parser.parse_args(argv)
-    out = (start(Path(args.root), start_session=args.start_session) if args.command == 'start'
-           else run_day(Path(args.root), args.session))
+    if args.command == 'start':
+        out = start(Path(args.root), start_session=args.start_session, etf_raw=args.etf_raw)
+    else:
+        session = (latest_available_session(arm_names(), args.etf_raw)
+                   if args.session == 'auto' else args.session)
+        out = run_day(Path(args.root), session, etf_raw=args.etf_raw)
     print(json.dumps(_plain(out), ensure_ascii=False, indent=2))
     return 0
 

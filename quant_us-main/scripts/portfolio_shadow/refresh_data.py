@@ -36,6 +36,9 @@ CHECKPOINT = ROOT / 'data/market_history/checkpoints/download_state.json'
 ETF_ROOT = ROOT / 'data/medium_term/US-MT-MOM-BASELINE-001'
 ETF_UNIVERSE = ETF_ROOT / 'universe_etf.csv'
 HISTORY_TOL = 1e-9
+# **共享刷新锁**：影子日作业与三臂前向作业都会调这里，而 `to_csv` 不是原子的
+# ⇒ 并发追加同一批面板有写坏的风险。锁放在**数据侧**（不是各自的运行锁），两边共用。
+REFRESH_LOCK = ROOT / 'data/market_history/.refresh.lock'
 
 
 def master_codes(names) -> set[str]:
@@ -197,6 +200,45 @@ def refresh_live_etf(live_dir: Path) -> dict:
 
 def refresh(*, live_dir: Path, through: str | None = None, names=None,
             master_out: Path | None = None) -> dict:
+    """刷新行情。**拿不到共享锁就跳过**（另一个作业正在刷同一批面板）。"""
+    REFRESH_LOCK.parent.mkdir(parents=True, exist_ok=True)
+    if not _acquire(REFRESH_LOCK):
+        return {'skipped': 'REFRESH_IN_PROGRESS', 'lock': str(REFRESH_LOCK)}
+    try:
+        return _refresh(live_dir=live_dir, through=through, names=names,
+                        master_out=master_out)
+    finally:
+        _release(REFRESH_LOCK)
+
+
+def _acquire(lock: Path) -> bool:
+    import os
+    try:
+        lock.mkdir()
+    except FileExistsError:
+        try:
+            holder = int((lock / 'pid').read_text().strip())
+            os.kill(holder, 0)
+            return False                      # 持有者还活着
+        except (OSError, ValueError):
+            pass                              # 过期锁：持有者已不在
+        import shutil
+        shutil.rmtree(lock, ignore_errors=True)
+        try:
+            lock.mkdir()
+        except FileExistsError:
+            return False
+    (lock / 'pid').write_text(str(os.getpid()))
+    return True
+
+
+def _release(lock: Path) -> None:
+    import shutil
+    shutil.rmtree(lock, ignore_errors=True)
+
+
+def _refresh(*, live_dir: Path, through: str | None = None, names=None,
+             master_out: Path | None = None) -> dict:
     end = through or pd.Timestamp.today().strftime('%Y-%m-%d')
     start = (pd.Timestamp(end) - pd.Timedelta(days=14)).strftime('%Y-%m-%d')
     tech_master = ROOT / 'data/security_master_39.csv'
