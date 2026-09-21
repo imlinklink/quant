@@ -75,6 +75,38 @@ if [ ! -f "$BASE/arms.json" ]; then
   echo "$STAMP 自动发现观察根 ${BASE}"
 fi
 
+# ---- 刷新公司行动（**只追加**；改了历史就停）----
+# **必须先于行情**：观察期内新出现的拆股不被应用会让价格"假摔"（3:1 表现为 −67%），
+# 直接触发**假止损** —— 那不是偏差，是会污染结论的雷。
+ACTIONS="$("$PY" -c "import json,sys; print(json.load(open('$BASE/arms.json')).get('actions',''))")"
+if [ -z "$ACTIONS" ]; then
+  echo "$STAMP FAIL arms.json 里没有 actions 路径 —— 观察根是旧版本起的？"
+  watch "FAIL arms.json 缺 actions 路径"
+  exit 1
+fi
+CODES="$("$PY" -c "
+import sys; sys.path.insert(0, '.')
+from scripts.portfolio_shadow.refresh_data import master_codes
+from scripts.strategy_diagnostics.forward_arms import arm_names
+print(' '.join(sorted(master_codes(arm_names()['B']))))")"
+TMP_ACTIONS="$(mktemp -d)"
+echo "$STAMP refresh-actions codes=$(printf '%s' "$CODES" | wc -w) 只追加"
+"$PY" -m scripts.data.import_corporate_actions_from_futu --codes $CODES \
+  --output-dir "$TMP_ACTIONS" --archive-root "$BASE/actions_archive" >/dev/null || {
+  echo "$STAMP FAIL 行动导入失败，本次不推进"
+  watch "FAIL 行动导入失败"
+  rm -rf "$TMP_ACTIONS"; exit 1
+}
+# 同键异内容 ⇒ `ACTION_REVISED`，非 0 退出。**必须停**：行动被修订属于输入变更，
+# 要人来决定（与 frozen_code 守卫同一立场 —— 改了尺子就不是同一件事了）。
+"$PY" -m scripts.data.merge_corporate_actions --base "$ACTIONS" \
+  --new "$TMP_ACTIONS/corporate_actions.csv" --out "$ACTIONS" || {
+  echo "$STAMP FAIL 行动表合并被拒（修订或冲突）—— 本次不推进，见上方 ACTION_REVISED"
+  watch "FAIL 行动表合并被拒"
+  rm -rf "$TMP_ACTIONS"; exit 1
+}
+rm -rf "$TMP_ACTIONS"
+
 # ---- 刷新行情（只追加，不改历史）----
 # **必须先刷**：`run-day --session auto` 取的是"面板覆盖到的最后一个交易日"，不刷就只会
 # 反复准备同一个陈旧 session（与 shadow_daily 同一形态）。

@@ -46,8 +46,8 @@ from scripts.portfolio_shadow.store import ShadowStore
 
 from .experiments import shadow_actions, step_account_session
 from .manifest import file_hash, read, write_json
-from .universe_attribution import (ACTIONS, ETF_RAW, PANELS, QUALITY, _plain,
-                                   members_mask, verified_names)
+from .universe_attribution import (ACTIONS as FROZEN_ACTIONS, ETF_RAW, PANELS, QUALITY,
+                                   _plain, members_mask, verified_names)
 
 ROOT = Path(__file__).resolve().parents[2]
 FORWARD_REGISTRATION = ROOT / 'docs/preregistrations/B3-FORWARD-20260921.json'
@@ -61,6 +61,10 @@ ARMS = ('A', 'B', 'C')
 ARM_IDS = {arm: f'B3FWD-{arm}-20260921' for arm in ARMS}
 # 观察起点由 `start` 写死；此后 `run-day` 只能向前推进
 LEDGER_NAME = 'ledger.sqlite3'
+# 行动表**必须是活的**：冻结 run 停在 2026-09-20，观察期内新出现的拆股不被应用会让价格
+# "假摔"（3:1 表现为 −67%）⇒ 触发**假止损**。`start` 时从冻结基表**播种**，此后由
+# `merge_corporate_actions` 只追加地并入新行动（改历史即报错）。
+LIVE_ACTIONS = ROOT / 'data/corporate_actions_runs/live/actions.csv'
 # **冻结集**：只收"决定三臂决策与会计的东西"。不收数据面板 —— 它们是**增长型**的
 # （每天追加新 session），冻进来第二天就会被自己的校验拒（这与 M1 manifest 里
 # "`data_hashes` 不能装增长型数据"是同一条教训）。数据的历史段由刷新的
@@ -138,7 +142,8 @@ def registration() -> dict:
     return reg
 
 
-def start(root: Path, *, start_session: str, etf_raw: Path = None) -> dict:
+def start(root: Path, *, start_session: str, etf_raw: Path = None,
+          actions_path: Path = None) -> dict:
     """三臂同日空仓起步。**任一臂账本已存在即拒绝**（不允许中途改起点）。"""
     root = Path(root).resolve()
     registration()
@@ -158,13 +163,21 @@ def start(root: Path, *, start_session: str, etf_raw: Path = None) -> dict:
     created['registration_sha256'] = file_hash(FORWARD_REGISTRATION)
     created['baseline_manifest_sha256'] = file_hash(BASELINE_MANIFEST)
     created['frozen_code'] = frozen_code()
+    live_actions = Path(actions_path or LIVE_ACTIONS)
+    if not live_actions.exists():
+        # 从冻结基表**播种**。此后只追加（历史段原样保留，改即报错）—— 与行情刷新的
+        # `history_unchanged` 是同一条纪律。
+        live_actions.parent.mkdir(parents=True, exist_ok=True)
+        pd.read_csv(FROZEN_ACTIONS).to_csv(live_actions, index=False)
+    created['actions'] = str(live_actions.resolve())
+    created['actions_seed_sha256'] = file_hash(FROZEN_ACTIONS)
     # **路径**（不是哈希）：live 快照是增长型数据，记哈希第二天就会被自己拒
     created['etf_raw'] = str(Path(etf_raw or ETF_RAW).resolve())
     write_json(root / 'arms.json', _plain(created))
     return created
 
 
-def _load_inputs(names, etf_raw: Path = None):
+def _load_inputs(names, etf_raw: Path = None, actions_path: Path = None):
     """三臂输入：**同一份** quality/actions/market/宇宙掩码，只有价格面板按臂取子集。
 
     `etf_raw` **必须指向 live 快照**（`refresh_data.refresh_live_etf` 的产物）：交易日历与
@@ -174,7 +187,7 @@ def _load_inputs(names, etf_raw: Path = None):
     from scripts.medium_term.p2_selection_check import (load_panels, market_frame,
                                                         trading_calendar)
     quality = pd.read_csv(QUALITY)
-    actions = pd.read_csv(ACTIONS)
+    actions = pd.read_csv(actions_path or LIVE_ACTIONS)
     actions['security_id'] = actions.security_id.astype(str)
     etf_raw = Path(etf_raw or ETF_RAW)
     calendar = trading_calendar(etf_raw)
@@ -281,7 +294,7 @@ def run_day(root: Path, session, etf_raw: Path = None) -> dict:
         raise ValueError(f'TARGET_BEFORE_START:{target.date()}<{start.date()}')
     names = arm_names()
     prices_by_arm, market, quality, actions, calendar, mask = _load_inputs(
-        names, etf_raw or meta.get('etf_raw'))
+        names, etf_raw or meta.get('etf_raw'), meta.get('actions'))
     range_ = [pd.Timestamp(s) for s in calendar
               if start <= pd.Timestamp(s) <= target]
     if not range_:
@@ -306,6 +319,7 @@ def main(argv=None) -> int:
     s.add_argument('--root', required=True)
     s.add_argument('--start-session', required=True)
     s.add_argument('--etf-raw', help='live ETF 快照（交易日历与市场门的来源）')
+    s.add_argument('--actions', help='活的行动表（默认从冻结基表播种到 data/corporate_actions_runs/live/）')
     d = sub.add_parser('run-day', help='三臂各推进一个交易日')
     d.add_argument('--root', required=True)
     d.add_argument('--session', required=True,
@@ -313,7 +327,8 @@ def main(argv=None) -> int:
     d.add_argument('--etf-raw', help='默认取 arms.json 里记的那份')
     args = parser.parse_args(argv)
     if args.command == 'start':
-        out = start(Path(args.root), start_session=args.start_session, etf_raw=args.etf_raw)
+        out = start(Path(args.root), start_session=args.start_session, etf_raw=args.etf_raw,
+                    actions_path=args.actions)
     else:
         session = (latest_available_session(arm_names(), args.etf_raw)
                    if args.session == 'auto' else args.session)
