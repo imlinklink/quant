@@ -66,7 +66,7 @@ def step(state: AccountState, *, session: str, bars: dict, corporate_actions: li
     if state.last_session == session:
         # 幂等：该 session 已处理，不推进 sequence/持有天数/结算
         return StepResult(state=state, events=[], nav=None)
-    s = replace(state)
+    s = replace(state, dividend_receivable=dict(state.dividend_receivable))
     s.sequence = state.sequence + 1
     s.last_session = session
     events: list = []
@@ -101,11 +101,17 @@ def step(state: AccountState, *, session: str, bars: dict, corporate_actions: li
         events.append({'type': 'settle', 'session': session, 'amount_micro': s.unsettled_cash})
         s.cash_available += s.unsettled_cash
         s.unsettled_cash = 0
-    payable = s.dividend_receivable.pop(session, 0)
-    if payable:
-        s.cash_available += payable
-        events.append({'type': 'dividend_pay', 'session': session, 'pay_date': session,
-                       'total_micro': payable})
+    def settle_dividends():
+        # Unknown dates remain receivable; known due dates settle on the first
+        # processed session. Preserve the original key for deterministic replay.
+        for pay_date in sorted(k for k in s.dividend_receivable if k and k <= session):
+            payable = s.dividend_receivable.pop(pay_date)
+            if payable:
+                s.cash_available += payable
+                events.append({'type': 'dividend_pay', 'session': session,
+                               'pay_date': pay_date, 'total_micro': payable})
+
+    settle_dividends()
 
     # 1. 公司行动：拆股调整数量/成本/止损；除息日对前一日持仓记应收
     for act in corporate_actions:
@@ -140,6 +146,9 @@ def step(state: AccountState, *, session: str, bars: dict, corporate_actions: li
             events.append({'type': 'dividend_record', 'session': session, 'security_id': sid,
                            'per_share_micro': per_share, 'total_micro': total,
                            'pay_date': pay_date})
+
+    # Include entitlements recorded today whose payment is already due.
+    settle_dividends()
 
     # 2. 开盘风险退出（跳空止损：open <= stop）
     for sid, pos in list(s.positions.items()):

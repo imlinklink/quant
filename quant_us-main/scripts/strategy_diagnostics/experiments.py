@@ -134,8 +134,8 @@ def _uncovered(navs, trades, state, sessions, manifest):
         'dividend_receivable_outstanding': {
             'stuck_within_window': stuck, 'censored_after_window': censored,
             'amount_micro': sum(outstanding.values()),
-            'note': '两个引擎都按**精确日期**匹配支付日，故支付日落在非交易日的分红'
-                    '永远转不成可用现金（钱仍在 NAV 里，只是不能再拿去建仓）。',
+            'note': '已知支付日在首个可处理交易日结算；窗口内到期而未结算必须视为会计阻塞。'
+                    '未知支付日与窗口后的支付日不提前转为可用现金。',
         },
         'config_divergences': [
             '行动覆盖门：本 study 未启用（`blocked={}`），历史研究基线启用了 audited blocked。',

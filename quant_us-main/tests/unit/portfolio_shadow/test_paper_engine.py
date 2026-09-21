@@ -584,3 +584,34 @@ class PositionActionTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class DueDividendTests(unittest.TestCase):
+    def test_weekend_payment_preserves_key_replays_and_is_not_paid_twice(self):
+        m = make_manifest()
+        initial = new_account_state('SHADOW:x:R', to_micro(100000))
+        a = step(initial, session='2026-01-05', bars=bars1(100,100),
+                 corporate_actions=[], intents=[opp('SEC-A','2026-01-05')], manifest=m)
+        action = {'security_id':'SEC-A','action_type':'cash_dividend','ex_date':'2026-01-06',
+                  'pay_date':'2026-01-10','cash_amount_micro':to_micro(1)}
+        b = step(a.state,session='2026-01-06',bars=bars1(99,99),corporate_actions=[action],intents=[],manifest=m)
+        c = step(b.state,session='2026-01-12',bars=bars1(99,99),corporate_actions=[],intents=[],manifest=m)
+        payments = [e for e in c.events if e['type']=='dividend_pay']
+        self.assertEqual(len(payments),1)
+        self.assertEqual(payments[0]['pay_date'],'2026-01-10')
+        self.assertEqual(b.state.dividend_receivable, {'2026-01-10': to_micro(125)})
+        self.assertEqual(c.state.cash_available-b.state.cash_available,to_micro(125))
+        self.assertEqual(c.nav['equity'],b.nav['equity'])
+        self.assertEqual(replay(initial.scope,initial.initial_equity,a.events+b.events+c.events).state_hash(),c.state.state_hash())
+        d = step(c.state,session='2026-01-13',bars=bars1(99,99),corporate_actions=[],intents=[],manifest=m)
+        self.assertFalse([e for e in d.events if e['type']=='dividend_pay'])
+
+    def test_same_day_entitlement_is_paid_but_unknown_and_future_are_not(self):
+        m=make_manifest()
+        a=step(new_account_state('SHADOW:x:R',to_micro(100000)),session='2026-01-05',
+               bars=bars1(100,100),corporate_actions=[],intents=[opp('SEC-A','2026-01-05')],manifest=m)
+        for pay_date,expected in [('2026-01-06',{}),('2026-02-01',{'2026-02-01':to_micro(125)}),(None,{None:to_micro(125)})]:
+            b=step(a.state,session='2026-01-06',bars=bars1(99,99),intents=[],manifest=m,
+                   corporate_actions=[{'security_id':'SEC-A','action_type':'cash_dividend',
+                   'ex_date':'2026-01-06','pay_date':pay_date,'cash_amount_micro':to_micro(1)}])
+            self.assertEqual(b.state.dividend_receivable,expected)

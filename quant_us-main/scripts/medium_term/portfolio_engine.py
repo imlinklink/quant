@@ -298,7 +298,9 @@ def simulate_multi_asset_portfolio(prices: pd.DataFrame, matrix: pd.DataFrame, *
             cash += unsettled_cash
             unsettled_cash = 0
         if dividend_receivable:
-            cash += dividend_receivable_map.pop(str(session.date()), 0)
+            for due in sorted(k for k in dividend_receivable_map
+                              if k != '__unsettled__' and k <= str(session.date())):
+                cash += dividend_receivable_map.pop(due)
         # 已持仓的公司行动在开盘前生效；当天新开仓不会重复获取权益。
         for position in list(positions.values()):
             for event in action_map.get((position['security_id'], session), ()):
@@ -329,6 +331,11 @@ def simulate_multi_asset_portfolio(prices: pd.DataFrame, matrix: pd.DataFrame, *
                         cash += position['shares'] * amount
                 else:
                     raise ValueError(f'ACTION_TYPE_UNSUPPORTED:{kind}')
+
+        if dividend_receivable:
+            for due in sorted(k for k in dividend_receivable_map
+                              if k != '__unsettled__' and k <= str(session.date())):
+                cash += dividend_receivable_map.pop(due)
 
         # 开盘退出先释放现金和仓位。
         for position in list(positions.values()):

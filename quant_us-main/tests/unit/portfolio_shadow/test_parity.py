@@ -58,3 +58,21 @@ class ParityTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def test_historical_engine_pays_weekend_receivable_not_just_nav_parity():
+    from scripts.medium_term.portfolio_engine import simulate_multi_asset_portfolio
+    sessions = pd.to_datetime(['2026-01-05','2026-01-06','2026-01-09','2026-01-12'])
+    prices = pd.DataFrame({'security_id':'SEC-A','session':sessions,
+                          'raw_open':[100,99,99,99],'raw_close':[100,99,99,99]})
+    matrix = pd.DataFrame([dict(security_id='SEC-A',entry_session=sessions[0],entry_price=100,
+        initial_stop=92,exit_session=sessions[-1],exit_price=99,exit_phase='CLOSE',
+        exit_reason='TIME_EXIT',portfolio_accepted=True)])
+    actions = pd.DataFrame([dict(security_id='SEC-A',action_type='cash_dividend',
+        ex_date='2026-01-06',pay_date='2026-01-10',cash_amount=1)])
+    result = simulate_multi_asset_portfolio(prices,matrix,actions=actions,
+        t1_settlement=True,dividend_receivable=True,shadow_precision=True)
+    nav = result.equity
+    assert nav.iloc[-2].dividend_receivable == 125
+    assert nav.iloc[-1].dividend_receivable == 0
+    assert nav.iloc[-1]['cash'] - nav.iloc[-2]['cash'] == 125
