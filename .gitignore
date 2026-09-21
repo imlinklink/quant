@@ -30,3 +30,9 @@ Thumbs.db
 quant_us-main/data/
 quant_futu-main/data/
 quant_us-main/backtests/
+
+# ===== 外部参考代码（只作阅读，不属于本仓库）=====
+# gs_backtest 是研究时参考的回测器（`quant_us-main/docs/strategy-weakness-diagnosis-and-
+# improvement-design-2026-09-20.md` §2.2 逐条写明借鉴什么、不采用什么）。它是别人的代码、
+# 有自己的产物与缓存，混进本仓库只会让 `git status` 长期挂着 158 个无关文件。
+gs_backtest/
