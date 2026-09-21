@@ -158,3 +158,149 @@ def write_artifacts(result: dict, out_dir) -> dict:
     text = render_step1(result)
     (out / 'report.md').write_text(text, encoding='utf-8')
     return {'step1': str(out / 'step1.json'), 'report': str(out / 'report.md')}
+
+
+# ---------------------------------------------------------------- 买入侧（第二批）
+
+
+def render_entry_arms(result: dict) -> str:
+    c, v = result['comparison'], result['verdict']
+    a, b = c['a'], c['b']
+    st = result['stress']
+    sig = result['bottom_signals']
+
+    def row(label, key, fmt='{:.2f}', delta=True):
+        fa = fmt.format(a[key]) if isinstance(a[key], (int, float)) else 'n/a'
+        fb = fmt.format(b[key]) if isinstance(b[key], (int, float)) else 'n/a'
+        d = '' if not delta else _fmt_delta(a[key], b[key])
+        return f'| {label} | {fa} | {fb} | {d} |'
+
+    lines = [
+        '# 买入侧第二批：趋势回撤型抄底信号 vs B3 —— 账户级对照',
+        '',
+        f'预登记 `{result["registration_sha256"]}`；基线 study `{result["study_id"]}`。',
+        '',
+        '## 结论',
+        '',
+        f'**`{v["token"]}`**',
+        '',
+        _entry_verdict_sentence(v, c),
+        '',
+        '## 账户指标（1× 成本）',
+        '',
+        '| 量 | A（B3） | B（抄底信号） | 差 |',
+        '|---|---:|---:|---:|',
+        f'| 全成本终值收益 | {a["total_return"]*100:.2f}% | {b["total_return"]*100:.2f}% | '
+        f'**{(b["total_return"]-a["total_return"])*100:+.2f}pp** |',
+        row('CAGR', 'cagr', '{:.2%}'),
+        row('最大回撤', 'mdd', '{:.2%}'),
+        row('胜率', 'win_rate', '{:.1%}'),
+        row('盈亏比', 'profit_loss_ratio'),
+        row('最差单笔净 R', 'worst_trade_r'),
+        row('下尾 5% ES（越小越好）', 'tail_es_r', '{:.3f}'),
+        row('平均暴露', 'mean_exposure', '{:.1%}'),
+        row('平均现金占比', 'mean_cash_share', '{:.1%}'),
+        row('费用合计（USD）', 'fees_usd', '{:,.0f}'),
+        f'| 成交笔数 | {a["n_trades"]} | {b["n_trades"]} | '
+        f'{b["n_trades"]-a["n_trades"]:+d} |',
+        '',
+        f'2× 成本情景：A {st["a"]["total_return"]*100:.2f}% / B {st["b"]["total_return"]*100:.2f}%，'
+        f'差 **{st["delta_terminal_return"]*100:+.2f}pp**。',
+        '',
+        '## 入场分解（§5.3 要求三块都报）',
+        '',
+        f"共同成交 {c['entries']['common']} 笔；仅 A {c['entries']['only_a']} 笔；"
+        f"仅 B {c['entries']['only_b']} 笔（两侧信号密度不同，**不强行配对**）。",
+        '',
+        '| 块 | 笔数 | 净损益 USD | 盈利 | 亏损 | 净 R |',
+        '|---|---:|---:|---:|---:|---:|',
+        _pnl_row('共同成交', c['common_pnl']),
+        _pnl_row('**仅 B（新增机会）**', c['new_entries_pnl']),
+        _pnl_row('仅 A（被放弃）', c['dropped_entries_pnl']),
+        '',
+        '新增机会必须**同时**看两栏：只报新增盈利就是把「多买了一些」读成「策略更好」。',
+        '',
+        '## 账户拒绝机会',
+        '',
+        f'A：`{a["rejections"]}`（共排期 {a["n_scheduled"]} 次）；'
+        f'B：`{b["rejections"]}`（共排期 {b["n_scheduled"]} 次）。',
+        f'B 的信号数 {sig["n_opportunities"]} 远高于能成交的 {b["n_trades"]} 笔 —— '
+        '五个仓位装不下这个信号密度，被拒绝的部分**不计入**上面的收益。',
+        '',
+        '## 信号与状态机（B 臂生成侧）',
+        '',
+        f"年度信号数：`{sig['by_year']}`",
+        f"状态分布：`{sig['state_counts']}`；原因分布：`{sig['reason_counts']}`",
+        '',
+        '## 门槛逐条（数值取自预登记，未在报告里放宽）',
+        '',
+        '| 判据 | 结果 | 通过 |',
+        '|---|---|:--:|',
+        f'| A 臂复现基线 study 的成交 | 不符 {len(c.get("control_reproduction_failures") or [])} 笔 | '
+        f'{"✅" if v["checks"]["reproduces_the_baseline"] else "❌"} |',
+        f'| 终值收益差 > 0（主目标） | {c["delta_terminal_return"]*100:+.2f}pp | '
+        f'{"✅" if v["checks"]["terminal_return_improved"] else "❌"} |',
+        f'| 2× 成本下仍 > 0 | {st["delta_terminal_return"]*100:+.2f}pp | '
+        f'{"✅" if v["checks"]["held_under_2x_cost"] else "❌"} |',
+        f'| MDD 差 ≤ 0.03 | {c["delta_mdd"]:+.4f} | '
+        f'{"✅" if v["checks"]["mdd_within_budget"] else "❌"} |',
+        f'| 最差单笔不劣 | {(c["delta_worst_trade_r"] or 0):+.3f}R | '
+        f'{"✅" if v["checks"]["worst_trade_not_worse"] else "❌"} |',
+        f'| 下尾 ES 不劣 | {b["tail_es_r"]:.3f} vs {a["tail_es_r"]:.3f} | '
+        f'{"✅" if v["checks"]["tail_es_not_worse"] else "❌"} |',
+        f'| 新增成交不集中 | 单一证券占 '
+        f'{_pct(c["new_entries_top1_share"])}；剔除后 '
+        f'{c["new_entries_leave_one_out"]:,.0f} USD | '
+        f'{"✅" if v["checks"]["not_concentrated"] else "❌"} |',
+        '',
+        v['note'],
+        '',
+        '---',
+        '',
+        '规范见 `docs/bottom-signal-spec-2026-09-21.md`；逐笔明细在同目录 `entry_arms.json`。',
+        '本窗口**已被查看过**，只用于淘汰；正式资格需另立前向登记（≥30 成熟组且 ≥60 交易日）。',
+    ]
+    return '\n'.join(lines) + '\n'
+
+
+def _fmt_delta(x, y):
+    if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+        return ''
+    return f'{y - x:+,.4f}' if abs(y - x) < 10 else f'{y - x:+,.0f}'
+
+
+def _pnl_row(label, p):
+    return (f'| {label} | {p["n"]} | {p["net_usd"]:,.0f} | {p["gross_win_usd"]:,.0f} | '
+            f'{p["gross_loss_usd"]:,.0f} | {_r(p["sum_r"])} |')
+
+
+def _entry_verdict_sentence(v, c):
+    tok = v['token']
+    a, b = c['a'], c['b']
+    if tok == 'RISK_TRADEOFF':
+        return ('**风险改善但收益牺牲**：终值收益差 '
+                f'{(b["total_return"]-a["total_return"])*100:+.2f}pp（未改善），'
+                f'而 MDD {b["mdd"]*100:.2f}% vs {a["mdd"]*100:.2f}%、'
+                f'最差单笔 {b["worst_trade_r"]:.2f}R vs {a["worst_trade_r"]:.2f}R 都更好。'
+                '按规划 §4.4：**只能记为防守选项，不得写成全面优胜**。')
+    if tok == 'EVIDENCE_SUPPORTED':
+        return '收益改善且风险未恶化、2× 成本下仍成立 ⇒ 值得另立前向登记。'
+    if tok == 'CONCENTRATED':
+        return '新增成交的盈亏集中在少数证券 ⇒ 按 §8.2 保留原策略。'
+    if tok == 'RISK_REJECTED':
+        return '风险未改善（或 2× 成本下收益差转负）⇒ 保留原策略。'
+    if tok == 'ENGINEERING_BLOCKED':
+        return 'A 臂未复现基线 study 的成交 ⇒ 停在工程修复，不出收益结论。'
+    if tok == 'INSUFFICIENT_SAMPLE':
+        return '成交数不足 ⇒ 不出结论。'
+    return '见 `entry_arms.json` 的 `verdict.checks`。'
+
+
+def write_entry_artifacts(result: dict, out_dir) -> dict:
+    from pathlib import Path
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / 'entry_arms.json').write_text(
+        json.dumps(result, ensure_ascii=False, indent=1, default=str), encoding='utf-8')
+    (out / 'report.md').write_text(render_entry_arms(result), encoding='utf-8')
+    return {'entry_arms': str(out / 'entry_arms.json'), 'report': str(out / 'report.md')}
