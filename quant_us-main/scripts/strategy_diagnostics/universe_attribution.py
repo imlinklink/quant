@@ -24,13 +24,13 @@ import json
 from collections import Counter
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from scripts.medium_term.action_coverage import audit_action_coverage, blocked_sessions
-from scripts.medium_term.p1_account_check import (ETF_RAW, PANELS, QQQ_DIVIDENDS,
-                                                  _load_adjusted, _load_qqq_dividends,
-                                                  _load_qqq_prices)
-from scripts.medium_term.p2_selection_check import (TECH, build_entries, build_matrix,
+from scripts.medium_term.p1_account_check import (ETF_RAW, QQQ_DIVIDENDS, _load_adjusted,
+                                                  _load_qqq_dividends, _load_qqq_prices)
+from scripts.medium_term.p2_selection_check import (PANELS, TECH, build_entries, build_matrix,
                                                     build_timed_entries, load_panels,
                                                     market_frame, trading_calendar)
 from scripts.medium_term.performance import performance_metrics
@@ -63,6 +63,25 @@ WINDOW = ('2016-01-05', '2026-08-25')          # 与冻结基线同窗，三臂�
 
 def _digest(path) -> str:
     return file_hash(Path(path))
+
+
+def _plain(value):
+    """numpy/pandas 标量 → Python 原生。
+
+    `manifest.write_json` 用 `allow_nan=False` 且**不认 numpy 类型**，所以一个
+    `numpy.int64` 就能让 18 分钟的计算在最后一行白跑（实测撞过）。转换放在写盘前一次做完。
+    """
+    if isinstance(value, dict):
+        return {str(k): _plain(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain(v) for v in value]
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, np.floating):
+        return None if not np.isfinite(value) else float(value)
+    if isinstance(value, np.bool_):
+        return bool(value)
+    return value
 
 
 def verified_names() -> list[str]:
@@ -211,7 +230,7 @@ def execute(output: Path) -> dict:
               'harness_control': control}
     if not control['passed']:
         result['status'] = 'HARNESS_CONTROL_FAILED'
-        write_json(output, result)
+        write_json(output, _plain(result))
         return result
 
     names32 = verified_names()
@@ -226,7 +245,7 @@ def execute(output: Path) -> dict:
             pd.read_csv(QUALITY).set_index('security_id').loc[names32, 'from_session']
             .str[:4])),
         'eligible_sessions_per_security': dict(
-            mask.groupby('security_id').eligible.sum().astype(int))}
+            mask.groupby('security_id').eligible.sum())}
     arms = {
         'A': run_arm(list(TECH), gate=False, label='A_13_hardcoded', quality=quality,
                      actions=actions, etf_path=ETF_RAW, qqq_prices=qqq_prices,
@@ -248,7 +267,7 @@ def execute(output: Path) -> dict:
                     '样本外证据或未来收益预期（§5）。边界见 §6 四条。'}
     result['status'] = 'DIAGNOSTIC_COMPLETE' if len(done) == 3 else 'ARM_FAILED'
     result['account_level_started'] = False
-    write_json(output, result)
+    write_json(output, _plain(result))
     return result
 
 
