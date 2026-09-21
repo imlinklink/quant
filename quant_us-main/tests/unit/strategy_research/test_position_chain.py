@@ -332,6 +332,171 @@ class TimeoutAndBudgetTests(ChainHarness):
         self.assertNotEqual(outcome.decision.reason_code, 'MODEL_BUDGET_EXHAUSTED')
 
 
+class TimeoutSemanticsTests(ChainHarness):
+    """边界一：**线程超时不等于请求终止**（用户 2026-09-21 要求补验）。
+
+    要证四件事：日作业能退出、迟到结果不会被应用、重跑不会重复付费、
+    费用未知必须挂账而不是记成零成本。
+    """
+
+    LLM = {'technical_packet': True, 'open_actions': ['hold', 'exit']}
+
+    def _late_model(self, delay=0.6, action='exit'):
+        from scripts.portfolio_shadow.position_overlay import FakePositionModel
+
+        class LateModel(FakePositionModel):
+            def call(self, packet, deadline):
+                import time as _time
+                _time.sleep(delay)
+                out = super().call(packet, deadline)
+                out['output']['action'] = action
+                out['output']['thesis_state'] = 'INVALIDATED'
+                out['output']['reason_codes'] = ['THESIS_INVALIDATED']
+                out['output']['action_template_id'] = None
+                out['cost_micro'] = 12_345
+                return out
+
+        return LateModel(evidence_from_packet=True, reason_code='THESIS_INVALIDATED')
+
+    def _review(self, model, *, timeout=0.05, budget=None, reserve=None):
+        from scripts.portfolio_shadow.position_review import PositionReviewer, PositionSubject
+        reviewer = PositionReviewer(self.store, scope='SHADOW:EXP:L',
+                                    model_factory=(lambda: model), model_id='fixture',
+                                    timeout_seconds=timeout, model_budget_micro=budget,
+                                    model_call_reserve_micro=reserve)
+        frozen, _ = self.freeze(technical_inputs=self.technical())
+        subject = PositionSubject(opportunity_id=self.oid, security_id=CODE,
+                                  reviewed_session=SESSION, execution_session=EXEC)
+        return reviewer, subject, frozen[0][1]
+
+    def test_a_late_result_is_never_applied_and_the_job_can_exit(self):
+        import threading
+        import time as _time
+        model = self._late_model(delay=0.8, action='exit')
+        reviewer, subject, packet = self._review(model, timeout=0.05)
+        started = _time.time()
+        outcome = reviewer.review(subject, packet, '2026-01-06T13:20:00+00:00')
+        self.assertLess(_time.time() - started, 0.5, '超时后主线程必须能继续（作业要能退出）')
+        # 迟到的那个 EXIT 不得被应用
+        self.assertEqual(outcome.decision.reason_code, 'TIMED_OUT')
+        self.assertNotEqual(outcome.decision.action, POSITION_EXIT)
+        self.assertEqual(self.store.application('SHADOW:EXP:L', subject.key())['action'],
+                         outcome.decision.action)
+        # 工作线程是守护线程 ⇒ 挂死的调用不会阻止进程退出
+        workers = [t for t in threading.enumerate() if t.name == 'overlay-model-call']
+        self.assertTrue(all(t.daemon for t in workers), '调用线程必须是守护线程')
+        _time.sleep(0.9)          # 让迟到结果真的返回，确认它落地不了
+
+    def test_a_timed_out_call_accrues_an_unknown_cost_not_zero(self):
+        """钱可能已经花了且金额不可知 ⇒ 必须**挂账待补记**，不能记成零成本。"""
+        model = self._late_model(delay=0.8)
+        reviewer, subject, packet = self._review(model, timeout=0.05)
+        outcome = reviewer.review(subject, packet, '2026-01-06T13:20:00+00:00')
+        self.assertEqual(outcome.decision.model_cost, 0)
+        self.assertTrue(outcome.decision.cost_uncertain,
+                        '未知费用必须标记为不确定，否则账户会把它当零成本')
+        app = self.store.application('SHADOW:EXP:L', subject.key())
+        self.assertTrue(app['cost_uncertain'])
+        self.assertTrue(app['attempt_id'])
+        attempt = self.store.job_run(app['attempt_id']) or {}
+        self.assertEqual(attempt.get('status'), 'TIMED_OUT')
+        self.assertTrue(attempt.get('cost_uncertain'))
+
+    def test_a_rerun_after_a_timeout_does_not_call_or_pay_again(self):
+        calls = []
+        model = self._late_model(delay=0.8)
+        original = model.call
+
+        def counting(packet, deadline):
+            calls.append(1)
+            return original(packet, deadline)
+
+        model.call = counting
+        reviewer, subject, packet = self._review(model, timeout=0.05)
+        first = reviewer.review(subject, packet, '2026-01-06T13:20:00+00:00')
+        second = reviewer.review(subject, packet, '2026-01-06T13:20:00+00:00')
+        self.assertEqual(len(calls), 1, '重跑不得再付一次费')
+        self.assertEqual(first.decision.reason_code, second.decision.reason_code)
+        self.assertIn(second.note, ('reused_frozen', 'reused_terminal',
+                                    'recovered_from_attempt'))
+
+
+class BudgetAccountingTests(ChainHarness):
+    """边界二：预算不能只看已结算费用（用户 2026-09-21 要求补验）。"""
+
+    LLM = {'technical_packet': True, 'open_actions': ['hold', 'exit']}
+
+    def _seed_state(self, **over):
+        from dataclasses import replace as _replace
+        seq, body = self.store.latest_state('SHADOW:EXP:L')
+        state = _replace(state_from_dict(body), sequence=seq + 1, **over)
+        self.store.save_state('SHADOW:EXP:L', state,
+                              {'session': SESSION, 'equity': 1, 'cash_available': 1,
+                               'gross_exposure': 0, 'fees': 0,
+                               'valuation_status': 'OK', 'revision': 2}, [],
+                              session=SESSION)
+
+    def _run(self, *, budget, reserve):
+        from scripts.portfolio_shadow.position_overlay import FakePositionModel
+        from scripts.portfolio_shadow.position_review import PositionReviewer, PositionSubject
+        calls = []
+
+        class CountingModel(FakePositionModel):
+            def call(self, packet, deadline):
+                calls.append(1)
+                return super().call(packet, deadline)
+
+        reviewer = PositionReviewer(
+            self.store, scope='SHADOW:EXP:L',
+            model_factory=(lambda: CountingModel(evidence_from_packet=True)),
+            model_id='fixture', timeout_seconds=60,
+            model_budget_micro=budget, model_call_reserve_micro=reserve)
+        frozen, _ = self.freeze(technical_inputs=self.technical())
+        subject = PositionSubject(opportunity_id=self.oid, security_id=CODE,
+                                  reviewed_session=SESSION, execution_session=EXEC)
+        return reviewer, subject, frozen[0][1], calls
+
+    def test_unsettled_costs_consume_the_budget(self):
+        self._seed_state(model_cost_unsettled=('a1',))
+        reviewer, subject, packet, calls = self._run(budget=10_000, reserve=10_000)
+        usage = reviewer.budget_usage()
+        self.assertEqual(usage['unsettled_count'], 1)
+        self.assertEqual(usage['committed_micro'], 10_000)
+        reviewer.review(subject, packet, '2026-01-06T13:20:00+00:00')
+        self.assertEqual(calls, [], '未知金额的尝试必须占用预算')
+
+    def test_in_flight_attempts_consume_the_budget(self):
+        """N 个持仓同轮评审：各自都以为「剩下的钱够」就会一起穿透上限。"""
+        self.store.put_job_run('in-flight-1', 1, 'CALL_STARTED',
+                               {'scope': 'SHADOW:EXP:L', 'packet_id': 'p'})
+        reviewer, subject, packet, calls = self._run(budget=10_000, reserve=10_000)
+        self.assertEqual(reviewer.budget_usage()['in_flight_count'], 1)
+        reviewer.review(subject, packet, '2026-01-06T13:20:00+00:00')
+        self.assertEqual(calls, [], '正在飞的调用必须预留下预算')
+
+    def test_budget_period_is_the_experiment_lifetime_and_never_resets(self):
+        """周期 = 实验生命周期、累计、**不自动重置**；改预算只能新建 experiment_id。"""
+        reviewer, subject, packet, calls = self._run(budget=1_000_000, reserve=10_000)
+        before = reviewer.budget_usage()['committed_micro']
+        reviewer.review(subject, packet, '2026-01-06T13:20:00+00:00')
+        self._seed_state(model_cost=500_000)         # 结算把成本计入
+        after = reviewer.budget_usage()['settled_micro']
+        self.assertEqual(before, 0)
+        self.assertEqual(after, 500_000)
+        # 没有重置路径：占用只会随累计成本单调上升
+        self.assertFalse(hasattr(reviewer, 'reset_budget'))
+
+    def test_a_fresh_experiment_gets_a_fresh_budget(self):
+        """预算随 experiment_id 定义 ⇒ 新实验是新预算（这也是唯一的重置方式）。"""
+        from scripts.portfolio_shadow.schema import Manifest
+        base = manifest_dict(use_real_model=True, knowledge_cutoff='unknown',
+                             model_budget_micro=5_000_000)
+        m1 = manifest_from_dict(base)
+        m2 = manifest_from_dict({**base, 'experiment_id': 'EXP2',
+                                 'account_scopes': ['SHADOW:EXP2:R', 'SHADOW:EXP2:L']})
+        self.assertNotEqual(m1.manifest_hash(), m2.manifest_hash())
+
+
 class ManifestBudgetTests(unittest.TestCase):
     def test_real_model_requires_a_declared_budget(self):
         from scripts.portfolio_shadow.schema import Manifest

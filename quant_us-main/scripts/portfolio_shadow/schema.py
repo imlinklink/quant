@@ -51,10 +51,14 @@ POLICY_KEYS = {
     'llm_policy': ('overlay', 'use_real_model', 'knowledge_cutoff', 'evidence_mode',
                    'evidence_window_days', 'evidence_max_events', 'position_overlay',
                    'portfolio_review', 'technical_packet', 'open_actions',
-                   'model_budget_micro'),
+                   'model_budget_micro', 'model_call_reserve_micro', 'model_id',
+                   'model_timeout_seconds', 'position_review_cadence'),
     'evaluation_protocol': ('main_metric', 'enrollment_window', 'review_date',
-                            'cost_allocation'),
+                            'cost_allocation', 'min_decisions', 'decision_rule'),
 }
+# 持仓评审频率（规划 §4.1：启动时冻结）。本轮只实现「逐 session 逐持仓」一种：
+# 写成冻结值而不是靠默认，是为了让改频率必须新建 experiment_id。
+POSITION_REVIEW_CADENCES = ('every_session',)
 # 与 risk_policy._DEFAULTS 的键一致，由测试钉死
 LADDER_KEYS = ('limit_breach', 'review_required', 'paused_entry', 'reduced',
                'normal_recover', 'reduced_recover', 'recover_sessions')
@@ -159,6 +163,29 @@ class Manifest:
             if not isinstance(budget, int) or isinstance(budget, bool) or budget <= 0:
                 errors.append(f'llm_policy.model_budget_micro 缺失或非法：{budget!r}'
                               f'（use_real_model=true 时必填正整数，单位微美元）')
+        # 评估规则（规划 §4.1：启动时冻结，含评估点与「不自动晋级」）：
+        # 填了就必须合法，不能让一个拼错的规则名静默失效。
+        min_decisions = self.evaluation_protocol.get('min_decisions')
+        if min_decisions is not None and (not isinstance(min_decisions, int)
+                                          or isinstance(min_decisions, bool)
+                                          or min_decisions <= 0):
+            errors.append(f'evaluation_protocol.min_decisions 非法：{min_decisions!r}')
+        rule = self.evaluation_protocol.get('decision_rule')
+        if rule is not None and rule != 'report_only_no_auto_promotion':
+            errors.append(f'evaluation_protocol.decision_rule 非法：{rule!r}'
+                          '（本轮只允许 report_only_no_auto_promotion）')
+        cadence = self.llm_policy.get('position_review_cadence')
+        if cadence is not None and cadence not in POSITION_REVIEW_CADENCES:
+            errors.append(f'llm_policy.position_review_cadence 非法：{cadence!r}'
+                          f'（允许：{list(POSITION_REVIEW_CADENCES)}）')
+        timeout = self.llm_policy.get('model_timeout_seconds')
+        if timeout is not None and (not isinstance(timeout, int) or timeout <= 0):
+            errors.append(f'llm_policy.model_timeout_seconds 非法：{timeout!r}（正整数秒）')
+        reserve = self.llm_policy.get('model_call_reserve_micro')
+        if self.llm_policy.get('use_real_model') and reserve is not None:
+            if not isinstance(reserve, int) or isinstance(reserve, bool) or reserve <= 0:
+                errors.append(f'llm_policy.model_call_reserve_micro 非法：{reserve!r}'
+                              f'（正整数微美元；不填则按预算的 0.2% 折算）')
         if not self.calendar_version:
             errors.append('calendar_version 缺失')
         # 技术包（规划 §6.2）与开放动作集（§6.1）：两者必须**一起**出现在持仓角色上。

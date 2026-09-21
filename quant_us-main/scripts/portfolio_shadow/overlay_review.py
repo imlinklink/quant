@@ -102,7 +102,8 @@ class OverlayReviewer:
 
     def __init__(self, store, *, scope, model_factory, model_id='', timeout_seconds=None,
                  now=None, lease_seconds=LEASE_SECONDS, knowledge_cutoff=None,
-                 debug: bool = False, model_budget_micro=None):
+                 debug: bool = False, model_budget_micro=None,
+                 model_call_reserve_micro=None):
         self.store = store
         self.scope = scope
         self.model_factory = model_factory
@@ -114,6 +115,12 @@ class OverlayReviewer:
         # 调用预算（规划 §4.1）：真实模型有费用、数据与调度都会失败 ⇒ 启动时就设上限，
         # 用尽即弃权（零成本、不发起调用）。None = 未设上限（夹具与离线路径）。
         self.model_budget_micro = model_budget_micro
+        # 每次调用的**预留**金额：金额未知的尝试与正在飞的尝试都按它折算占用。
+        # 缺省 = 预算的 0.2%（够保守地覆盖单次调用量级），但**必须在 manifest 里显式给出**
+        # 才谈得上可复核 —— 默认值只是让不设的实验仍能运行。
+        self.model_call_reserve_micro = (
+            model_call_reserve_micro
+            or (int(model_budget_micro * 0.002) if model_budget_micro else None))
         self.knowledge_cutoff = knowledge_cutoff
         # 设计 §9 的 historical_debug：真实调用留痕用于提示词调试，但**不写 Application**，
         # 因而不会进入正式 R/L 表现 —— 过去的执行日不能用今天生成的模型结果补填。
@@ -286,7 +293,7 @@ class OverlayReviewer:
                                 decision_id)
             self.store.put_job_run(decision_id, 1, 'COMPLETED', {
                 **self._attempt_body(subject, packet), 'gated': True,
-                'budget_exhausted': True, 'budget_micro': self.model_budget_micro,
+                'budget_exhausted': True, **self.budget_usage(),
                 'completed_at': _now(self.now).isoformat(), **_decision_body(d)})
             self.finalize_action(subject, packet, d, decision_id)
             return ReviewOutcome(decision_id, d, True, 'budget_exhausted')
@@ -315,14 +322,25 @@ class OverlayReviewer:
         self.finalize_action(subject, packet, d, decision_id, result)
         return ReviewOutcome(decision_id, d, True, result.status.lower())
 
+    def budget_usage(self) -> dict:
+        """预算占用 = **已结算** + (**金额未知** + **正在飞**) × 每次调用预留。
+
+        只看已结算是不够的：未知金额在记账上就是 0、正在飞的调用还没落账，两者叠加时
+        N 个持仓同时评审会各自以为「剩下的钱够」，总额就穿透了上限。
+        预留是**保守**估计（宁可早停不可穿透），实际花费以 `settled` 为准。
+        """
+        settled, uncertain = self.store.model_cost_so_far(self.scope)
+        in_flight = self.store.in_flight_attempts(self.scope)
+        reserve = self.model_call_reserve_micro or 0
+        return {'settled_micro': settled, 'unsettled_count': uncertain,
+                'in_flight_count': in_flight, 'reserve_micro': reserve,
+                'committed_micro': settled + (uncertain + in_flight) * reserve,
+                'budget_micro': self.model_budget_micro}
+
     def _budget_exhausted(self) -> bool:
-        """已计入成本是否已达上限。金额未知的尝试（`model_cost_unsettled`）**不计入** ——
-        记账上它们就是 0，拿它们当已花费是编数；但调用方必须在报告里披露这个滞后
-        （`cost_status=PROVISIONAL`）。"""
         if not self.model_budget_micro:
             return False
-        spent, _uncertain = self.store.model_cost_so_far(self.scope)
-        return spent >= self.model_budget_micro
+        return self.budget_usage()['committed_micro'] >= self.model_budget_micro
 
     def _debug_review(self, subject, packet, deadline, decision_id) -> ReviewOutcome:
         """设计 §9 的 `historical_debug` 分支：真实调用留痕，但**不冻结动作**。

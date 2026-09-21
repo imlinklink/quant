@@ -388,17 +388,21 @@ def record_data_blocked(store, scopes, opp, packet, *, session):
 
 
 def make_reviewer(store, scope, real_model, *, model_id='', model_factory=None,
-                  debug=False, model_budget_micro=None):
+                  debug=False, model_budget_micro=None, model_call_reserve_micro=None,
+                  timeout_seconds=None):
     """构造 L 侧评审编排者。所有入口共用同一条编排路径（设计 §7）。"""
     factory = model_factory or (
         lambda: real_model if real_model is not None else FakeModel(action='PASS',
                                                                    cost_micro=0))
     return EntryReviewer(store, scope=scope, model_factory=factory, model_id=model_id,
-                         debug=debug, model_budget_micro=model_budget_micro)
+                         debug=debug, model_budget_micro=model_budget_micro,
+                         model_call_reserve_micro=model_call_reserve_micro,
+                         timeout_seconds=timeout_seconds)
 
 
 def apply_entry_reviews(store, scope, reviews, *, deadline, real_model, model_id='',
-                        model_budget_micro=None,
+                        model_budget_micro=None, model_call_reserve_micro=None,
+                        timeout_seconds=None,
                         force_recall=False, reviewer=None):
     """账户相关阶段：对已冻结的证据包做三态评审。
 
@@ -409,7 +413,9 @@ def apply_entry_reviews(store, scope, reviews, *, deadline, real_model, model_id
     调用前原子领取；崩溃遗留的尝试判 UNKNOWN 而不是静默重发。
     """
     reviewer = reviewer or make_reviewer(store, scope, real_model, model_id=model_id,
-                                         model_budget_micro=model_budget_micro)
+                                         model_budget_micro=model_budget_micro,
+                                         model_call_reserve_micro=model_call_reserve_micro,
+                                         timeout_seconds=timeout_seconds)
     kept, known_cost, uncertain = [], 0, []
     for opp, packet in reviews:
         outcome = reviewer.review(opp, packet, deadline, force_recall=force_recall)
@@ -575,6 +581,7 @@ def cmd_review_entries(args):
         model_id=(m.llm_policy.get('model_id')
                   or ('real' if use_real else ('historical_debug' if debug else 'fixture'))),
         model_budget_micro=m.llm_policy.get('model_budget_micro'),
+        model_call_reserve_micro=m.llm_policy.get('model_call_reserve_micro'),
         model_factory=((lambda: FakeModel(
             action=fixture_action, cost_micro=0, evidence_from_packet=True,
             reason_code=('MATERIAL_COMPANY_EVENT_RISK' if fixture_action == 'VETO' else '')))
@@ -834,7 +841,10 @@ def make_position_reviewer(store, m, *, scope, model, real_model=None, debug=Fal
                                              cost_micro=0, evidence_from_packet=True))
     return PositionReviewer(store, scope=scope, model_factory=factory, model_id=model_id,
                             debug=debug,
-                            model_budget_micro=m.llm_policy.get('model_budget_micro'))
+                            model_budget_micro=m.llm_policy.get('model_budget_micro'),
+                            model_call_reserve_micro=m.llm_policy.get(
+                                'model_call_reserve_micro'),
+                            timeout_seconds=m.llm_policy.get('model_timeout_seconds'))
 
 
 def model_parts(action: str) -> tuple:
@@ -1562,7 +1572,9 @@ def cmd_run_forward(args):
             if overlay == 'entry_veto' and scope.endswith(':L'):
                 kept, cost, uncertain = apply_entry_reviews(
                     store, scope, reviews, deadline=deadline, real_model=real_model,
-                    model_budget_micro=m.llm_policy.get('model_budget_micro'))
+                    model_budget_micro=m.llm_policy.get('model_budget_micro'),
+                    model_call_reserve_micro=m.llm_policy.get('model_call_reserve_micro'),
+                    timeout_seconds=m.llm_policy.get('model_timeout_seconds'))
                 # 只从**本批**机会的队列里摘掉被否决的，别动其它执行日的队列
                 drop_from_schedule(scheduled[scope], exec_next,
                                    {o.opportunity_id() for o, _ in reviews}

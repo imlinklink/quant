@@ -556,6 +556,25 @@ class ShadowStore:
         body = row[1]
         return int(body.get('model_cost') or 0), len(body.get('model_cost_unsettled') or ())
 
+    def in_flight_attempts(self, scope: str) -> int:
+        """**正在飞**的模型尝试数（CALL_STARTED 且未终结）—— 调用预算必须预留它们。
+
+        只看已结算成本会让 N 个持仓在同一轮里**同时**通过预算检查：每个都以为「剩下的钱够」，
+        于是总额穿透上限。预留的量由调用方按 `model_call_reserve_micro` 折算。
+        """
+        with self.transaction(immediate=False) as con:
+            rows = con.execute(
+                "SELECT body FROM shadow_job_runs WHERE experiment_id=? AND status='CALL_STARTED'",
+                (self.experiment_id,)).fetchall()
+        count = 0
+        for (body,) in rows:
+            try:
+                if json.loads(body).get('scope') == scope:
+                    count += 1
+            except (TypeError, ValueError):
+                count += 1        # 读不懂的尝试按「在飞」算，宁可早停不可穿透
+        return count
+
     def latest_state(self, scope: str) -> tuple[int, dict] | None:
         with self.transaction(immediate=False) as con:
             row = con.execute('SELECT sequence, body FROM shadow_account_state '
