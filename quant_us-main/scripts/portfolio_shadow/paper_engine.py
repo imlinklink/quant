@@ -52,7 +52,8 @@ def step(state: AccountState, *, session: str, bars: dict, corporate_actions: li
          intents: list, manifest, fee_bp: int = 10, model_cost: int = 0,
          model_cost_uncertain: tuple = (), model_cost_settlements: dict | None = None,
          position_actions: dict | None = None, protection=None, atr: dict | None = None,
-         next_session: str | None = None) -> StepResult:
+         next_session: str | None = None, trend_exits: dict | None = None,
+         time_exit: bool = True) -> StepResult:
     """执行一个交易日。bars={sid:{open,high,low,close}}（微美元/股）；公司行动用微美元。
 
     position_actions 形如 {security_id: {'action': 'reduce'|'exit', 'tier': float,
@@ -67,8 +68,14 @@ def step(state: AccountState, *, session: str, bars: dict, corporate_actions: li
       · `NO_NEXT_SESSION`（空串）= **本 session 之后没有会话了**（窗口末尾）⇒ 照常执行
         当日的退出逻辑，只是不排期（排了也没人会执行）。
 
-    **`protection=None`（默认）时本引擎逐事件、逐日行为与本参数引入前完全相同** —— 这是
-    隔离版本不变性的前提（规划 §3.1），有测试钉死。
+    `trend_exits`：`{sid: {'frozen_at': ...}}` —— **T 收盘冻结、T+1 开盘执行**的退出意图
+    （规则见 `strategy_research/trend_exit.py`，引擎只消费，不算指标）。引擎断言
+    `frozen_at < session`，否则就是用当天信息在当天成交（前视），直接拒绝。
+    `time_exit=False`：**显式关闭时间退出**（趋势退出臂用它替换 H60）。这是退出策略的
+    显式分派，不是把 `horizon` 改成巨大整数（设计 §6.3 明令禁止后者）。持有计数照常推进。
+
+    **`protection=None` 且 `trend_exits=None` 且 `time_exit=True`（默认）时，本引擎逐事件、
+    逐日行为与本参数引入前完全相同** —— 这是隔离版本不变性的前提（规划 §3.1），有测试钉死。
     """
     if protection is not None and next_session is None:
         raise ValueError('PROTECTION_REQUIRES_NEXT_SESSION')
@@ -219,6 +226,33 @@ def step(state: AccountState, *, session: str, bars: dict, corporate_actions: li
             events.append(_fill(session, 'SELL', sid, pos.shares, o, fee, 'GAP_STOP',
                                 pos.opportunity_id))
 
+    # 2.2 趋势退出意图（设计 §6.4：在**开盘风险退出之后**、当日新仓入场之前消费）。
+    #     阶段 2 已按 GAP_STOP 成交的持仓不在 positions 里，所以「同日只成交一次、
+    #     优先记 GAP_STOP」是**构造性**成立的，不需要额外判优先级。
+    for sid in sorted(s.positions):
+        intent = (trend_exits or {}).get(sid)
+        if intent is None:
+            continue
+        frozen_at = str(intent.get('frozen_at') or '')
+        if not frozen_at or frozen_at >= session:
+            raise ValueError(f'TREND_EXIT_NOT_FROZEN:{sid}:frozen_at={frozen_at}:'
+                             f'session={session}')
+        if sid not in bars:
+            events.append({'type': 'missed', 'session': session, 'security_id': sid,
+                           'opportunity_id': intent.get('opportunity_id') or '',
+                           'reason': 'TREND_EXIT_NO_BARS'})
+            continue
+        pos = s.positions[sid]
+        px = bars[sid]['open']          # 次**开盘**成交，不假定能按收盘价
+        gross = pos.shares * px
+        fee = _fee(gross, fee_bp)
+        s.unsettled_cash += gross - fee
+        s.fees += fee
+        del s.positions[sid]
+        events.append({**_fill(session, 'SELL', sid, pos.shares, px, fee, 'TREND_EXIT',
+                               pos.opportunity_id),
+                       'signal_session': intent.get('signal_session') or ''})
+
     # 2.5 持仓评审动作（仅 L 账户；R 传 None 时整段不生效）
     # 位置在跳空止损之后、开盘入场之前：此时公司行动已调整完 shares/stop（否则评审日
     # 拆股会把减仓数量算错），且释放的仓位槽与现金当日可用，与跳空止损一致。
@@ -336,13 +370,14 @@ def step(state: AccountState, *, session: str, bars: dict, corporate_actions: li
             events.append(_fill(session, 'SELL', sid, pos.shares, px, fee, 'STOP',
                                 pos.opportunity_id))
 
-    # 5. 时间退出（holding >= horizon → 收盘卖出）
+    # 5. 时间退出（holding >= horizon → 收盘卖出）。`time_exit=False` ⇒ **只记持有、不退出**：
+    #    趋势退出臂没有到期退出，也没有任何隐式的持有期上限（设计 §6.3）。
     for sid, pos in list(s.positions.items()):
         pos = replace(pos, holding_sessions=pos.holding_sessions + 1)
         s.positions[sid] = pos
         events.append({'type': 'hold', 'session': session, 'security_id': sid,
                        'holding_sessions': pos.holding_sessions})
-        if pos.holding_sessions >= horizon and sid in bars:
+        if time_exit and pos.holding_sessions >= horizon and sid in bars:
             px = bars[sid]['close']
             gross = pos.shares * px
             fee = _fee(gross, fee_bp)

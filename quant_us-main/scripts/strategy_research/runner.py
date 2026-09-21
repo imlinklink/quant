@@ -180,7 +180,8 @@ def _intent(entry: dict, policy_id: str) -> Opportunity:
 
 
 def walk(entry: dict, prices: pd.DataFrame, acts_by_date: dict, calendar: pd.Series, *,
-         protection: ProfitProtection | None, horizon: int = 60, fee_bp: int = 10) -> dict:
+         protection: ProfitProtection | None, horizon: int = 60, fee_bp: int = 10,
+         trend_intents: dict | None = None, time_exit: bool = True) -> dict:
     """沿着真实价格路径推进这一笔，直到它退出（或数据到头）。
 
     返回该臂的结局。**保护关闭时（`protection=None`）必须复现账本里的成交** —— 这是登记
@@ -217,7 +218,9 @@ def walk(entry: dict, prices: pd.DataFrame, acts_by_date: dict, calendar: pd.Ser
         r = step(state, session=session, bars=bar,
                  corporate_actions=acts_by_date.get(session, ()), intents=intents,
                  manifest=manifest, fee_bp=fee_bp, protection=protection,
-                 atr=atr, next_session=(next_session or NO_NEXT_SESSION))
+                 atr=atr, next_session=(next_session or NO_NEXT_SESSION),
+                 trend_exits=(trend_intents or {}).get(session),
+                 time_exit=time_exit)
         state = r.state
         events.extend(r.events)
         if session == start:
@@ -236,11 +239,24 @@ def walk(entry: dict, prices: pd.DataFrame, acts_by_date: dict, calendar: pd.Ser
     highest = max([e['high_close_micro'] for e in events if e['type'] == 'protection_state'],
                   default=None)
     if exit_fill is None:
+        # 窗末仍未平仓：**按市价估值**、标 RIGHT_CENSORED（预登记 §holding_period_and_censoring）。
+        # 不给估值的话，取消到期退出的那一臂会凭空少一截收益 —— 只统计已平仓交易是不公平的。
+        risk = int(entry['shares']) * (int(entry['entry_price_micro']) - int(entry['stop_micro']))
+        cash_ = (state.cash_available + state.cash_reserved + state.unsettled_cash
+                 + sum(state.dividend_receivable.values()))
+        held = state.positions.get(sid)
+        last_close = bars_by_session.get(sessions[-1], {}).get('close') if held else None
+        mv = held.shares * last_close if (held and last_close) else 0
+        net = None if (held and last_close is None) else int(cash_ + mv - state.initial_equity)
         return {'status': 'RIGHT_CENSORED', 'exit_session': None, 'exit_reason': None,
-                'exit_price_micro': None, 'holding_sessions': None,
-                'net_pnl_micro': None, 'net_r': None, 'giveback_micro': None,
+                'exit_price_micro': None, 'holding_sessions': (held.holding_sessions
+                                                               if held else None),
+                'net_pnl_micro': net,
+                'net_r': (net / risk) if (net is not None and risk > 0) else None,
+                'giveback_micro': (None if (highest is None or last_close is None or not held)
+                                   else max(0, held.shares * (highest - last_close))),
                 'highest_close_micro': highest, 'activated': False,
-                'skip_events': 0}
+                'shares_held_micro': (held.shares if held else 0)}
     cash = (state.cash_available + state.cash_reserved + state.unsettled_cash
             + sum(state.dividend_receivable.values()))
     net = cash - state.initial_equity
@@ -307,7 +323,7 @@ def step1(study_dir: Path, *, horizon: int = 60) -> dict:
             'verdict': step1_verdict(summary)}
 
 
-def _reproduction_failures(rows: list[dict]) -> list[dict]:
+def _reproduction_failures(rows: list[dict], arm_key: str = 'A_off') -> list[dict]:
     """控制项：A 臂必须复现账本里的每一次出场（原因 + 日期 + 价格 + 净损益）。
 
     这是**整套驱动**的验证：价格路径、公司行动、费用、引擎调用方式。对不上就是
@@ -318,7 +334,7 @@ def _reproduction_failures(rows: list[dict]) -> list[dict]:
     """
     bad = []
     for r in rows:
-        a, recorded_reason = r['A_off'], r['exit_reason_recorded']
+        a, recorded_reason = r[arm_key], r['exit_reason_recorded']
         if recorded_reason is None:
             if a['status'] != 'RIGHT_CENSORED':
                 bad.append({'security_id': r['security_id'], 'entry_session': r['entry_session'],
@@ -464,6 +480,165 @@ def step1_verdict(summary: dict) -> dict:
             'thresholds': {'non_inferiority_r': NON_INFERIORITY_R,
                            'risk_improvement_gate': RISK_IMPROVEMENT_GATE,
                            'min_activated_trades': MIN_ACTIVATED_TRADES}}
+
+
+TREND_REGISTRATION = ROOT / 'docs/preregistrations/EXIT-TREND-MA2060-20260922.json'
+
+
+def step1_trend(study_dir: Path, *, horizon: int = 60) -> dict:
+    """趋势退出 vs H60 的同机会对照（预登记 `EXIT-TREND-MA2060-20260922`）。
+
+    A = H60 + 硬止损；B = 趋势退出 + 同一硬止损（**无时间退出**）。
+    窗末未平仓在 B 臂按市价估值并标右删失（登记 §holding_period_and_censoring）。
+    """
+    from scripts.strategy_research.trend_exit import exit_signals, trend_intents_by_session
+    study_dir = Path(study_dir)
+    if not TREND_REGISTRATION.exists():
+        raise ValueError(f'PREREGISTRATION_MISSING:{TREND_REGISTRATION}')
+    data, prices, _market, calendar, _quality, actions, entries = load_study(study_dir)
+    acts_by_date: dict = defaultdict(list)
+    converted, _dropped = shadow_actions(
+        actions, universe=set(prices.security_id),
+        session_range=(str(calendar.min().date()), str(calendar.max().date())))
+    for a in converted:
+        acts_by_date[a['ex_date']].append(a)
+    fee_bp = int(data['cost_policy']['fee_bp'])
+    intents = trend_intents_by_session(prices, actions, calendar)
+    # 每只证券的逐日信号，供「A 臂到期时趋势是否仍完整」这一项用（§6.2 要求的指标）
+    signals = {str(sid): exit_signals(g, actions, calendar.max()).set_index('session')
+               for sid, g in prices.groupby('security_id')}
+
+    rows = []
+    for entry in entries:
+        a = walk(entry, prices, acts_by_date, calendar, protection=None, horizon=horizon,
+                 fee_bp=fee_bp)
+        b = walk(entry, prices, acts_by_date, calendar, protection=None, horizon=horizon,
+                 fee_bp=fee_bp, trend_intents=intents, time_exit=False)
+        a2 = walk(entry, prices, acts_by_date, calendar, protection=None, horizon=horizon,
+                  fee_bp=COST_STRESS_FEE_BP)
+        b2 = walk(entry, prices, acts_by_date, calendar, protection=None, horizon=horizon,
+                  fee_bp=COST_STRESS_FEE_BP, trend_intents=intents, time_exit=False)
+        # A 臂到期退出时，趋势是否仍然完整（描述性，§6.2）
+        intact = None
+        if a['exit_reason'] == 'TIME_EXIT' and a['exit_session']:
+            sig = signals[str(entry['security_id'])]
+            ts = pd.Timestamp(a['exit_session'])
+            if ts in sig.index:
+                row = sig.loc[ts]
+                intact = bool(row['close'] > row['ma20'] or row['close'] >= row['ma60'])
+        rows.append({**entry, 'A': a, 'B': b, 'A2': a2, 'B2': b2, 'trend_intact_at_a_exit': intact})
+    return {'registration_sha256': hashlib.sha256(TREND_REGISTRATION.read_bytes()).hexdigest(),
+            'study_id': data['study_id'], 'n_trades': len(rows), 'fee_bp': fee_bp,
+            'trades': rows, 'summary': summarise_trend(rows),
+            'verdict': trend_verdict(summarise_trend(rows))}
+
+
+def summarise_trend(rows: list[dict]) -> dict:
+    both = [r for r in rows if r['A']['status'] == 'CLOSED']
+    deltas = [r['B']['net_r'] - r['A']['net_r'] for r in both
+              if r['A']['net_r'] is not None and r['B']['net_r'] is not None]
+    deltas_2x = [r['B2']['net_r'] - r['A2']['net_r'] for r in both
+                 if r['A2']['net_r'] is not None and r['B2']['net_r'] is not None]
+    censored = [r for r in rows if r['B']['status'] == 'RIGHT_CENSORED']
+    by_sec = defaultdict(float)
+    for r in both:
+        if r['A']['net_r'] is not None and r['B']['net_r'] is not None:
+            by_sec[r['security_id']] += r['B']['net_r'] - r['A']['net_r']
+    ordered = sorted(by_sec.items(), key=lambda kv: kv[1], reverse=True)
+    total = sum(by_sec.values())
+    a_r = [r['A']['net_r'] for r in both if r['A']['net_r'] is not None]
+    b_r = [r['B']['net_r'] for r in both if r['B']['net_r'] is not None]
+    hold_a = [r['A']['holding_sessions'] for r in both if r['A']['holding_sessions']]
+    hold_b = [r['B']['holding_sessions'] for r in both if r['B']['holding_sessions']]
+    intact = [r['trend_intact_at_a_exit'] for r in rows if r['trend_intact_at_a_exit'] is not None]
+    return {
+        'n_trades': len(rows), 'n_comparable': len(both),
+        'n_right_censored_b': len(censored),
+        'sum_r_a': sum(a_r), 'sum_r_b': sum(b_r), 'delta_r_sum': sum(deltas),
+        'delta_r_sum_2x': sum(deltas_2x),
+        'worst_a': min(a_r) if a_r else None, 'worst_b': min(b_r) if b_r else None,
+        'tail_es_a': _es(a_r), 'tail_es_b': _es(b_r),
+        'mean_holding_a': (sum(hold_a) / len(hold_a)) if hold_a else None,
+        'mean_holding_b': (sum(hold_b) / len(hold_b)) if hold_b else None,
+        'max_holding_a': max(hold_a) if hold_a else None,
+        'max_holding_b': max(hold_b) if hold_b else None,
+        'exit_reasons_a': dict(Counter(r['A']['exit_reason'] for r in both)),
+        'exit_reasons_b': dict(Counter(r['B']['exit_reason'] for r in both)),
+        'trend_intact_at_a_exit': (sum(1 for x in intact if x) / len(intact)) if intact else None,
+        'by_security_delta_r': ordered,
+        'top1_share': (ordered[0][1] / total) if ordered and total else None,
+        'leave_one_out': (total - ordered[0][1]) if ordered else None,
+        'control_reproduction_failures': _reproduction_failures(rows, 'A'),
+        'control_b_has_no_time_exit': not any(r['B']['exit_reason'] == 'TIME_EXIT' for r in both),
+        **_stop_controls(both),
+    }
+
+
+def _stop_controls(rows: list[dict]) -> dict:
+    """硬止损机制不受本改动影响 —— 但**不是**「两臂的止损集合相同」。
+
+    第一版我写成「止损退出的集合必须逐笔相同」，跑出来 56 笔不符。查下去是**我的控制写错了**：
+    趋势退出在**开盘**消费（阶段 2.2 早于日内止损阶段 4），所以它会**提前**替掉当天本会发生的
+    日内止损 —— 这与"止损被改动"是两件完全不同的事。实测 56 笔里，B 的离场日**无一例外早于**
+    A；两臂都因止损离场的 30 笔则逐字段完全相同。
+
+    真正的不变量是这两条（都能被实现缺陷打破）：
+      ① 两臂都因止损离场时，**日期与价格逐字段相同**（止损机制未被动过）；
+      ② A 因止损离场时，B 的离场日**不得晚于**它（趋势退出可以抢先，不能推迟止损）。
+    另加一条反向控制：A 止损而 B 从未离场（B 忽略了止损）⇒ 直接判失败。
+    """
+    same, details, delayed = True, [], []
+    both = a_stop_n = 0
+    for r in rows:
+        a, b = r['A'], r['B']
+        a_stop = a['exit_reason'] in ('STOP', 'GAP_STOP')
+        b_stop = b['exit_reason'] in ('STOP', 'GAP_STOP')
+        if a_stop and b_stop:
+            both += 1
+            if (a['exit_session'] != b['exit_session']
+                    or a['exit_price_micro'] != b['exit_price_micro']):
+                same = False
+                details.append([r['security_id'], r['entry_session'],
+                                a['exit_session'], b['exit_session']])
+        elif a_stop:
+            a_stop_n += 1
+            if b['exit_session'] is None or b['exit_session'] > a['exit_session']:
+                delayed.append([r['security_id'], r['entry_session'],
+                                a['exit_session'], b['exit_session']])
+    return {'both_stop_identical': same, 'both_stop_count': both,
+        'both_stop_mismatches': details,
+        'b_never_delays_a_stop': not delayed, 'b_delayed_a_stop': delayed,
+        'a_stop_b_preempted_count': a_stop_n}
+
+
+def trend_verdict(s: dict) -> dict:
+    checks = {
+        'reproduces_the_baseline': not s['control_reproduction_failures'],
+        'b_has_no_time_exit': bool(s['control_b_has_no_time_exit']),
+        'both_stop_identical': bool(s['both_stop_identical']),
+        'b_never_delays_a_stop': bool(s['b_never_delays_a_stop']),
+        'delta_positive': (s['delta_r_sum'] or 0) > 0,
+        'held_under_2x_cost': (s['delta_r_sum_2x'] or 0) > 0,
+        'tail_not_worse': ((s['worst_b'] or 0) >= (s['worst_a'] or 0)
+                           and (s['tail_es_b'] or 0) <= (s['tail_es_a'] or 0)),
+        'not_concentrated': ((s['top1_share'] or 1.0) <= 0.5
+                             and (s['leave_one_out'] or 0) > 0),
+    }
+    blocked = ('reproduces_the_baseline', 'b_has_no_time_exit', 'both_stop_identical',
+               'b_never_delays_a_stop')
+    if not all(checks[k] for k in blocked):
+        token = 'ENGINEERING_BLOCKED'
+    elif not checks['delta_positive']:
+        token = 'NO_IMPROVEMENT'
+    elif not checks['tail_not_worse']:
+        token = 'RISK_REJECTED'
+    elif not checks['not_concentrated']:
+        token = 'CONCENTRATED'
+    elif not checks['held_under_2x_cost']:
+        token = 'RISK_REJECTED'
+    else:
+        token = 'EVIDENCE_SUPPORTED'
+    return {'token': token, 'checks': checks}
 
 
 def main(argv=None) -> int:

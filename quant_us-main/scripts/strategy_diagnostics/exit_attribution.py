@@ -8,7 +8,8 @@ import pandas as pd
 # 原先只扫字面量，于是 `REVIEW_REDUCE`（部分减仓，仓位未清）**从来没有出现在这里**，
 # 而扫描用的正则也看不见它 —— "引擎新增原因时不会静默漏掉"那句保证当时是空的。
 # 现在测试两种写法都扫（§14「证明在注入对应缺陷时失败」）。
-KNOWN_EXIT_REASONS = ('STOP', 'GAP_STOP', 'TIME_EXIT', 'REVIEW_EXIT', 'REVIEW_REDUCE')
+KNOWN_EXIT_REASONS = ('STOP', 'GAP_STOP', 'TIME_EXIT', 'TREND_EXIT', 'REVIEW_EXIT',
+                      'REVIEW_REDUCE')
 STOP_REASONS = ('STOP', 'GAP_STOP')
 
 
