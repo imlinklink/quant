@@ -38,30 +38,38 @@ ETF_UNIVERSE = ETF_ROOT / 'universe_etf.csv'
 HISTORY_TOL = 1e-9
 
 
-def tech_master_codes() -> set[str]:
-    """13 只 TECH 的证券 id → 行情主表的 `code`。
+def master_codes(names) -> set[str]:
+    """证券 id（`SEC-US-AAPL`）→ 行情主表的 `code`（`US.AAPL`）。
 
-    **两种格式的转换只在这里定义一次**：`p2_selection_check.TECH` 是 `SEC-US-AAPL`
-    这样的证券 id，而主表 `code` 是 `US.AAPL`。
+    **两种格式的转换只在这里定义一次**。默认仍是 13 只 TECH（向后兼容）；三臂前向实验会
+    传它自己的 32 只，所以这里收一个 `names` 而不是写死 `TECH`。
     """
-    return {'US.' + sid.replace('SEC-US-', '') for sid in TECH}
+    return {'US.' + str(sid).replace('SEC-US-', '') for sid in names}
 
 
-def select_tech_master(master: pd.DataFrame) -> pd.DataFrame:
-    """从主表选出 13 只 TECH；**选不满就报错，绝不返回空表**。
+def tech_master_codes() -> set[str]:
+    return master_codes(TECH)
+
+
+def select_master(master: pd.DataFrame, names=None) -> pd.DataFrame:
+    """从主表选出给定证券（默认 13 只 TECH）；**选不满就报错，绝不返回空表**。
 
     空表会一路变成 `download(codes=[])`：下载工具对空 codes 不报错、只是什么都不做。实测
     2026-09-17 之后个股日线一直停在 09-16 —— 任务在跑、日志正常、数据一天都没前进，根因
     就是这里拿 `SEC-US-AAPL` 去匹配主表的 `US.AAPL`（0 行）。这种失败必须在这一步炸出来。
     """
-    codes = tech_master_codes()
+    codes = master_codes(TECH if names is None else names)
     selected = master[master.code.astype(str).isin(codes)]
     if selected.empty:
-        raise ValueError('TECH_MASTER_EMPTY:主表里一只 TECH 都没匹配上（code 格式变了吗？）')
+        raise ValueError('MASTER_EMPTY:主表里一只都没匹配上（code 格式变了吗？）')
     missing = codes - set(selected.code.astype(str))
     if missing:
-        raise ValueError(f'TECH_MASTER_INCOMPLETE:主表缺 {sorted(missing)}')
+        raise ValueError(f'MASTER_INCOMPLETE:主表缺 {sorted(missing)}')
     return selected
+
+
+def select_tech_master(master: pd.DataFrame) -> pd.DataFrame:
+    return select_master(master, TECH)
 
 
 def force_tail_refetch(checkpoint: Path, year: int) -> int:
@@ -134,12 +142,15 @@ def history_unchanged(hist: pd.DataFrame, old: pd.DataFrame, tol: float = HISTOR
     return ok, worst
 
 
-def refresh_panels(*, through: str | None = None) -> list[dict]:
-    """把 TECH 面板续到最新。只追加新 session；历史段超容差即中止，不写。"""
+def refresh_panels(*, through: str | None = None, names=None) -> list[dict]:
+    """把给定证券（默认 13 只 TECH）的面板续到最新。
+
+    只追加新 session；历史段超容差即中止，不写。三臂前向实验传它自己的 32 只。
+    """
     actions = pd.read_csv(ACTIONS)
     actions['security_id'] = actions.security_id.astype(str)
     out = []
-    for sid in TECH:
+    for sid in (TECH if names is None else names):
         code = 'US_' + sid.replace('SEC-US-', '')
         path = PANELS / f'{code}.csv.gz'
         raw = pd.concat([pd.read_csv(f) for f in
@@ -184,22 +195,24 @@ def refresh_live_etf(live_dir: Path) -> dict:
             'through': str(raw.session.max().date())}
 
 
-def refresh(*, live_dir: Path, through: str | None = None) -> dict:
+def refresh(*, live_dir: Path, through: str | None = None, names=None,
+            master_out: Path | None = None) -> dict:
     end = through or pd.Timestamp.today().strftime('%Y-%m-%d')
     start = (pd.Timestamp(end) - pd.Timedelta(days=14)).strftime('%Y-%m-%d')
     tech_master = ROOT / 'data/security_master_39.csv'
-    select_tech_master(pd.read_csv(tech_master)).to_csv('/tmp/_tech_master.csv', index=False)
+    master_out = Path(master_out or '/tmp/_tech_master.csv')
+    select_master(pd.read_csv(tech_master), names).to_csv(master_out, index=False)
     year = pd.Timestamp(end).year
     return {
         # 先回退覆盖上界，否则同级范围的重跑会被判定 covered 而跳过下载（见函数说明）
         'tech_refetch': force_tail_refetch(CHECKPOINT, year),
         'etf_refetch': force_tail_refetch(ETF_ROOT / 'download_none.json', year),
-        'tech_download': download(master=Path('/tmp/_tech_master.csv'), start=start, end=end,
+        'tech_download': download(master=master_out, start=start, end=end,
                                   output_root=RAW_ROOT, checkpoint=CHECKPOINT),
         'etf_download': download(master=ETF_UNIVERSE, start=start, end=end,
                                  output_root=ETF_ROOT / 'market_history',
                                  checkpoint=ETF_ROOT / 'download_none.json'),
-        'panels': refresh_panels(through=through),
+        'panels': refresh_panels(through=through, names=names),
         'live_etf': refresh_live_etf(live_dir),
     }
 
@@ -208,8 +221,18 @@ def main(argv=None):
     p = argparse.ArgumentParser(description='前向运行的行情刷新（只追加，不改历史）')
     p.add_argument('--live-dir', required=True, help='live ETF 快照目录')
     p.add_argument('--through', help='刷新到这个交易日（默认今天）')
+    p.add_argument('--universe', choices=('tech', 'forward-arms'), default='tech',
+                   help='刷新哪一批证券：tech = 13 只 TECH（默认）；'
+                        'forward-arms = 三臂前向实验的 32 只')
     args = p.parse_args(argv)
-    print(json.dumps(refresh(live_dir=Path(args.live_dir), through=args.through),
+    names = None
+    if args.universe == 'forward-arms':
+        # 惰性导入：三臂的证券清单只有一处定义（`forward_arms.arm_names`），不在这里再写一份
+        from scripts.strategy_diagnostics.forward_arms import arm_names
+        names = arm_names()['B']
+    master_out = Path('/tmp/_master_%s.csv' % args.universe)
+    print(json.dumps(refresh(live_dir=Path(args.live_dir), through=args.through,
+                             names=names, master_out=master_out),
                      ensure_ascii=False, indent=2))
     return 0
 

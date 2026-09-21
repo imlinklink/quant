@@ -84,13 +84,14 @@ class TechMasterTests(unittest.TestCase):
         """主表若真的长成 `SEC-US-AAPL`（或又换了格式），要炸出来，不能静默空表。"""
         with self.assertRaises(ValueError) as ctx:
             select_tech_master(self.master(['SEC-US-AAPL', 'SEC-US-AMD']))
-        self.assertIn('TECH_MASTER_EMPTY', str(ctx.exception))
+        # 错误码去掉了 TECH 前缀：现在也服务三臂前向实验的 32 只（不只 TECH）
+        self.assertIn('MASTER_EMPTY', str(ctx.exception))
 
     def test_少一只也要报错(self):
         codes = sorted(tech_master_codes())[:-1]
         with self.assertRaises(ValueError) as ctx:
             select_tech_master(self.master(codes))
-        self.assertIn('TECH_MASTER_INCOMPLETE', str(ctx.exception))
+        self.assertIn('MASTER_INCOMPLETE', str(ctx.exception))
 
     def test_real_master_still_contains_all_thirteen(self):
         """对着**真实**主表跑一遍：主表换代/改格式时这条会先失败。"""
