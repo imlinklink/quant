@@ -2,11 +2,13 @@
 import json
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 import pandas as pd
 
 from scripts.medium_term.p2_selection_check import TECH
+from scripts.portfolio_shadow import refresh_data
 from scripts.portfolio_shadow.refresh_data import (HISTORY_TOL, ROOT, force_tail_refetch,
                                                    history_unchanged, select_tech_master,
                                                    tech_master_codes)
@@ -19,43 +21,162 @@ def frame(rows):
 class HistoryUnchangedTests(unittest.TestCase):
     def test_identical_frames_pass(self):
         f = frame([['2026-01-05', 100.0, 99.0]])
-        ok, worst = history_unchanged(f, f)
+        ok, worst, adjusted = history_unchanged(f, f)
         self.assertTrue(ok)
         self.assertEqual(worst, 0.0)
+        self.assertEqual(adjusted, 0.0)
 
     def test_float_noise_within_tolerance_passes(self):
         """重建面板与既有文件之间的差异只有浮点求和顺序噪声（实测 ≤5.7e-14）。"""
         a = frame([['2026-01-05', 100.0, 99.0]])
         b = frame([['2026-01-05', 100.0, 99.0 + 1e-13]])
-        ok, worst = history_unchanged(a, b)
+        ok, worst, adjusted = history_unchanged(a, b)
         self.assertTrue(ok)
         self.assertLess(worst, HISTORY_TOL)
+        self.assertLess(adjusted, HISTORY_TOL)
 
-    def test_a_real_change_is_rejected(self):
-        """哪怕一格真的变了也必须拒绝 —— 那会让已冻结的回测对照失去可复现性。"""
+    def test_a_raw_change_is_rejected(self):
+        """**原始列**：哪怕一格真的变了也必须拒绝 —— 那是数据被改写。"""
         a = frame([['2026-01-05', 100.0, 99.0]])
-        b = frame([['2026-01-05', 100.0, 99.01]])
-        ok, worst = history_unchanged(a, b)
+        b = frame([['2026-01-05', 100.01, 99.0]])
+        ok, worst, _adjusted = history_unchanged(a, b)
         self.assertFalse(ok)
         self.assertGreater(worst, HISTORY_TOL)
 
-    def test_one_side_only_nan_is_rejected(self):
+    def test_an_adjusted_restatement_is_reported_not_rejected(self):
+        """**复权列**：行动表新增一条记录会把整段历史按同一因子重述，这是构造性的。
+
+        实测形状：META 2026-09-21 新宣告股息 0.525 ⇒ 整段 `asof_close` 平移 7.9e-4。
+        旧实现把它判成数据损坏，日作业从此停摆。现在放行，但幅度必须报出来。
+        """
+        a = frame([['2026-01-05', 100.0, 99.0]])
+        b = frame([['2026-01-05', 100.0, 99.0 * (1 - 7.886e-4)]])
+        ok, raw_worst, adjusted = history_unchanged(a, b)
+        self.assertTrue(ok, '复权列重述不得阻塞日常刷新')
+        self.assertEqual(raw_worst, 0.0)
+        self.assertGreater(adjusted, HISTORY_TOL)
+
+    def test_a_raw_column_gaining_a_value_is_rejected(self):
+        """原始列出现/消失一个值 = 数据被改写 ⇒ 硬失败。"""
+        a = frame([['2026-01-05', None, 99.0]])
+        b = frame([['2026-01-05', 100.0, 99.0]])
+        ok, _w, _a = history_unchanged(a, b)
+        self.assertFalse(ok)
+
+    def test_a_derived_column_gaining_a_value_is_only_reported(self):
+        """复权列拿到值（例如 MA200 预热够了）是构造性的，不该阻塞刷新。"""
         a = frame([['2026-01-05', 100.0, None]])
         b = frame([['2026-01-05', 100.0, 99.0]])
-        ok, _ = history_unchanged(a, b)
-        self.assertFalse(ok)
+        ok, raw_worst, _adjusted = history_unchanged(a, b)
+        self.assertTrue(ok)
+        self.assertEqual(raw_worst, 0.0)
 
     def test_both_nan_is_not_a_change(self):
         f = frame([['2026-01-05', 100.0, None]])
-        ok, _ = history_unchanged(f, f)
+        ok, _w, _a = history_unchanged(f, f)
         self.assertTrue(ok)
 
     def test_row_count_mismatch_fails_closed(self):
-        """行数不一致时 pandas 按索引对齐会造出单侧 NaN —— 必须判为改动（宁可误停）。"""
+        """行数不一致是**结构性**改动：显式判，不依赖 pandas 对齐时的 dtype 意外。"""
         a = frame([['2026-01-05', 100.0, 99.0], ['2026-01-06', 101.0, 100.0]])
         b = frame([['2026-01-05', 100.0, 99.0]])
-        ok, _ = history_unchanged(a, b)
+        ok, _w, _a = history_unchanged(a, b)
         self.assertFalse(ok)
+
+
+class ClosedSessionScopingTests(unittest.TestCase):
+    """刷新只能刷到**收盘已过**的 session，且要能自愈早先写进去的未收盘行。
+
+    实测动机：2026-09-22 00:09（美东 09-21 盘中）跑刷新，把当天那根还没走完的 bar
+    追加进了面板；两分钟后同一行的 raw_close/volume 就变了，于是「只追加」的守卫
+    在下一次刷新时必然失败 —— 日作业会因此永久停摆。
+    """
+
+    def setUp(self):
+        # 先把真身存下来：`refresh_data.pd` 就是 pandas 模块，直接 patch `pd.read_csv`
+        # 会让下面那个 side_effect 递归调到自己（RecursionError）。
+        self._real_read_csv = pd.read_csv
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.raw = root / 'raw'
+        self.panels = root / 'panels'
+        self.panels.mkdir(parents=True)
+        (self.raw / 'day/none/year=2026').mkdir(parents=True)
+        self.sid = 'SEC-US-AAPL'
+        self.sessions = pd.date_range('2026-08-03', periods=10, freq='B').normalize()
+        rows = pd.DataFrame({
+            'code': 'US.AAPL', 'time_key': self.sessions,
+            'open': [100.0] * 10, 'high': [101.0] * 10, 'low': [99.0] * 10,
+            'close': [100.0] * 10, 'volume': [1_000] * 10})
+        rows.to_csv(self.raw / 'day/none/year=2026/US_AAPL.csv.gz', index=False,
+                    compression='gzip')
+        self.actions = pd.DataFrame(columns=['security_id', 'action_type', 'ex_date',
+                                             'ratio', 'cash_amount'])
+        # 面板必须先存在（`refresh_panels` 读它做历史段比对）—— 用与生产同一条管线造：
+        # 拿原始行情走 `build_asof_panel`，这样「旧面板」与「重建面板」的差异只来自
+        # 我故意注入的改动。
+        norm = refresh_data.normalize(rows, 'day').rename(columns={'date': 'session'})
+        norm['security_id'] = self.sid
+        panel = refresh_data.build_asof_panel(norm, self.actions)
+        panel.to_csv(self.panels / 'US_AAPL.csv.gz', index=False, compression='gzip')
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _read_csv(self, path, *a, **kw):
+        if str(path).endswith('actions.csv'):
+            return self.actions.copy()
+        return self._real_read_csv(path, *a, **kw)
+
+    def _build(self, through):
+        """在临时目录上跑一次 `refresh_panels`（只放一只证券）。"""
+        (self.panels / 'actions.csv').write_text('security_id\n')
+        with unittest.mock.patch.object(refresh_data, 'PANELS', self.panels), \
+             unittest.mock.patch.object(refresh_data, 'RAW_ROOT', self.raw), \
+             unittest.mock.patch.object(refresh_data, 'ACTIONS',
+                                        str(self.panels / 'actions.csv')), \
+             unittest.mock.patch.object(refresh_data.pd, 'read_csv',
+                                        side_effect=self._read_csv):
+            return refresh_data.refresh_panels(through=through, names=[self.sid])
+
+    def test_history_before_the_last_row_must_be_raw_identical(self):
+        self._build(str(self.sessions[-1].date()))
+        # 改写历史段（倒数第二行）的原始价 ⇒ 必须拒绝
+        rows = pd.read_csv(self.raw / 'day/none/year=2026/US_AAPL.csv.gz')
+        rows.loc[5, 'close'] = 123.0
+        rows.to_csv(self.raw / 'day/none/year=2026/US_AAPL.csv.gz', index=False,
+                    compression='gzip')
+        with self.assertRaises(ValueError) as ctx:
+            self._build(str(self.sessions[-1].date()))
+        self.assertIn('PANEL_RAW_HISTORY_CHANGED', str(ctx.exception))
+
+    def test_an_unclosed_row_already_stored_is_dropped_and_healed(self):
+        """面板里已经有一行「当时还没收盘」的 session ⇒ 丢掉它，下次正常刷新自己补上。"""
+        self._build(str(self.sessions[-1].date()))
+        panel = self.panels / 'US_AAPL.csv.gz'
+        stored = pd.read_csv(panel)
+        # 伪造一行未收盘的 session（盘中写入的部分 bar）
+        extra = stored.iloc[[-1]].copy()
+        # 写成与文件里其它行**同一格式**的日期串：混进 Timestamp 会让再次读取时
+        # 格式推断给出 NaT（本项目踩过同类的混合格式坑）
+        extra['session'] = str((pd.Timestamp(self.sessions[-1])
+                                + pd.Timedelta(days=1)).date())
+        extra['raw_close'] = 777.0
+        pd.concat([stored, extra], ignore_index=True).to_csv(panel, index=False,
+                                                            compression='gzip')
+        out = self._build(str(self.sessions[-1].date()))
+        self.assertEqual(out[0]['dropped_unclosed_rows'], 1)
+        after = pd.read_csv(panel)
+        self.assertLessEqual(pd.to_datetime(after.session).max(),
+                             pd.Timestamp(self.sessions[-1]))
+
+    def test_the_default_comes_from_the_closed_session_gate(self):
+        """默认 `through` 必须来自 `data_readiness.expected_session`（同一处判据）。"""
+        with unittest.mock.patch(
+                'scripts.portfolio_shadow.data_readiness.expected_session',
+                return_value=str(self.sessions[3].date())) as gate:
+            self._build(None)
+        self.assertTrue(gate.called, '默认值必须走数据就绪门，而不是「今天」')
 
 
 class TechMasterTests(unittest.TestCase):

@@ -8,6 +8,7 @@
 import argparse
 import json
 import socket
+import sqlite3
 import subprocess
 import sys
 import time
@@ -166,6 +167,53 @@ def shadow_job_check(days: int = 3):
         return 1, repr(exc)
 
 
+def budget_check(cfg: dict) -> list[str]:
+    """模型调用预算是否已耗尽（规划 §4.1：启动时必须能在看护里看见）。
+
+    **用原始 SQL 读账本，不走 `ShadowStore` 的 ORM**：看护跑在主 checkout（schema 9），
+    而 L1 实验的账本由 worktree（schema 10）写入 —— ORM 的版本守卫会直接拒绝打开。
+    这里读的是一个**文本字段**（Application 的 reason_code），不解释账户状态，
+    所以绕开守卫是正确的，不是取巧。
+
+    **告警文案不含次数**：带次数的话它每弃权一次就变一次，`:func:`alert_if_changed` 的
+    去重会失效 —— 变成每次检查弹一次。这正是 `shadow_job_check` 记过的同一条教训。
+    次数写进日志明细，不进问题集合。
+    """
+    base = (cfg.get('shadow') or {}).get('base') or 'quant_us-main/data/portfolio_shadow'
+    root = ROOT / base
+    problems = []
+    for manifest_path in sorted(root.glob('*/manifest.json')):
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            continue
+        if not (manifest.get('llm_policy') or {}).get('model_budget_micro'):
+            continue
+        ledger = manifest_path.parent / 'ledger.sqlite3'
+        if not ledger.exists():
+            continue
+        experiment = manifest_path.parent.name
+        try:
+            con = sqlite3.connect(f'file:{ledger}?mode=ro', uri=True)
+            try:
+                row = con.execute("SELECT COUNT(*) FROM shadow_applications "
+                                  "WHERE action LIKE '%ABSTAIN%' AND body LIKE ?",
+                                  ('%MODEL_BUDGET_EXHAUSTED%',)).fetchone()
+            finally:
+                con.close()
+        except sqlite3.Error as exc:
+            problems.append(f'模型预算检查失败：{experiment}')
+            log(f'❌ 模型预算检查失败 {experiment}: {exc}')
+            continue
+        count = int(row[0] if row else 0)
+        if count:
+            problems.append(f'模型调用预算已耗尽：{experiment}')
+            log(f'❌ 模型调用预算已耗尽 {experiment}（已按预算弃权 {count} 次）')
+        else:
+            log(f'✅ {experiment} 模型调用预算未耗尽')
+    return problems
+
+
 def port_open(port: int, host: str = '127.0.0.1') -> bool:
     try:
         with socket.create_connection((host, port), timeout=3):
@@ -255,6 +303,9 @@ def check_once(cfg: dict, now: datetime = None) -> int:
         else:
             problems.append(f'{label} 与预期不一致（需同步）')
             log(f'❌ {label} 与预期不一致:\n{detail}')
+
+    # 模型调用预算（规划 §4.1）：耗尽是**看得见的一次性事件**，不是每天一弹
+    problems.extend(budget_check(cfg))
 
     # 每日作业完整性（理由见 `shadow_job_check`）：**缺口必须被看见**
     rc, detail = shadow_job_check()

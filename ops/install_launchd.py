@@ -64,12 +64,40 @@ JOBS = {
         'label': 'com.quant.shadow-daily',
         'argv': ['/bin/bash', str(ROOT / 'ops' / 'shadow_daily.sh')],
         'workdir': str(ROOT),
+        # **显式绑定实验**：不再靠自动发现。目录里出现第二个实验时，自动发现会按设计报错
+        # 拒绝猜 —— 那是好事，但生产任务不该因此停摆。身份写死在排程里，改动必须改这里。
+        'env': {'SHADOW_EXPERIMENT': 'M1-FORWARD-S-20260917'},
         'stdout': 'shadow_daily.log',
         'stderr': 'shadow_daily.err.log',
         'process_type': 'Background',
         'run_at_load': False,
         'calendar': [{'Weekday': w, 'Hour': h, 'Minute': m}
                      for w in WEEKDAYS for (h, m) in ATTEMPTS],
+    },
+    'shadow-daily-l1': {
+        # L1 持仓角色的纸面前向实验。与上面那条是**两条独立作业**：
+        #   · 代码目录不同：这条跑 worktree（`quant-research`，账本 schema 10），
+        #     上面那条跑主 checkout（schema 9）—— 两者**必须**各用各的代码；
+        #   · 证据目录不同：L1 有自己的 `evidence/`（`runs/` 才不会互相覆盖）；
+        #   · 日志不同：`shadow_daily_l1.log`。
+        # 三者任一混用都会写出「用错代码读错账本」或互相覆盖的运行记录。
+        'label': 'com.quant.shadow-daily-l1',
+        'argv': ['/bin/bash', str(Path('/Users/wh1817w/quant-research') / 'ops' /
+                                 'shadow_daily.sh')],
+        'workdir': '/Users/wh1817w/quant-research',
+        'env': {'SHADOW_EXPERIMENT': 'L1-POSITION-20260922',
+                'SHADOW_BASE': '/Users/wh1817w/quant/quant_us-main/data/portfolio_shadow',
+                'SHADOW_EVIDENCE': ('/Users/wh1817w/quant/quant_us-main/data/'
+                                    'portfolio_shadow/L1-POSITION-20260922/evidence/'
+                                    'live.csv')},
+        'stdout': 'shadow_daily_l1.log',
+        'stderr': 'shadow_daily_l1.err.log',
+        'process_type': 'Background',
+        'run_at_load': False,
+        # 与上面那条错开 30 分钟（16:40/18:10/19:40 vs 17:10/18:40/20:40）：
+        # 两者共用同一份行情刷新锁，错开减少白跑；三者都赶在美东 09:20 决策截止之前。
+        'calendar': [{'Weekday': w, 'Hour': h, 'Minute': m}
+                     for w in WEEKDAYS for (h, m) in ((17, 10), (18, 40), (20, 40))],
     },
     'trading-service': {
         'label': 'com.quant.trading-service',
@@ -128,7 +156,8 @@ def build_plist(job: str = 'shadow-daily') -> dict:
         'StandardOutPath': str(LOG_DIR / spec['stdout']),
         'StandardErrorPath': str(LOG_DIR / spec['stderr']),
         'RunAtLoad': spec['run_at_load'],
-        'EnvironmentVariables': {'PATH': '/usr/bin:/bin:/usr/sbin:/sbin'},
+        'EnvironmentVariables': {'PATH': '/usr/bin:/bin:/usr/sbin:/sbin',
+                                 **spec.get('env', {})},
     }
     # 逐项可选，避免给不需要的作业塞空键（plist 里出现 `KeepAlive: False` 那种
     # "显式关掉"和"根本没这项"含义不同，读的人容易误解）

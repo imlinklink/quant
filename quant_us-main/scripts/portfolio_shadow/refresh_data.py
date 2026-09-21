@@ -120,29 +120,54 @@ def download(*, master: Path, start: str, end: str, output_root: Path, checkpoin
     return {}
 
 
-def history_unchanged(hist: pd.DataFrame, old: pd.DataFrame, tol: float = HISTORY_TOL):
-    """历史段是否逐格不变（浮点噪声容差内）。返回 (是否不变, 最大绝对差)。
+#: 面板里的**原始**列。它们变了 = 数据被改写（无论怎么解释都不该发生）⇒ 必须停。
+RAW_PANEL_COLUMNS = ('raw_open', 'raw_high', 'raw_low', 'raw_close', 'volume')
 
-    这是刷新里**唯一会动的防线**：asof 面板是已冻结回测对照的输入，追加新 session 时若
-    改动了历史任何一格，那些对照就失去可复现性。宁可停在这一步。
+
+def history_unchanged(hist: pd.DataFrame, old: pd.DataFrame, tol: float = HISTORY_TOL):
+    """历史段比对。返回 `(原始列是否逐格不变, 原始列最大差, 复权列最大差)`。
+
+    **两类列必须分开判**：
+
+    · **原始列**（`RAW_PANEL_COLUMNS`）变了 = 数据被改写 ⇒ 硬失败、宁可停在这一步。
+      这是「只追加」的全部意义。
+    · **复权列**（`asof_*` / `scale_to_next`）变了 = **构造性的**：面板是「锚在最新一天」的
+      复权视图，行动表新增一条记录（例如新宣告的股息）就会把整段历史按同一因子重述。
+      这不是损坏 —— 而且 P0-4 已证明这些列派生的信号全是**比较型**，对整段同因子缩放不变。
+      实测：META 2026-09-21 新宣告股息 0.525 使整段 `asof_close` 平移 7.9e-4，
+      旧实现在这里把**日常刷新**判成了数据损坏，日作业从此停摆。
+
+    复权列的差异必须**报出来**（`refresh_panels` 的输出里有 `adjusted_max_delta`），
+    不许静默通过 —— 这条防线的价值在于「看得见」，不在于「一律拒绝」。
     """
-    worst, ok = 0.0, True
+    # **结构性检查放在最前**：行数不一致就是改动，不该依赖 dtype 的意外行为。
+    # 实测教训：`(a.isna() ^ b.isna()).any()` 在等长以外的情形会因 pandas 的 `skipna=True`
+    # 把 NaN 跳过，于是「重建少了/多了几行」可能整条溜过去 —— 旧实现只是恰好被 `session`
+    # 列的 object dtype 兜住（object 上的 NaN 不会被 skipna 跳过）。显式判，不靠巧合。
+    if len(hist) != len(old):
+        return False, float('inf'), float('inf')
+    raw_worst, adj_worst, ok = 0.0, 0.0, True
     for col in old.columns:
         a = pd.to_numeric(hist[col], errors='coerce').astype(float)
         b = pd.to_numeric(old[col], errors='coerce').astype(float)
+        is_raw = col in RAW_PANEL_COLUMNS
         both_nan = a.isna() & b.isna()
         if both_nan.all():
             continue
         # 单侧 NaN = 值出现或消失，是**真的改动**：`NaN > tol` 恒为 False，不显式判别
         # 就会被静默放行（行数不一致时 pandas 按索引对齐后正是这种形态）
-        if (a.isna() ^ b.isna()).any():
-            ok = False
+        # `.fillna(True)`：对齐产生的 NaN 一律当「有改动」（fail-closed），
+        # 不让 skipna 把它吞掉
+        changed = bool((a.isna() ^ b.isna()).fillna(True).any())
         delta = (a - b).abs()
-        if delta.notna().any():
-            worst = max(worst, float(delta.max()))
-        if (delta[~both_nan] > tol).any():
-            ok = False
-    return ok, worst
+        worst = 0.0 if not delta.notna().any() else float(delta.max())
+        changed = changed or bool((delta[~both_nan] > tol).any())
+        if is_raw:
+            raw_worst = max(raw_worst, worst)
+            ok = ok and not changed
+        else:
+            adj_worst = max(adj_worst, worst)
+    return ok, raw_worst, adj_worst
 
 
 def refresh_panels(*, through: str | None = None, names=None) -> list[dict]:
@@ -152,6 +177,16 @@ def refresh_panels(*, through: str | None = None, names=None) -> list[dict]:
     """
     actions = pd.read_csv(ACTIONS)
     actions['security_id'] = actions.security_id.astype(str)
+    if through is None:
+        # **默认只刷到「收盘已过」的 session**（复用数据就绪门的同一处判据）。
+        # 盘中跑刷新会把当天那根**还没走完的 bar** 追加进面板，它下一分钟就变了 ——
+        # 于是「只追加」的守卫在下一次刷新时必然失败，日作业就此停摆。
+        # 实测：2026-09-22 00:09（美东 09-21 盘中）手动跑刷新踩到过，AAPL 最后一行
+        # 的 raw_close/volume 两分钟内就变了。
+        from .data_readiness import expected_session
+        closed = expected_session()
+        if closed:
+            through = closed
     out = []
     for sid in (TECH if names is None else names):
         code = 'US_' + sid.replace('SEC-US-', '')
@@ -164,22 +199,43 @@ def refresh_panels(*, through: str | None = None, names=None) -> list[dict]:
         rebuilt = build_asof_panel(norm, actions[actions.security_id.eq(sid)])
         old = pd.read_csv(path)
         old['session'] = pd.to_datetime(old.session).dt.normalize()
-        last = old.session.max()
-        if through and pd.Timestamp(through) <= last:
-            out.append({'security_id': sid, 'from': str(last.date()), 'appended': 0,
-                        'note': 'already_current'})
-            continue
-        hist = rebuilt[rebuilt.session <= last].reset_index(drop=True)[list(old.columns)]
-        ok, worst = history_unchanged(hist, old)
+        if through:
+            rebuilt = rebuilt[rebuilt.session <= pd.Timestamp(through)]
+        # 已存的行里，**未收盘的 session** 是历史遗留（早先盘中跑刷新写进去的）：
+        # 丢掉它，让下一次正常刷新自己补上正确的收盘值。留着它会永久卡住守卫。
+        keep = old[old.session <= rebuilt.session.max()].reset_index(drop=True)
+        dropped = len(old) - len(keep)
+        last = keep.session.max()
+        cols = list(old.columns)
+        # 历史段比对**排除最后一行**：那一行可能正来自一个当时还没收盘的 session，
+        # 重述它是数据源在给出完整值，不是历史被改写。
+        head_new, head_old = (rebuilt[rebuilt.session < last].reset_index(drop=True)[cols],
+                              keep[keep.session < last].reset_index(drop=True)[cols])
+        ok, raw_worst, adj_worst = history_unchanged(head_new, head_old)
         if not ok:
-            # 宁可停在这里，也不要让已冻结的对照结果失去可复现性
-            raise ValueError(f'PANEL_HISTORY_CHANGED:{sid}:max|delta|={worst:.3e}')
-        new = rebuilt[rebuilt.session > last]
-        if len(new):
-            pd.concat([old, new], ignore_index=True).to_csv(path, index=False, compression='gzip')
+            # 原始列被改写：宁可停在这里，也不要让已冻结的对照失去可复现性
+            raise ValueError(f'PANEL_RAW_HISTORY_CHANGED:{sid}:max|delta|={raw_worst:.3e}')
+        last_old = keep[keep.session == last].reset_index(drop=True)[cols]
+        last_new = rebuilt[rebuilt.session == last].reset_index(drop=True)[cols]
+        last_delta = 0.0
+        if len(last_old) and len(last_new):
+            for col in cols:
+                d = (pd.to_numeric(last_new[col], errors='coerce').astype(float)
+                     - pd.to_numeric(last_old[col], errors='coerce').astype(float)).abs()
+                if d.notna().any():
+                    last_delta = max(last_delta, float(d.max()))
+        new_file = pd.concat([keep[keep.session < last], last_new], ignore_index=True) \
+            if len(last_new) else keep
+        changed = dropped or last_delta > HISTORY_TOL or len(new_file) != len(keep)
+        if changed:
+            new_file.to_csv(path, index=False, compression='gzip')
         out.append({'security_id': sid, 'from': str(last.date()),
-                    'to': str(rebuilt.session.max().date()), 'appended': int(len(new)),
-                    'history_max_delta': worst})
+                    'to': str(new_file.session.max().date()),
+                    'appended': int(len(new_file) - len(keep)),
+                    'dropped_unclosed_rows': int(dropped),
+                    'last_row_restated': bool(last_delta > HISTORY_TOL),
+                    'last_row_delta': last_delta,
+                    'history_max_delta': raw_worst, 'adjusted_max_delta': adj_worst})
     return out
 
 
@@ -239,6 +295,10 @@ def _release(lock: Path) -> None:
 
 def _refresh(*, live_dir: Path, through: str | None = None, names=None,
              master_out: Path | None = None) -> dict:
+    if through is None:
+        # 与 `refresh_panels` 同一口径：不要把未收盘的当天当成已完成的日子去取
+        from .data_readiness import expected_session
+        through = expected_session()
     end = through or pd.Timestamp.today().strftime('%Y-%m-%d')
     start = (pd.Timestamp(end) - pd.Timedelta(days=14)).strftime('%Y-%m-%d')
     tech_master = ROOT / 'data/security_master_39.csv'
