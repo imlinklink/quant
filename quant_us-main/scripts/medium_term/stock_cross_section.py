@@ -32,6 +32,20 @@ def _apply_members(snapshot: pd.DataFrame, members: pd.DataFrame,
     return out
 
 
+def rank_monthly_snapshot(snapshot: pd.DataFrame, decision, *, members=None) -> pd.DataFrame:
+    """（可选）时点宇宙掩码 → 排名。**两条路径共用这一处。**
+
+    批处理（`generate_monthly_candidates`）与影子增量生成器
+    （`IncrementalCandidateGenerator._generate_monthly`）各自构造截面 —— 那一步两者
+    **本来就不同**（缺 actions 时一个用 `momentum_snapshot`、另一个用 PIT 复权视图），
+    不该硬并。要共用的是**掩码与排名**：掩码一开始只加到了批量那条上，于是"前向跑 B 臂"
+    与"回测跑 B 臂"会在宇宙口径上悄悄分叉 —— 而两个 B 臂只允许差"是不是前向"。
+    """
+    if members is not None:
+        snapshot = _apply_members(snapshot, members, decision)
+    return rank_cross_section(snapshot)
+
+
 def generate_monthly_candidates(prices: pd.DataFrame, market: pd.DataFrame, *,
                                 price_col='asof_close', market_price_col='asof_close',
                                 market_ma_col='asof_ma200', top_n=5,
@@ -58,12 +72,11 @@ def generate_monthly_candidates(prices: pd.DataFrame, market: pd.DataFrame, *,
     calendar = normalize_sessions(prices.session)
     frames = []
     for decision in month_end_sessions(calendar):
-        snap = (point_in_time_momentum_snapshot(prices, actions, decision)
-                if actions is not None else
-                momentum_snapshot(prices, decision, price_col=price_col))
-        if members is not None:
-            snap = _apply_members(snap, members, decision)
-        snap = rank_cross_section(snap)
+        snap = rank_monthly_snapshot(
+            point_in_time_momentum_snapshot(prices, actions, decision)
+            if actions is not None else
+            momentum_snapshot(prices, decision, price_col=price_col),
+            decision, members=members)
         execution = next_session(calendar, decision)
         market_row = m.loc[decision] if decision in m.index else None
         gate = bool(market_row is not None and

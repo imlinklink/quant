@@ -124,8 +124,11 @@ class IncrementalCandidateGenerator:
                  top_n: int = 5, max_wait_sessions: int = 20, entry_rule: str = 'b3',
                  forward_horizon: int = DEFAULT_FORWARD_HORIZON,
                  require_matured: bool = True, parent_strategy_id: str = '', now=None,
-                 observation_sink=None):
+                 observation_sink=None, members=None):
         self.observation_sink = observation_sink
+        # 时点宇宙掩码（可选）：见 `stock_cross_section.monthly_snapshot`。**与批处理路径
+        # 共用同一处实现**，否则"前向的 B 臂"与"回测的 B 臂"会在宇宙口径上分叉。
+        self.members = members
         self.prices = prices
         self.view_bars = prices[['security_id', 'session', 'raw_open', 'raw_high', 'raw_low',
                                  'raw_close', 'volume']].rename(columns={
@@ -205,9 +208,12 @@ class IncrementalCandidateGenerator:
 
     def _generate_monthly(self, session) -> None:
         from scripts.medium_term.momentum_features import point_in_time_momentum_snapshot
-        from scripts.medium_term.stock_cross_section import rank_cross_section
-        snap = rank_cross_section(point_in_time_momentum_snapshot(
-            self.view_bars, self.actions, session))
+        from scripts.medium_term.stock_cross_section import rank_monthly_snapshot
+        # 掩码与排名走**与批处理同一处实现**（`rank_monthly_snapshot`），否则前向的 B 臂
+        # 与回测的 B 臂会在宇宙口径上悄悄分叉。
+        snap = rank_monthly_snapshot(
+            point_in_time_momentum_snapshot(self.view_bars, self.actions, session),
+            session, members=self.members)
         gate = self._market_gate(session)
         # 轮次身份**在 sink 之前、无条件**登记：观察器不得改变生成器的任何状态
         # （§14「观察器旁路」）。这里覆盖当月截面里的**每一只**证券 —— 未入选的那些
