@@ -62,12 +62,19 @@ def build_position_packet(*, security_id, trade, protection, events, as_of,
                           opportunity_id, reviewed_session, shares, entry_price_micro,
                           mark_price_micro, thesis=None, identity=None, evidence=None,
                           model_knowledge_cutoff=None, market_context=None,
-                          fetch_status='OK', expires_at=None) -> dict:
+                          fetch_status='OK', expires_at=None, technical=None,
+                          open_actions=None) -> dict:
     """构建持仓评审用的冻结证据包。
 
     `trade`/`protection` 描述的是**评审主体**（R 账户持仓）；`shares`/`mark_price_micro`
     用于关键数据判定。`as_of` 是证据的实际采集时刻，必须落在
     [评审日收盘, 执行日截止] 之间（设计 §3.1/§3.2 是两个不同的时刻，不能混）。
+
+    `technical`：`strategy_research.technical_packet` 算出的逐项技术事实。给定它时，
+    **充分性以技术包自己的标准为准**（§6.2），新闻只是可选输入 —— 否则「不接公司事件源」
+    会让这个角色永远 `LLM_INSUFFICIENT`、模型永不被调用。不给它时行为与引入前完全相同。
+    `open_actions`：本轮**只开放**的动作集合（§6.1 限定角色）。给定即过滤动作模板，
+    并在包里记下这个集合供校验器强制。
     """
     as_of_dt = _parse_iso(as_of)
     if as_of_dt is None:
@@ -93,6 +100,8 @@ def build_position_packet(*, security_id, trade, protection, events, as_of,
     allowed_actions = build_position_action_templates(
         trade=trade_body, active_stop=float(protection.get('active_stop') or 0.0),
         expires_at=expires)
+    if open_actions is not None:
+        allowed_actions = [t for t in allowed_actions if t.get('action') in set(open_actions)]
 
     # 关键数据（BLOCK 级）：缺任一，模型就没有可判断的持仓状态，且照常持仓反而是错的
     critical_missing = []
@@ -115,8 +124,25 @@ def build_position_packet(*, security_id, trade, protection, events, as_of,
                                           require_observed_at=require_observed_at)
     quote_observed = _parse_iso((market_context or {}).get('observed_at'))
 
+    # 技术事实（§6.2）：可逐字引用、归属为本持仓证券。排在新闻之前 —— 它才是持仓判断的
+    # 主输入，新闻是可选的背景。
+    tech = {}
+    tech_items = []
+    tech_sufficiency = None
+    if technical:
+        from scripts.strategy_research.technical_packet import (sufficiency as _suff,
+                                                                to_evidence_items)
+        tech_sufficiency = _suff(technical)
+        tech = {'schema_version': tech_sufficiency['schema_version'],
+                'facts': {name: fact.as_dict() for name, fact in sorted(technical.items())},
+                'sufficiency': tech_sufficiency}
+        tech_items = to_evidence_items(technical, security_id=security_id, as_of=as_of_iso)
+
     if critical_missing or (quote_observed is not None and quote_observed > as_of_dt):
         quality = 'BLOCK'
+    elif tech_sufficiency is not None:
+        # 有技术包 ⇒ 充分性以它为准（新闻缺失不再降级）
+        quality = 'OK' if tech_sufficiency['level'] == 'OK' else 'LLM_INSUFFICIENT'
     elif not usable_events:
         quality = 'LLM_INSUFFICIENT'
     else:
@@ -138,7 +164,7 @@ def build_position_packet(*, security_id, trade, protection, events, as_of,
                      **(identity or {})},
         'protection': dict(protection),
         'thesis': thesis or {},
-        'new_evidence': _to_new_evidence(usable_events, as_of_dt),
+        'new_evidence': [*tech_items, *_to_new_evidence(usable_events, as_of_dt)],
         'removed_or_expired_evidence_ids': [],
         'allowed_actions': allowed_actions,
         'market_context': {'price': mark_price_micro, 'price_unit': 'micro_usd',
@@ -158,6 +184,17 @@ def build_position_packet(*, security_id, trade, protection, events, as_of,
                        'packet_schema_version': POSITION_PACKET_SCHEMA_VERSION},
     }
     packet['packet_id'] = stable_id('position_packet', packet)
+    if open_actions is not None:
+        # 只在限定时才写这个键：默认路径的包保持与引入前逐字段相同（packet_id 也不变）
+        packet['allowed_action_set'] = sorted(set(open_actions))
+    if tech:
+        # 同理：不给技术包就不新增键，legacy 包的 packet_id 一字不变
+        packet['technical'] = tech
+        packet['data_quality'].update({
+            'technical_sufficiency': tech_sufficiency['level'],
+            'technical_required_missing': tech_sufficiency['required_missing'],
+            'news_events': len(usable_events), 'technical_facts': len(tech_items)})
+        packet['packet_id'] = stable_id('position_packet', packet)
     return packet
 
 

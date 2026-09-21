@@ -8,6 +8,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from decimal import Decimal, ROUND_HALF_UP
 
+from mutifactor.llm.contracts.position_v2 import POSITION_ACTIONS
+
 from scripts.live_trading.decision_ledger.event_store import digest, stable_id
 
 MICRO = 1_000_000  # 1 USD = 1e6 微美元
@@ -48,7 +50,7 @@ POLICY_KEYS = {
     'execution_policy': ('entry_rule', 'exit_policy_id', 'horizon', 'max_wait_sessions'),
     'llm_policy': ('overlay', 'use_real_model', 'knowledge_cutoff', 'evidence_mode',
                    'evidence_window_days', 'evidence_max_events', 'position_overlay',
-                   'portfolio_review'),
+                   'portfolio_review', 'technical_packet', 'open_actions'),
     'evaluation_protocol': ('main_metric', 'enrollment_window', 'review_date',
                             'cost_allocation'),
 }
@@ -151,6 +153,20 @@ class Manifest:
                                   f'（需要模型判断的角色必填正整数）')
         if not self.calendar_version:
             errors.append('calendar_version 缺失')
+        # 技术包（规划 §6.2）与开放动作集（§6.1）：两者必须**一起**出现在持仓角色上。
+        # 只开技术包不给动作集 ⇒ 模型仍可返回 reduce/post_exit_review，本轮的限定角色失效；
+        # 只给动作集不开技术包 ⇒ 门仍按新闻判充分性，模型永远不被调用。都要 fail-closed。
+        if self.llm_policy.get('technical_packet'):
+            if self.llm_policy.get('position_overlay') != 'position_action':
+                errors.append('llm_policy.technical_packet 需要 position_overlay=position_action')
+            actions = self.llm_policy.get('open_actions')
+            if not isinstance(actions, (list, tuple)) or not actions:
+                errors.append(f'llm_policy.open_actions 缺失或非法：{actions!r}')
+            else:
+                unknown_actions = sorted(set(actions) - set(POSITION_ACTIONS))
+                if unknown_actions:
+                    errors.append(f'llm_policy.open_actions 含未知动作 {unknown_actions}'
+                                  f'（允许：{sorted(POSITION_ACTIONS)}）')
         # 未知键：拼错的键会被 `dict.get` 静默忽略，让安全门无声失效
         for name, allowed in POLICY_KEYS.items():
             unknown = sorted(set(getattr(self, name) or {}) - set(allowed))

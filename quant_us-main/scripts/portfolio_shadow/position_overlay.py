@@ -116,6 +116,12 @@ def validate_position_output(output, packet: dict) -> tuple[bool, list[str]]:
     if output.get('packet_id') != packet.get('packet_id'):
         errors.append('PACKET_MISMATCH')
         return False, errors
+    # 本轮**只开放**一组动作（§6.1 限定角色）：包里声明了 `allowed_action_set` 就按它强制。
+    # 必须在 Position v2 校验**之前**判：`post_exit_review` 这类动作不要求选模板，
+    # 只靠"模板里没有它就选不到"挡不住 —— 模型可以直接把它写在 `action` 字段里。
+    open_set = packet.get('allowed_action_set')
+    if open_set is not None and output.get('action') not in set(open_set):
+        return False, [f'ACTION_NOT_OPEN: {output.get("action")} 不在 {sorted(open_set)} 内']
     core = {k: v for k, v in output.items() if k not in _OVERLAY_ONLY_KEYS}
     # 与实盘契约（`_position_contract` 的 `normalize`）同一规则；这条路径不走 DecisionEngine。
     core = normalize_position_output(core, packet)
@@ -251,6 +257,10 @@ class FakePositionModel:
 
     def call(self, packet: dict, deadline: str) -> dict:
         evidence_ids = []
+        # `summary` 必须**在分支外**初始化：只有 `evidence_from_packet` 分支才给它赋值，
+        # 而下面无条件用它拼 claim ⇒ 不初始化时 `evidence_from_packet=False` 会抛
+        # UnboundLocalError（夹具路径默认就是 False，只是现有调用方总传 True 才没暴露）。
+        summary = ''
         if self.evidence_from_packet:
             # 优先引用**本证券**的证据；当前证据供给只有市场级日报，故回退到包内任一证据
             # （MARKET 是设计 §7.1 允许的归属，归属构成由报告披露）。
