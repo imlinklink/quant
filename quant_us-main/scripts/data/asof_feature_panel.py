@@ -19,11 +19,33 @@ MA_WINDOWS = (20, 50, 200)
 ATR_PERIOD = 14
 
 
+def _affects_segment(ex: pd.Timestamp, first: pd.Timestamp, last: pd.Timestamp) -> bool:
+    """该行动是否作用于本段的**任何一根 bar**。
+
+    必须**严格晚于**段首日：`ex == first` 时因子只会被乘到空切片 `raw[:0]`
+    （`build_asof_panel` 里 `factor[:i] *= f` 而 `i=0`），`scale_to_next` 也只会读
+    `by_ex[nxt]`、而 `nxt` 不可能是段首日 ⇒ **对本段的每一行都没有影响**。
+    但旧写法会去要一段根本不存在的"除权前收盘"而抛 `ACTION_FACTOR_UNRESOLVED`。
+
+    实测（2026-09-22）：`SEC-US-JPM` 的 2015-01-02 股息正好落在段首日，整批 32 只的
+    前向面板刷新因此中止；而库里已有的 JPM 面板本就是**没有应用该因子**算出来的
+    （剔除该条后重建，历史段逐格差 ≤5.7e-14，远小于 `HISTORY_TOL=1e-9`）⇒ 旧行为
+    唯一的效果是让这个面板**永远无法重建**（三臂前向时钟随之停摆）。
+
+    另注：对股息而言 `ACTION_FACTOR_UNRESOLVED` 只可能在 `ex == first` 时触发
+    （窗口判据已保证 `ex >= first`），即只会在本函数认定的这种无影响情形下触发。
+
+    `generate_historical_setups._raw_asof_snapshots` 早有同一条规则（它把
+    `build_price_view` 的输入按 `ex > 段首日` 过滤），此处是把它收敛成一份定义。
+    """
+    return first < ex <= last
+
+
 def _factors_by_ex_date(actions: pd.DataFrame, raw: pd.DataFrame) -> dict:
     """每个 ex_date 对应 (作用于该日之前 bar 的因子)。
 
-    只保留**落在价格窗口内、且有前收可算**的行动：窗口外的行动不影响本段序列；
-    缺少除权前收盘的股息无法换算，必须阻断该面板，不能默默保留错误特征。
+    只保留**作用于本段 bar** 的行动（判据见 `_affects_segment`）。段内缺前收的股息
+    仍然阻断该面板（`DIVIDEND_INVALID` 等），不默默保留错误特征。
     """
     out = {}
     if actions is None or actions.empty:
@@ -33,13 +55,13 @@ def _factors_by_ex_date(actions: pd.DataFrame, raw: pd.DataFrame) -> dict:
     unsupported = actions[actions['action_type'].astype(str).str.lower().eq('merger')]
     for record in unsupported.to_dict('records'):
         ex = pd.Timestamp(record['ex_date']).normalize()
-        if first <= ex <= last:
+        if _affects_segment(ex, first, last):
             raise ValueError(f'ACTION_TYPE_UNSUPPORTED:{record.get("security_id")}:{ex.date()}')
     use = actions[actions['action_type'].astype(str).str.lower().isin(ADJUSTABLE_ACTIONS)]
     for record in use.to_dict('records'):
         ex = pd.Timestamp(record['ex_date']).normalize()
-        if not (first <= ex <= last):
-            continue                                   # 窗口外的行动与本段无关
+        if not _affects_segment(ex, first, last):
+            continue                                   # 窗口外/段首日的行动不影响本段
         try:
             factor = action_factor(record, raw)
         except (ValueError, TypeError) as exc:
