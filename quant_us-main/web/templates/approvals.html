@@ -67,11 +67,7 @@
 <body>
 <header>
   <h1>美股交易确认台</h1>
-  <nav class="nav-tabs">
-    <a class="nav-tab" href="/">行情</a>
-    <a class="nav-tab active" href="/approvals">确认台</a>
-    <a class="nav-tab" href="/suggestions">LLM建议</a>
-  </nav>
+  {% set page = 'approvals' %}{% include '_nav.html' %}
   <span id="envBadge" class="badge">-</span>
   <span id="llmBadge" class="badge">-</span>
   <span id="clock" class="muted"></span>

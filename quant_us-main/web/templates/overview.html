@@ -1,0 +1,77 @@
+{% extends '_base.html' %}
+{% set page = 'overview' %}
+{% block title %}决策总览{% endblock %}
+{% block heading %}决策总览{% endblock %}
+{% block script %}
+window.__render = function (j) {
+  const env = j.envelope, s = env.sections || {}, o = s.overview || {};
+  const out = [];
+  if (env.data_status !== 'OK') {
+    out.push(`<div class="card ${env.data_status === 'READ_FAILED' ? 'bad' : 'warn'}">
+      <h2>数据状态：${dataStatusTag(env.data_status)}</h2>
+      <div class="why">${esc((env.missing_reasons || []).map(m => m.field + ' — ' + m.why).join('；') || '')}</div></div>`);
+  }
+  // 需要处理 / 当前无需处理（需求 §5.1 第 2 条：必须显式说「没有」）
+  const todo = o.todo || [];
+  out.push(`<div class="card ${todo.length ? 'warn' : 'plain'}">
+    <h2>需要处理</h2>${todo.length
+      ? '<ul>' + todo.map(t => `<li>${esc(t)}</li>`).join('') + '</ul>'
+      : '<div class="why">当前无需处理。人工确认待办在 <a href="/approvals">确认台</a>。</div>'}
+  </div>`);
+  // 账户摘要：每个账户一张卡，**不同范围不合计**
+  const accts = o.accounts || [];
+  out.push(`<div class="card"><h2>账户摘要（${accts.length} 个账户，各自独立、不合计）</h2>`);
+  if (!accts.length) out.push('<div class="why">本范围没有账户记录。</div>');
+  for (const a of accts) {
+    out.push(`<div class="sec-title">${esc(a.account_id)}</div>`);
+    if (a.status !== 'OK') { out.push(`<div class="why">${statusTag(a.status)}</div>`); continue; }
+    out.push('<div class="grid">' + [
+      ['净值', usd(a.equity && a.equity.value)],
+      ['全成本净值', usd(a.full_cost_equity && a.full_cost_equity.value)],
+      ['回撤', a.drawdown && a.drawdown.value != null ? pct(a.drawdown.value) : '—'],
+      ['持仓数', a.positions_count],
+      ['估值', esc(a.valuation_status || '—')],
+      ['风险状态', esc(a.risk_state || '—')],
+      ['成本口径', esc(a.cost_status || '—')],
+      ['账户 session', esc(a.session || '—')],
+    ].map(([k, v]) => `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div></div>`)
+      .join('') + '</div>');
+  }
+  out.push('</div>');
+  // 本期交易与模型作用
+  const p = o.period_activity || {};
+  out.push(`<div class="card"><h2>本期交易与模型作用</h2><div class="grid">` + [
+    ['机会数', p.opportunities], ['已评审', p.reviewed],
+    ['有效真实评审', p.model_valid_reviews], ['实际改变计划', p.plan_changed],
+    ['持仓路径改变', p.position_path_changed],
+  ].map(([k, v]) => `<div class="tile"><div class="k">${k}</div><div class="v">${v == null ? '—' : v}</div></div>`)
+    .join('') + '</div>' +
+    `<div class="why">结果成熟数：${statusTag(p.maturity_status)} ${esc(p.maturity_why || '')}</div>` +
+    `<div class="why">「作业跑成功」与「产生了有效决策」是两件事：本页只统计有记录的对象。</div></div>`);
+  // 在验证什么
+  out.push('<div class="card"><h2>正在验证什么</h2>');
+  for (const w of (o.in_progress || [])) {
+    out.push(`<div class="sec-title">${esc(w.what)}</div><div class="grid">` + [
+      ['登记窗口', esc(w.enrollment_window || '—')], ['评审日', esc(w.review_date || '—')],
+      ['最少独立样本', w.min_decisions == null ? '—' : w.min_decisions],
+      ['状态', esc(w.status)],
+    ].map(([k, v]) => `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('') +
+      '</div>');
+  }
+  const b = s.boundary || {};
+  out.push(`<div class="why">前向起点 ${esc(b.forward_start_session || '—')}
+    （来源：${esc(b.boundary_source || '—')}）｜
+    净值区间：初始化回放 ${b.nav_replay_sessions == null ? '—' : b.nav_replay_sessions} 个 session、
+    前向 ${b.nav_forward_sessions == null ? '—' : b.nav_forward_sessions} 个｜
+    模型有效样本 ${b.model_valid_sample_count == null ? '—' : b.model_valid_sample_count}</div>`);
+  out.push(`<div class="why">${esc(b.model_valid_sample_why || '')}</div>`);
+  out.push('</div>');
+  const ls = o.llm_scope || {};
+  out.push(`<div class="card plain"><h2>LLM 作用范围</h2>
+    <div class="why">overlay=${esc(ls.overlay || '—')}｜position_overlay=${esc(ls.position_overlay || '—')}｜
+    use_real_model=${esc(String(ls.use_real_model))}｜证据等级=${esc(ls.evidence_mode || '—')}</div>
+    <div class="why">${esc(ls.permission_note || '')}</div></div>`);
+  out.push(diagBlock('证据与诊断（信封原文）', env));
+  return out.join('');
+};
+{% endblock %}

@@ -1,0 +1,56 @@
+{% extends '_base.html' %}
+{% set page = 'opportunities' %}
+{% block title %}买入机会{% endblock %}
+{% block heading %}买入机会{% endblock %}
+{% block script %}
+window.__render = function (j) {
+  const env = j.envelope, s = env.sections || {}, sec = s.opportunities || {};
+  const f = sec.funnel || {};
+  const out = [];
+  const stages = f.stages || [];
+  out.push(`<div class="card"><h2>候选漏斗</h2>`);
+  if (!stages.length) {
+    out.push('<div class="why">本范围没有漏斗数据。</div>');
+  } else {
+    const max = Math.max(1, ...stages.map(x => x.count || 0));
+    out.push('<table><tr><th>阶段</th><th>数量</th><th></th><th>状态</th></tr>');
+    for (const st of stages) {
+      const w = st.count == null ? 0 : Math.round(100 * st.count / max);
+      out.push(`<tr><td>${esc(st.stage)}</td>
+        <td class="num">${st.count == null ? '—' : st.count}</td>
+        <td style="width:40%"><div class="bar"><i style="width:${w}%"></i></div></td>
+        <td>${statusTag(st.status)}${st.why ? `<div class="why">${esc(st.why)}</div>` : ''}</td></tr>`);
+    }
+    out.push('</table>');
+    out.push(`<div class="why">「未采集」的阶段不会写成 0 —— 没有采集与采集到 0 是两件事（需求 §7）。</div>`);
+  }
+  out.push(`<div class="sec-title">机会终态分布</div><div class="grid">` +
+    (Object.entries(f.by_terminal || {}).map(([k, v]) =>
+      `<div class="tile"><div class="k">${esc(k)}</div><div class="v">${v}</div></div>`).join('')
+     || '<div class="why">暂无机会。</div>') + '</div>');
+  out.push('</div>');
+  const em = sec.entry_metrics || {};
+  out.push(`<div class="card plain"><h2>入场评审口径</h2><div class="grid">` + [
+    ['应评审', em.eligible_for_review], ['数据拦截', em.data_blocked],
+    ['质量弃权', em.quality_abstain], ['模型可评审', em.callable_for_model],
+    ['已评审', em.reviewed], ['实际调用', em.actual_calls],
+    ['有效真实评审', em.real_model_reviews], ['夹具评审（不计入覆盖率）', em.fixture_reviews],
+    ['故障降级', em.failure_abstains], ['模型知情', em.model_informed_applications],
+    ['改变计划', em.plan_change_count], ['VETO 未兑现', em.veto_unapplied],
+  ].map(([k, v]) => `<div class="tile"><div class="k">${k}</div><div class="v">${v == null ? '—' : v}</div></div>`)
+    .join('') + '</div>');
+  out.push(`<div class="why">有效覆盖率 ${em.real_review_coverage == null ? '—（分母为 0，不是 0%）'
+      : pct(em.real_review_coverage * 100)}｜计划改变率 ${em.plan_change_rate == null ? '—'
+      : pct(em.plan_change_rate * 100)}｜数据阻断率 ${em.data_block_rate == null ? '—'
+      : pct(em.data_block_rate * 100)}</div>`);
+  if (em.veto_unapplied) out.push(`<div class="why">⚠️ ${em.veto_unapplied} 次 VETO 已冻结但未落到执行 —— 否决必须兑现，否则等于没发生。</div>`);
+  out.push(`<div class="why">${esc(em.note || '')}</div>`);
+  out.push(`<div class="why">排序采用：${esc(sec.ranking_used || '—')}</div></div>`);
+  for (const n of (sec.not_collected || [])) {
+    out.push(`<div class="card warn"><h2>该阶段未采集</h2>
+      <div class="why">${esc(n.field)}：${esc(n.why)}</div></div>`);
+  }
+  out.push(diagBlock('证据与诊断（opportunities section）', sec));
+  return out.join('');
+};
+{% endblock %}

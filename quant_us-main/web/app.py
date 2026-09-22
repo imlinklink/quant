@@ -874,6 +874,17 @@ def api_llm_health():
         return jsonify({'ok': False, 'error': str(exc)}), 500
 
 
+# ─── 决策可视化（只读快照）────────────────────────────────
+# 六个页面 + 三个只读 JSON 接口在 `web/analytics.py`。它**只读 JSON 快照、不 import
+# 任何 `scripts.*`**（有测试钉死）—— 所以新页面的存在不会给本进程引入任何写路径。
+try:                                    # 作为包导入（`import web.app`）
+    from .analytics import bp as _analytics_bp
+except ImportError:                     # 作为脚本运行（`python web/app.py`）
+    from analytics import bp as _analytics_bp
+
+app.register_blueprint(_analytics_bp)
+
+
 if __name__ == '__main__':
     print("🚀 quant_us Web 服务启动...")
     web_port = int(os.environ.get('US_WEB_PORT', '8890'))

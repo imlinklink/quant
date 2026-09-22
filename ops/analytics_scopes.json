@@ -1,0 +1,136 @@
+{
+  "registry_version": 1,
+  "_comment": [
+    "决策可视化页面的**显式来源登记**（需求 §4）：experiment_id、运行目录、账本/报告路径、",
+    "schema、导出代次。需求明令「不按『最新文件』猜当前实验」—— 所以这里没有任何 glob 或",
+    "latest 指针，注册表本身就是权威，而且它进版本库（data/ 被 gitignore，指针必须可审）。",
+    "路径一律相对于导出器的 --base（默认 quant_us-main/data）。",
+    "replay/forward 边界是**声明**而非机械事实（manifest 里没有前向起点字段，且不能加 ——",
+    "它在 manifest_hash 与三臂 frozen_code 里），故标 boundary_source=declared 并由导出器",
+    "与账本做交叉核对，矛盾即 data_status=INCONSISTENT、页面显示「结论待核对」。"
+  ],
+  "scopes": [
+    {
+      "scope_id": "paper:M1-FORWARD-S-20260917",
+      "kind": "paper",
+      "label": "M1 影子实验（入场否决，strict 证据）",
+      "experiment_id": "M1-FORWARD-S-20260917",
+      "run_dir": "portfolio_shadow/M1-FORWARD-S-20260917",
+      "manifest": "portfolio_shadow/M1-FORWARD-S-20260917/manifest.json",
+      "ledger": "portfolio_shadow/M1-FORWARD-S-20260917/ledger.sqlite3",
+      "accounts": [
+        {"account_id": "SHADOW:M1-FORWARD-S-20260917:R", "role": "R", "label": "规则"},
+        {"account_id": "SHADOW:M1-FORWARD-S-20260917:L", "role": "L", "label": "规则+LLM"}
+      ],
+      "replay_start_session": null,
+      "replay_end_session": null,
+      "forward_start_session": "2026-09-17",
+      "boundary_source": "declared",
+      "writer_checkout": "/Users/wh1817w/quant-runtime-main",
+      "writer_pin": "cf2440d",
+      "export_version": 1
+    },
+    {
+      "scope_id": "paper:L1-POSITION-20260922",
+      "kind": "paper",
+      "label": "L1 持仓角色（技术包 + hold/exit）",
+      "experiment_id": "L1-POSITION-20260922",
+      "run_dir": "portfolio_shadow/L1-POSITION-20260922",
+      "manifest": "portfolio_shadow/L1-POSITION-20260922/manifest.json",
+      "ledger": "portfolio_shadow/L1-POSITION-20260922/ledger.sqlite3",
+      "accounts": [
+        {"account_id": "SHADOW:L1-POSITION-20260922:R", "role": "R", "label": "规则"},
+        {"account_id": "SHADOW:L1-POSITION-20260922:L", "role": "L", "label": "规则+LLM"}
+      ],
+      "replay_start_session": "2026-08-17",
+      "replay_end_session": "2026-09-18",
+      "forward_start_session": "2026-09-21",
+      "boundary_source": "declared",
+      "writer_checkout": "/Users/wh1817w/quant-runtime-research",
+      "writer_pin": "c43b215",
+      "export_version": 1
+    },
+    {
+      "scope_id": "paper:B3FWD",
+      "kind": "paper_arms",
+      "label": "B3 三臂前向观察（A=13 只 / B=32+时点门 / C=32）",
+      "derive_from_arms": "strategy_diagnostics/forward/arms.json",
+      "writer_checkout": "/Users/wh1817w/quant-runtime-main",
+      "writer_pin": "cf2440d",
+      "export_version": 1
+    },
+    {
+      "scope_id": "live:SIMULATE",
+      "kind": "live_simulated",
+      "label": "实盘链路（SIMULATE 模拟成交 / DRY-RUN）",
+      "db": "execution.sqlite3",
+      "namespaces": ["SIMULATE:16149024", "DRY-RUN"],
+      "export_version": 1
+    },
+    {
+      "scope_id": "research:SD-P0P1-20260921-012",
+      "kind": "research",
+      "label": "历史研究基线（B3@60@1.0% 冻结父策略）",
+      "run_dir": "strategy_diagnostics/SD-P0P1-20260921-012",
+      "artifacts": {
+        "study_manifest": "study_manifest.json",
+        "statistics": "statistics.json",
+        "comparison": "comparison.json",
+        "checks": "checks.json",
+        "complete": "complete.json",
+        "report": "report.md"
+      },
+      "export_version": 1
+    },
+    {
+      "scope_id": "research:SR-EXIT-PROTECT-20260921-001",
+      "kind": "research",
+      "label": "卖出侧 S1：机械利润保护（同机会对照）",
+      "run_dir": "strategy_research/SR-EXIT-PROTECT-20260921-001",
+      "artifacts": {
+        "result": "step1.json",
+        "baseline_record": "baseline_record.json",
+        "report": "report.md"
+      },
+      "export_version": 1
+    },
+    {
+      "scope_id": "research:SR-BOTTOM-20260921-001",
+      "kind": "research",
+      "label": "买入侧 B1：抄底信号替换入场包",
+      "run_dir": "strategy_research/SR-BOTTOM-20260921-001",
+      "artifacts": {"result": "entry_arms.json", "report": "report.md"},
+      "export_version": 1
+    },
+    {
+      "scope_id": "research:SR-BOTTOM-SLEEVE-20260922-001",
+      "kind": "research",
+      "label": "买入侧：抄底 sleeve（固定总风险预算下的补充）",
+      "run_dir": "strategy_research/SR-BOTTOM-SLEEVE-20260922-001",
+      "artifacts": {"result": "sleeve-1x.json", "result_full": "sleeve.json"},
+      "export_version": 1
+    }
+  ],
+  "unregistered": [
+    {"run_dir": "strategy_diagnostics/SD-P0P1-20260920-001",
+     "why": "同一基准的早期重跑，已被 012 取代；不进页面（保留作溯源）"},
+    {"run_dir": "strategy_diagnostics/SD-P0P1-20260920-002",
+     "why": "同上，被 012 取代"},
+    {"run_dir": "strategy_diagnostics/SD-P0P1-20260920-003",
+     "why": "同上，被 012 取代"},
+    {"run_dir": "strategy_diagnostics/SD-P0P1-20260920-009",
+     "why": "code_revision 35546af 的旧基线，只对其自身代码版本有效；已被 012 取代"},
+    {"run_dir": "strategy_diagnostics/SD-P0P1-20260921-010",
+     "why": "已归档（冻结前缀写坏 / 统计口径失效），见 _archive"},
+    {"run_dir": "strategy_diagnostics/SD-P0P1-20260921-011",
+     "why": "已归档（同上），见 _archive"},
+    {"run_dir": "strategy_diagnostics/_archive",
+     "why": "归档目录，不是实验"},
+    {"run_dir": "strategy_diagnostics/_drafts",
+     "why": "草稿目录，不是实验"},
+    {"run_dir": "strategy_diagnostics/SD-POOL32-20260922-001",
+     "why": "池子扩样：只有冻结输入与 trial_registry，**没有结果产物**（未跑出结论）；不进页面，避免把「还没跑」显示成「跑了但空」"},
+    {"run_dir": "strategy_diagnostics/forward",
+     "why": "三臂前向观察的运行根，已由 paper:B3FWD 登记"}
+  ]
+}

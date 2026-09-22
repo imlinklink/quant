@@ -1,0 +1,68 @@
+{% extends '_base.html' %}
+{% set page = 'experiments' %}
+{% block title %}策略与实验{% endblock %}
+{% block heading %}策略与实验{% endblock %}
+{% block script %}
+window.__render = function () { return ''; };
+async function bootExperiments() {
+  const el = document.getElementById('content');
+  document.getElementById('scopebar').innerHTML =
+    '<span class="muted" style="margin:0">本页跨全部实验（研究结论 + 前向进度），不受范围切换影响</span>';
+  try {
+    const j = await api('/api/analytics/experiments');
+    document.getElementById('meta').textContent = j.generated_at || '';
+    const out = [];
+    out.push(`<div class="card warn"><h2>怎么读这一页</h2>
+      <div class="why">研究结论只用于**淘汰方向**；正式资格需前向登记。本页不生成「策略提升」结论：
+      胜率↑而净收益↓、风险↓而收益↓都按权衡并列显示（需求 §5.5、场景 8）。</div></div>`);
+    for (const c of (j.research_cards || [])) {
+      const sec = c.sections || {}, r = sec.research || {};
+      out.push(`<div class="card"><h2>${esc(c.label || c.scope_id)}</h2>
+        <div class="why">${esc(c.run_dir || '')}</div>`);
+      const st = r.statistics || {};
+      const cmp = r.comparison || {};
+      const vd = st.verdict || cmp.verdict || (r.result && r.result.verdict) || null;
+      out.push(`<div class="grid">` + [
+        ['判定', vd ? `<b>${esc(String(vd))}</b>` : '<span class="tag nc">未采集</span>'],
+        ['产物', Object.keys(sec.research || {}).length],
+        ['缺失产物', (sec.missing_artifacts || []).length],
+      ].map(([k, v]) => `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('') + '</div>');
+      if (st.returns || st.cagr != null) {
+        out.push(`<div class="why">收益率字段：${esc(JSON.stringify(st.returns || {cagr: st.cagr, mdd: st.mdd_max})).slice(0, 240)}</div>`);
+      }
+      if (r.has_report) {
+        const key = c.scope_id.replace(/:/g, '__').replace(/\//g, '_');
+        out.push(`<details class="diag" data-report="${esc(key)}"><summary>报告原文（report.md，按需加载）</summary>
+          <pre>展开后加载…</pre></details>`);
+      }
+      for (const m of (sec.missing_artifacts || [])) {
+        out.push(`<div class="why">缺：${esc(m.field)} — ${esc(m.why)}</div>`);
+      }
+      const key = c.scope_id.replace(/:/g, '__').replace(/\//g, '_');
+      for (const name of (r.full_artifacts || [])) {
+        out.push(`<div class="why">全量产物：<a href="/api/analytics/artifact/${encodeURIComponent(key + '__' + name)}"
+          target="_blank">${esc(name)}</a>（首屏只显示压缩视图，此处是原文）</div>`);
+      }
+      out.push(diagBlock('证据与诊断（机读产物·压缩视图）',
+        {statistics: st, comparison: cmp, checks: r.checks}));
+      out.push('</div>');
+    }
+    out.push(`<div class="why">${esc(j.note || '')}</div>`);
+    el.innerHTML = out.join('');
+    el.querySelectorAll('details[data-report]').forEach(d => {
+      d.addEventListener('toggle', async () => {
+        if (!d.open || d.dataset.loaded) return;
+        d.dataset.loaded = '1';
+        const pre = d.querySelector('pre');
+        try {
+          const rr = await api('/api/analytics/report/' + encodeURIComponent(d.dataset.report));
+          pre.textContent = rr.report;
+        } catch (e) { pre.textContent = '读取失败：' + e.message; }
+      });
+    });
+  } catch (e) {
+    el.innerHTML = `<div class="card bad"><h2>读取失败</h2><div class="why">${esc(e.message)}</div></div>`;
+  }
+}
+bootExperiments();
+{% endblock %}
