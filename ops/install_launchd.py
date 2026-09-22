@@ -40,6 +40,12 @@ ROOT = Path(__file__).resolve().parents[1]
 US = ROOT / 'quant_us-main'
 # 日志放 ~/Library/Logs —— **不要放回 ~/Documents**：万一 TCC 仍然拦着，
 # 至少日志本身还能写出来，否则我们会看到一个"什么都没发生"的空洞。
+#: **运行 checkout**（不可变 commit，detached HEAD）—— 与开发 checkout 分离。
+#: 实验与在跑服务由它们驱动；开发 checkout 可以自由演进（合并分支、继续提交）。
+#: 换运行版本 = 改这两个路径 + 重装，并核验哈希与续跑一致。
+RUNTIME_MAIN = Path('/Users/wh1817w/quant-runtime-main')
+RUNTIME_RESEARCH = Path('/Users/wh1817w/quant-runtime-research')
+
 LOG_DIR = Path.home() / 'Library' / 'Logs' / 'quant'
 LAUNCH_AGENTS = Path.home() / 'Library' / 'LaunchAgents'
 
@@ -62,8 +68,10 @@ ATTEMPTS = ((16, 40), (18, 10), (19, 40))
 JOBS = {
     'shadow-daily': {
         'label': 'com.quant.shadow-daily',
-        'argv': ['/bin/bash', str(ROOT / 'ops' / 'shadow_daily.sh')],
-        'workdir': str(ROOT),
+        # **钉到运行 checkout**（不可变 commit），不指向开发 checkout：
+        # 冻结对象是「实验运行版本」，不是开发主线（用户 2026-09-22 的裁定）。
+        'argv': ['/bin/bash', str(RUNTIME_MAIN / 'ops' / 'shadow_daily.sh')],
+        'workdir': str(RUNTIME_MAIN),
         # **显式绑定实验**：不再靠自动发现。目录里出现第二个实验时，自动发现会按设计报错
         # 拒绝猜 —— 那是好事，但生产任务不该因此停摆。身份写死在排程里，改动必须改这里。
         'env': {'SHADOW_EXPERIMENT': 'M1-FORWARD-S-20260917'},
@@ -82,9 +90,8 @@ JOBS = {
         #   · 日志不同：`shadow_daily_l1.log`。
         # 三者任一混用都会写出「用错代码读错账本」或互相覆盖的运行记录。
         'label': 'com.quant.shadow-daily-l1',
-        'argv': ['/bin/bash', str(Path('/Users/wh1817w/quant-research') / 'ops' /
-                                 'shadow_daily.sh')],
-        'workdir': '/Users/wh1817w/quant-research',
+        'argv': ['/bin/bash', str(RUNTIME_RESEARCH / 'ops' / 'shadow_daily.sh')],
+        'workdir': str(RUNTIME_RESEARCH),
         'env': {'SHADOW_EXPERIMENT': 'L1-POSITION-20260922',
                 'SHADOW_BASE': '/Users/wh1817w/quant/quant_us-main/data/portfolio_shadow',
                 'SHADOW_EVIDENCE': ('/Users/wh1817w/quant/quant_us-main/data/'
@@ -101,9 +108,10 @@ JOBS = {
     },
     'trading-service': {
         'label': 'com.quant.trading-service',
-        # 与 runbook §6 的手工命令同一件事，只是交给 launchd 托管
+        # 与 runbook §6 的手工命令同一件事，只是交给 launchd 托管。
+        # 同样钉到运行 checkout：否则一次开发主线合并就会改变在跑服务的代码。
         'argv': ['/usr/bin/python3', 'run_all.py', '--dry-run'],
-        'workdir': str(US),
+        'workdir': str(RUNTIME_MAIN / 'quant_us-main'),
         'stdout': 'trading-service.log',
         'stderr': 'trading-service.err.log',
         # **不设 ProcessType**：`Background` 会降调度优先级并限制 I/O，适合批处理作业，
@@ -116,8 +124,8 @@ JOBS = {
     },
     'forward-arms': {
         'label': 'com.quant.forward-arms',
-        'argv': ['/bin/bash', str(ROOT / 'ops' / 'forward_arms_daily.sh')],
-        'workdir': str(ROOT),
+        'argv': ['/bin/bash', str(RUNTIME_MAIN / 'ops' / 'forward_arms_daily.sh')],
+        'workdir': str(RUNTIME_MAIN),
         'stdout': 'forward_arms.log',
         'stderr': 'forward_arms.err.log',
         # 批处理，与 shadow-daily 同类
