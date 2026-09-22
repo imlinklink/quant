@@ -224,8 +224,11 @@ def refresh_panels(*, through: str | None = None, names=None) -> list[dict]:
                      - pd.to_numeric(last_old[col], errors='coerce').astype(float)).abs()
                 if d.notna().any():
                     last_delta = max(last_delta, float(d.max()))
-        new_file = pd.concat([keep[keep.session < last], last_new], ignore_index=True) \
-            if len(last_new) else keep
+        # **必须把 rebuilt 里新出现的 session 追加进来**：第一版改写漏掉了这一步，
+        # 结果面板永远停在原处、影子作业静默停摆（靠"面板为什么不前进"才追出来）。
+        appended_rows = rebuilt[rebuilt.session > last]
+        new_file = pd.concat([keep[keep.session < last], last_new, appended_rows],
+                             ignore_index=True)
         changed = dropped or last_delta > HISTORY_TOL or len(new_file) != len(keep)
         if changed:
             new_file.to_csv(path, index=False, compression='gzip')
