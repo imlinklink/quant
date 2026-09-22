@@ -57,6 +57,24 @@ L1 的代码在我今天的每次研究提交后都悄悄变了，而记录上�
 - **"代码路径变化 ≠ 策略变化"**（用户口径）：换运行 checkout 不等于换策略；只要运行版本本身
   未被改动、且续跑逐字段一致，观察记录就仍然有效 ✓。
 
+## 四之二、运行版本表（2026-09-22 晚更新：日报管线变更后）
+
+| 运行 checkout | pin 的 commit | 内容 | 约束 |
+|---|---|---|---|
+| `quant-runtime-main` | `7271033` = `47a8c95` + 日报改动 | M1 影子实验、三臂前向、**实盘服务** | **store schema 9 —— 不得再往前移**（M1 的账本是 schema 9；合并后的 main 已是 schema 10） |
+| `quant-runtime-research` | `c43b215`（合并后的 main HEAD） | L1 持仓实验 | schema 10 |
+
+**合并（`3ff2b7f`）之后，两个运行 checkout 只差 schema 9/10 这一件事** —— 这正是它们必须分开的原因。
+
+**日报管线变更（`c43b215`）怎么进的两个 runtime**：`quant-runtime-research` 直接移到合并后的 main；
+`quant-runtime-main` **不能**跟着移（schema 会跳到 10、M1 账本立刻不可读）⇒ 用
+`runtime-main-pin` 分支在 `47a8c95` 上 **cherry-pick 日报那一个提交**（`7271033`）。
+安全性有据：日报两个文件（`market_digest.py`/`publish_digest.py`）**都不在**前向观察的
+`frozen_code` 里 ⇒ 移动后冻结集仍 **0 处不一致**（已核）；且 `market_digest` 只被影子作业用、
+**不被实盘服务用** ⇒ 无需重启服务。
+
+**兜底语义实测**（跑固定 checkout 自己的代码）：只有热榜文件时选中热榜 ✓；加入真日报后日报胜出 ✓。
+
 ## 五、还没做
 
 - 推送前的历史凭证审计（4.4，单独处理）。
