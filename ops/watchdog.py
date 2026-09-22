@@ -167,6 +167,35 @@ def shadow_job_check(days: int = 3):
         return 1, repr(exc)
 
 
+def data_integrity_check() -> tuple[int, str]:
+    """行情数据完整性（抓「静默停摆」）。返回 `(返回码, 输出)`。
+
+    2026-09-22 一天里撞到两个同形态缺陷 —— **作业照常跑、什么都不说、结果永久停住**：
+    面板漏追加新 session（面板永久冻结）与检查点/分区不同步（下次刷新硬失败）。
+    两者都只能靠人手动核对输出才发现，故收进看护。
+
+    跑两个宇宙（TECH 13 / 三臂 32）各一次；**告警文案不含数字与日期**，
+    否则状况不变时它会变，去重失效 → 变成每次检查弹一次（`shadow_job_check` 记过的同一条教训）。
+    """
+    outputs, rc = [], 0
+    for universe in ('tech', 'forward-arms'):
+        try:
+            proc = subprocess.run(
+                [sys.executable, str(ROOT / 'quant_us-main' / 'scripts' / 'live_trading'
+                                      / 'data_integrity_check.py'),
+                 '--universe', universe],
+                check=False, capture_output=True, text=True, timeout=180,
+                cwd=str(ROOT / 'quant_us-main'))
+        except Exception as exc:                      # noqa: BLE001 — 看护不能因此整个挂掉
+            outputs.append(f'{universe}: {exc!r}')
+            rc = 1
+            continue
+        outputs.append(f'--- {universe}\n{(proc.stdout or "").strip()}')
+        if proc.returncode != 0:
+            rc = 1
+    return rc, '\n'.join(outputs)
+
+
 def budget_check(cfg: dict) -> list[str]:
     """模型调用预算是否已耗尽（规划 §4.1：启动时必须能在看护里看见）。
 
@@ -306,6 +335,14 @@ def check_once(cfg: dict, now: datetime = None) -> int:
 
     # 模型调用预算（规划 §4.1）：耗尽是**看得见的一次性事件**，不是每天一弹
     problems.extend(budget_check(cfg))
+
+    # 行情数据完整性（抓「静默停摆」）：面板落后于原始库 / 分区与检查点不同步
+    rc, detail = data_integrity_check()
+    if rc == 0:
+        log('✅ 行情数据完整性：面板未落后、检查点与分区一致')
+    else:
+        problems.append('行情数据完整性异常（面板落后于原始库，或分区与检查点不同步）')
+        log(f'❌ 行情数据完整性异常:\n{detail}')
 
     # 每日作业完整性（理由见 `shadow_job_check`）：**缺口必须被看见**
     rc, detail = shadow_job_check()
