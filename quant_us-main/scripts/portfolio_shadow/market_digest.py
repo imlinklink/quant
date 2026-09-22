@@ -40,6 +40,8 @@ DIGEST_PRIORITY = (
     ('uspostmarket', 1),    # 美股盘后深度
     ('globalpost', 2),      # 全球盘后
     ('postmarket', 3),      # 每日盘后复盘
+    ('gsmonitor', 9),       # G/S v2 监控页（顶层，兜底用；与 DEFAULT_PRIORITY 同值，仅为显式可读）
+    ('thsushot', 9),        # 同花顺美股24h热榜（顶层，兜底用；与 DEFAULT_PRIORITY 同值，仅为显式可读）
 )
 DEFAULT_PRIORITY = 9
 
@@ -104,8 +106,14 @@ def latest_digest(directory: Path, session: str) -> Path | None:
     取「≤ session 的最近一份」而不是「必须等于 session」：日报不一定每个交易日都有，
     而最近一份市场综述仍是有用的背景（可见性由 `published_at` 与窗口自行把关）。
 
-    注意只看**顶层** `*.html`：辅助产物（监控页、周报）发布在 `aux/` 子目录里，
+    注意只看**顶层** `*.html`：周报 / 探测日志等辅助产物发布在 `aux/` 子目录里，
     因此不会被当成市场日报喂给模型。
+
+    例外（自 2026-09-22 起，均为**顶层 + 取用序 9（最低）**，仅作兜底）：
+    `gsmonitor`（G/S v2 波段监控页）、`thsushot`（同花顺美股 24h 热榜）。
+    只要当天有任一份日报（盘前/美股盘后/全球盘后/盘后复盘），日报仍然胜出；仅当当天一份
+    日报都没有时，它们才会作为兜底被选中。⚠ 热榜是**用户行为数据**（浏览量/加自选），
+    不是资金流也不是看多信号 —— 它被读到只应视为「当天没有任何市场综述」的信号。
     """
     if not directory.is_dir():
         return None
