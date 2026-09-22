@@ -1,0 +1,14 @@
+{# 唯一的导航定义（需求 §4：新页面不得各自复制一份 nav）。
+   包含方用 `{% set page = 'xxx' %}` 指定当前页；不设则不标 active。
+   `.nav-tabs` / `.nav-tab` 的样式由包含方提供（新页面由 `_base.html`，旧三页各自一份）。 #}
+<nav class="nav-tabs">
+  <a class="nav-tab {{ 'active' if page == 'market' else '' }}" href="/">行情</a>
+  <a class="nav-tab {{ 'active' if page == 'approvals' else '' }}" href="/approvals">确认台</a>
+  <a class="nav-tab {{ 'active' if page == 'suggestions' else '' }}" href="/suggestions">LLM建议</a>
+  <span style="width:1px;background:#2d3748;margin:0 4px"></span>
+  <a class="nav-tab {{ 'active' if page == 'overview' else '' }}" href="/overview">总览</a>
+  <a class="nav-tab {{ 'active' if page == 'positions' else '' }}" href="/positions">持仓</a>
+  <a class="nav-tab {{ 'active' if page == 'opportunities' else '' }}" href="/opportunities">机会</a>
+  <a class="nav-tab {{ 'active' if page == 'llm-impact' else '' }}" href="/llm-impact">LLM作用</a>
+  <a class="nav-tab {{ 'active' if page == 'experiments' else '' }}" href="/experiments">实验</a>
+</nav>

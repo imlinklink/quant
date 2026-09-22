@@ -1,0 +1,77 @@
+{% extends '_base.html' %}
+{% set page = 'positions' %}
+{% block title %}持仓与退出{% endblock %}
+{% block heading %}持仓与退出{% endblock %}
+{% block script %}
+window.__render = function (j) {
+  const env = j.envelope, s = env.sections || {}, sec = s.positions || {};
+  const ps = sec.positions || [];
+  const out = [];
+  if (!ps.length) {
+    out.push(`<div class="empty">本范围当前没有持仓。<br>
+      <span class="why">${esc(env.scope_kind === 'paper'
+        ? '纸面账户空仓属于正常等待（可能是没有候选，也可能是模型/规则都没触发）——不等于是故障。'
+        : '该范围没有持仓记录。')}</span></div>`);
+  }
+  for (const p of ps) {
+    const prot = p.protection || {};
+    const rows = Object.values(prot);
+    const gb = p.giveback || {};
+    out.push(`<div class="card">
+      <h2>${esc(p.security_id)} <span class="why">（${esc(p.account_label)} 账户）</span></h2>
+      <div class="grid">` + [
+        ['股数', p.shares == null ? '—' : p.shares],
+        ['入场价', micro(p.entry_price_micro)],
+        ['入场日', esc(p.entry_session || '—')],
+        ['持有 session', p.holding_sessions == null ? '—' : p.holding_sessions],
+        ['当前止损', micro(p.stop_micro)],
+        ['退出政策', esc(p.exit_policy_id || '—')],
+      ].map(([k, v]) => `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('') +
+      '</div>');
+    // 保护状态（需求 §5.2 本轮最高优先级）
+    out.push('<div class="sec-title">保护与退出</div><table><tr><th>项</th><th>值</th><th>状态</th></tr>');
+    for (const r of rows) {
+      const v = r.status === 'OK'
+        ? (r.unit === 'micro_usd' ? micro(r.value) : esc(String(r.value))) : '—';
+      out.push(`<tr><td>${esc(r.label || r.key)}</td><td class="num">${v}</td>
+        <td>${statusTag(r.status)}${r.why ? `<div class="why">${esc(r.why)}</div>` : ''}</td></tr>`);
+    }
+    out.push('</table>');
+    out.push(`<div class="why">保护线不保证跳空时的成交价格；待生效线与已生效线在账本里是分开的字段。</div>`);
+    // 浮盈回吐
+    out.push('<div class="sec-title">浮盈回吐</div>');
+    if (gb.status === 'OK') {
+      out.push(`<div class="grid">` + [
+        ['回吐（百分点）', pct(gb.value_pp)],
+        ['持仓期最大收益率', pct(gb.max_return_pct)],
+        ['当前收益率', pct(gb.current_return_pct)],
+        ['锚点 session', esc(gb.anchor_session || '—')],
+      ].map(([k, v]) => `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('') +
+        '</div>');
+      out.push(`<div class="why">口径：${esc(gb.price_basis || '')}；
+        金额口径：${gb.amount_status === 'OK' ? usd(gb.amount_usd) : statusTag(gb.amount_status || 'NOT_APPLICABLE')}
+        ${esc(gb.amount_why || '')}</div>`);
+    } else {
+      out.push(`<div>${statusTag(gb.status)}<div class="why">${esc(gb.why || '')}</div></div>`);
+    }
+    // 规则原计划
+    const rp = p.rule_plan || {};
+    out.push(`<div class="sec-title">规则原计划</div>
+      <div class="why">${esc(rp.parent_strategy_id || '—')}/${esc(rp.parent_version || '—')}｜
+      入场=${esc(rp.entry_rule || '—')}｜原因=${esc((rp.rule_reason_codes || []).join(', ') || '—')}｜
+      退出=${esc(rp.exit_policy_id || '—')}｜决策截止=${esc(rp.decision_deadline || '—')}</div>`);
+    // 规则与模型分歧 / 评审
+    const rv = p.review || {};
+    out.push(`<div class="sec-title">模型评审</div>`);
+    out.push(rv.reviewed
+      ? `<div class="why">最近评审 session=${esc(rv.last_review_session || '—')}｜
+         主体键=${esc(rv.subject_key || '—')}｜包=${esc((rv.packet_id || '').slice(0, 16))}…</div>`
+      : `<div>${statusTag('NO_OBJECT')}<div class="why">这笔持仓还没有过一次模型持仓评审。</div></div>`);
+    out.push(diagBlock('证据与诊断（该持仓原文）', p));
+    out.push('</div>');
+  }
+  out.push(`<div class="why">排序键由导出器给定（回吐/持有/是否评审），**不含任何打分** ——
+    页面的排序结果不是交易信号。${esc((sec.not_collected || []).map(n => n.why).join('；'))}</div>`);
+  return out.join('');
+};
+{% endblock %}

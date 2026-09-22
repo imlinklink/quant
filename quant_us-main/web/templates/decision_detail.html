@@ -1,0 +1,57 @@
+{% extends '_base.html' %}
+{% set page = '' %}
+{% block title %}决策详情{% endblock %}
+{% block heading %}决策详情{% endblock %}
+{% block script %}
+window.__render = function () { return ''; };
+async function bootDecision() {
+  const el = document.getElementById('content');
+  document.getElementById('scopebar').innerHTML =
+    '<span class="muted" style="margin:0">单笔决策的完整轨迹；不按证券代码+近似时间拼接</span>';
+  const id = decodeURIComponent(location.pathname.replace('/decisions/', ''));
+  try {
+    const j = await api('/api/analytics/decisions/' + encodeURIComponent(id));
+    const t = j.trace || {}, out = [];
+    document.getElementById('meta').textContent = t.generated_at || '';
+    out.push(`<div class="card"><h2>${esc(t.security_id || '—')}
+      <span class="why">${esc(t.signal_session || '—')} → ${esc(t.planned_execution_session || '—')}</span></h2>
+      <div class="ctx" style="display:flex">机会 <b>${esc(t.opportunity_id || '—')}</b>
+        终态 <b>${esc(t.terminal || '—')}</b></div></div>`);
+    const tl = [];
+    const rp = t.rule_plan || {};
+    tl.push(['1. 冻结规则计划', `${esc(rp.parent_strategy_id || '—')}/${esc(rp.parent_version || '—')}
+      ｜入场=${esc(rp.entry_rule || '—')}｜退出=${esc(rp.exit_policy_id || '—')}
+      ｜止损基准=${esc(String(rp.stop_reference == null ? '—' : rp.stop_reference))}
+      ｜决策截止=${esc(rp.decision_deadline || '—')}`]);
+    tl.push(['2. 证据（' + esc(t.evidence_mode || '—') + '）',
+      (t.events || []).length
+        ? (t.events || []).map(e => `${esc((e.summary || '').slice(0, 90))}
+            ${e.source_url ? `(<a href="${esc(e.source_url)}" target="_blank">链接</a>)` : ''}
+            <span class="why">${esc(e.published_at || '')} / ${esc(e.observed_at || '')}</span>`).join('<br>')
+        : '<span class="why">包里没有事件（严格模式下证据供给可能为空，这不等于模型判断为中性）</span>']);
+    for (const [scope, a] of Object.entries(t.accounts || {})) {
+      tl.push([`3. 模型与裁决（${esc(scope.split(':').pop())} 账户）`,
+        `最终动作=${esc(a.action || '—')}｜模型原始动作=${esc(a.raw_action || '（未调用）')}
+         ${a.degraded_from ? `<span class="tag warn">被降级自 ${esc(a.degraded_from)}</span>` : ''}
+         ｜原因码=${esc(a.reason_code || '—')}｜尝试状态=${esc(a.attempt_status || '—')}
+         ${a.attempt_errors ? `<div class="why">校验错误：${esc(JSON.stringify(a.attempt_errors))}</div>` : ''}`]);
+      tl.push([`4. 执行（${esc(scope.split(':').pop())}）`,
+        `动作已冻结=${a.decision_frozen ? '是' : '否'}｜已落到执行=${a.execution_applied ? '是' : '否'}
+         ｜费用=${a.cost_uncertain ? '<span class="tag nc">未知待补记</span>' : usd(a.model_cost)}`]);
+    }
+    out.push('<div class="card plain">');
+    for (const [h, body] of tl) {
+      out.push(`<div class="sec-title">${h}</div><div class="why">${body}</div>`);
+    }
+    out.push('</div>');
+    out.push(`<div class="why">模型推断与程序计算事实在此分开显示；模型没有报告的理由不会被补造。
+      关联缺失时显示断点，不按股票与近似时间拼出完整轨迹（需求 §5.6）。</div>`);
+    out.push(diagBlock('证据与诊断（trace 原文）', t));
+    el.innerHTML = out.join('');
+  } catch (e) {
+    el.innerHTML = `<div class="card bad"><h2>读取失败</h2><div class="why">${esc(e.message)}</div>
+      <div class="why">找不到这条 id 的快照时如实报错，不退化到「按代码找相似的一笔」。</div></div>`;
+  }
+}
+bootDecision();
+{% endblock %}

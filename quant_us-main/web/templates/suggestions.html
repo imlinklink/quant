@@ -68,11 +68,7 @@
 <body>
 <header>
   <h1>大模型选股建议</h1>
-  <nav class="nav-tabs">
-    <a class="nav-tab" href="/">行情</a>
-    <a class="nav-tab" href="/approvals">确认台</a>
-    <a class="nav-tab active" href="/suggestions">LLM建议</a>
-  </nav>
+  {% set page = 'suggestions' %}{% include '_nav.html' %}
   <span id="meta" class="muted"></span>
 </header>
 <main>

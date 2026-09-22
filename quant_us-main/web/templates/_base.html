@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>{% block title %}决策可视化{% endblock %} - quant_us</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+         margin: 0; background: #0f1117; color: #e2e8f0; }
+  header { background: #1a1d27; border-bottom: 1px solid #2d3748; color: #fff;
+           padding: 14px 22px; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  header h1 { font-size: 18px; margin: 0; }
+  .nav-tabs { display: flex; gap: 8px; margin-left: 6px; align-items: center; flex-wrap: wrap; }
+  .nav-tab { color: #94a3b8; text-decoration: none; font-size: 13px;
+             padding: 4px 10px; border-radius: 6px; }
+  .nav-tab:hover { color: #fff; background: #2d3748; }
+  .nav-tab.active { color: #fff; background: #2563eb; }
+  .muted { color: #64748b; font-size: 13px; margin-left: auto; }
+  main { max-width: 1180px; margin: 20px auto; padding: 0 16px 60px; }
+  .scopebar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center;
+              background: #1a1d27; border: 1px solid #2d3748; border-radius: 10px;
+              padding: 10px 14px; margin-bottom: 16px; font-size: 13px; }
+  .scope-chip { padding: 4px 10px; border-radius: 999px; border: 1px solid #2d3748;
+                color: #94a3b8; cursor: pointer; background: #0f1117; font-size: 12px; }
+  .scope-chip.active { background: #2563eb; color: #fff; border-color: #2563eb; }
+  .ctx { display: flex; gap: 16px; flex-wrap: wrap; color: #94a3b8; font-size: 12px;
+         margin-bottom: 14px; padding: 8px 12px; background: #131722;
+         border: 1px dashed #2d3748; border-radius: 8px; }
+  .card { background: #1a1d27; border: 1px solid #2d3748; border-radius: 10px;
+          padding: 14px 18px; margin-bottom: 14px; border-left: 5px solid #38bdf8; }
+  .card.warn { border-left-color: #f59e0b; }
+  .card.bad { border-left-color: #ef4444; }
+  .card.plain { border-left-color: #475569; }
+  .card h2 { font-size: 15px; margin: 0 0 10px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; }
+  .tile { background: #131722; border: 1px solid #2d3748; border-radius: 8px; padding: 10px 12px; }
+  .tile .k { font-size: 12px; color: #64748b; }
+  .tile .v { font-size: 19px; font-weight: 700; margin-top: 4px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid #232b3b; }
+  th { color: #64748b; font-weight: 600; font-size: 12px; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .tag { font-size: 12px; padding: 2px 8px; border-radius: 999px; white-space: nowrap; }
+  .tag.ok { background: #14532d; color: #86efac; }
+  .tag.muted { background: #232b3b; color: #94a3b8; }
+  .tag.nc { background: #3b2f14; color: #fbbf24; }
+  .tag.warn { background: #422006; color: #fcd34d; }
+  .tag.bad { background: #450a0a; color: #fca5a5; }
+  .why { font-size: 12px; color: #64748b; }
+  details.diag { background: #131722; border: 1px solid #2d3748; border-radius: 8px;
+                 padding: 8px 14px; margin-top: 12px; }
+  details.diag summary { cursor: pointer; color: #94a3b8; font-size: 13px; }
+  pre { background: #0b0e14; border: 1px solid #2d3748; border-radius: 8px;
+        padding: 10px; overflow: auto; font-size: 12px; color: #cbd5e1; max-height: 380px; }
+  .empty { text-align: center; color: #6b7280; padding: 40px 0; font-size: 15px; line-height: 1.9; }
+  .bar { height: 8px; background: #232b3b; border-radius: 4px; overflow: hidden; }
+  .bar > i { display: block; height: 100%; background: #38bdf8; }
+  .pos { color: #4ade80; } .neg { color: #f87171; }
+  .sec-title { font-size: 12px; font-weight: 700; color: #64748b; margin: 14px 0 6px; }
+  a { color: #7dd3fc; }
+</style>
+{% block head %}{% endblock %}
+</head>
+<body>
+<header>
+  <h1>{% block heading %}决策可视化{% endblock %}</h1>
+  {% include '_nav.html' %}
+  <span id="meta" class="muted"></span>
+</header>
+<main>
+  <div class="scopebar" id="scopebar"><span class="muted" style="margin:0">加载范围…</span></div>
+  <div class="ctx" id="ctx" style="display:none"></div>
+  <div id="content"><div class="empty">加载中…</div></div>
+  {% block footer %}{% endblock %}
+</main>
+<script>
+// ---- 唯一的 9 态中文映射（需求 §7 的展示约定集中在这一份，别处不得再写一套）----
+const STATUS_LABELS = {
+  OK: ['有效数值', 'ok'],
+  NO_OBJECT: ['暂无对象', 'muted'],
+  PENDING_EXECUTION: ['等待执行', 'warn'],
+  PENDING_SETTLEMENT: ['等待结算', 'warn'],
+  INSUFFICIENT_SAMPLE: ['样本不足', 'muted'],
+  NOT_COLLECTED: ['未采集', 'nc'],
+  STALE: ['数据过期', 'warn'],
+  READ_FAILED: ['读取失败', 'bad'],
+  NOT_APPLICABLE: ['不适用', 'muted'],
+  UNCLASSIFIED: ['未采集（词表未覆盖）', 'nc'],
+};
+const STATUS_LABEL_TEXT = Object.fromEntries(
+  Object.entries(STATUS_LABELS).map(([k, v]) => [k, v[0]]));
+const DATA_STATUS_LABELS = {
+  OK: ['数据正常', 'ok'], NO_OBJECT: ['暂无对象', 'muted'], STALE: ['数据过期', 'warn'],
+  PARTIAL: ['部分来源缺失', 'nc'], READ_FAILED: ['读取失败', 'bad'],
+  INCONSISTENT: ['结论待核对', 'bad'],
+};
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g,
+  c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function tag(code, table) {
+  const [text, cls] = (table || STATUS_LABELS)[code] || [code || '—', 'muted'];
+  return `<span class="tag ${cls}">${esc(text)}</span>`;
+}
+function statusTag(code) { return tag(code, STATUS_LABELS); }
+function dataStatusTag(code) { return tag(code, DATA_STATUS_LABELS); }
+function usd(v) {
+  if (v == null) return '—';
+  return '$' + Number(v).toLocaleString('en-US', {minimumFractionDigits: 2,
+                                                  maximumFractionDigits: 2});
+}
+function micro(v) { return v == null ? '—' : usd(v / 1e6); }
+function num(v, d) { return v == null ? '—' : Number(v).toFixed(d == null ? 2 : d); }
+function pct(v, d) { return v == null ? '—' : Number(v).toFixed(d == null ? 2 : d) + '%'; }
+// 指标渲染：**null 绝不显示成 0**（需求 §7）—— 一律走状态标签
+function metricCell(m) {
+  if (!m) return '<span class="tag muted">—</span>';
+  if (m.status && m.status !== 'OK') {
+    return statusTag(m.status) + (m.why ? `<div class="why">${esc(m.why)}</div>` : '');
+  }
+  let v = m.value;
+  if (v == null) return statusTag(m.status || 'NOT_COLLECTED');
+  if (m.unit === 'USD') v = usd(v); else if (m.unit === '%') v = pct(v); else v = num(v, 2);
+  return `<span>${esc(v)}</span>`;
+}
+async function api(path) {
+  const r = await fetch(path, {cache: 'no-store'});
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || j.ok === false) throw new Error(j.error || ('HTTP ' + r.status));
+  return j;
+}
+let STATE = {scopes: [], scopeId: null};
+function renderScopeBar() {
+  const bar = document.getElementById('scopebar');
+  bar.innerHTML = STATE.scopes.map(s =>
+    `<span class="scope-chip ${s.scope_id === STATE.scopeId ? 'active' : ''}"
+           data-scope="${esc(s.scope_id)}">${esc(s.label || s.scope_id)}</span>`
+  ).join('') + '<span class="muted" style="margin-left:auto">切换范围不会把不同范围的数字合计</span>';
+  bar.querySelectorAll('.scope-chip').forEach(el => el.onclick = () => {
+    STATE.scopeId = el.dataset.scope; renderScopeBar(); loadScope();
+  });
+}
+function renderCtx(env, server) {
+  const el = document.getElementById('ctx');
+  el.style.display = 'flex';
+  const sv = env.strategy_version || {};
+  const src = env.source_ref || {};
+  el.innerHTML = [
+    `范围 <b>${esc(env.scope_kind)}</b>`,
+    `数据截止 <b>${esc(env.as_of || '—')}</b>`,
+    `快照生成 ${esc((env.generated_at || '').slice(0, 19).replace('T', ' '))}`,
+    `策略 <b>${esc(sv.parent_strategy_id || '—')}/${esc(sv.parent_version || '—')}</b>`,
+    `账本 schema <b>${esc(src.ledger_schema_on_disk == null ? '—' : src.ledger_schema_on_disk)}</b>`,
+    `运行版本 <b>${esc((src.writer_pin || '—'))}</b>`,
+    server && server.stale ? `<span class="tag warn">快照已过时 ${Math.round(server.snapshot_age_seconds / 60)} 分钟</span>` : '',
+  ].join(' ');
+}
+function diagBlock(title, obj) {
+  return `<details class="diag"><summary>${esc(title)}</summary>
+    <pre>${esc(JSON.stringify(obj, null, 2))}</pre></details>`;
+}
+async function boot(renderer) {
+  try {
+    const meta = await api('/api/analytics/scopes');
+    document.getElementById('meta').textContent = meta.generated_at || '';
+    STATE.scopes = meta.scopes || [];
+    if (!STATE.scopes.length) {
+      document.getElementById('content').innerHTML =
+        '<div class="empty">还没有任何快照。<br>先跑一次 <code>python3 ops/build_web_snapshots.py</code>。</div>';
+      document.getElementById('scopebar').innerHTML = '<span class="muted" style="margin:0">无范围</span>';
+      return;
+    }
+    const want = new URLSearchParams(location.search).get('scope');
+    STATE.scopeId = (want && STATE.scopes.some(s => s.scope_id === want)) ? want
+                    : STATE.scopes[0].scope_id;
+    renderScopeBar();
+    await loadScope(renderer);
+  } catch (e) {
+    document.getElementById('content').innerHTML =
+      `<div class="card bad"><h2>读取失败</h2><div class="why">${esc(e.message)}</div></div>`;
+  }
+}
+async function loadScope(renderer) {
+  const r = renderer || window.__render;
+  const el = document.getElementById('content');
+  el.innerHTML = '<div class="empty">加载中…</div>';
+  try {
+    const j = await api('/api/analytics/' + encodeURIComponent(STATE.scopeId));
+    renderCtx(j.envelope, j.server);
+    el.innerHTML = r(j);
+  } catch (e) {
+    el.innerHTML = `<div class="card bad"><h2>读取失败</h2>
+      <div class="why">${esc(e.message)}</div>
+      <div class="why">其他范围仍可切换查看（需求场景 10：一个来源坏了不返回伪造的空账户）。</div></div>`;
+  }
+}
+</script>
+{% block script %}{% endblock %}
+</body>
+</html>

@@ -1,0 +1,105 @@
+{% extends '_base.html' %}
+{% set page = 'llm-impact' %}
+{% block title %}LLM 决策与贡献{% endblock %}
+{% block heading %}LLM 决策与贡献{% endblock %}
+{% block script %}
+function navChart(r, l) {
+  if (!r.length && !l.length) return '<div class="why">还没有可画的净值序列。</div>';
+  const W = 640, H = 160, pad = 28;
+  const all = r.concat(l).map(p => p.return_pct);
+  const lo = Math.min(0, ...all), hi = Math.max(0, ...all);
+  const span = (hi - lo) || 1;
+  const n = Math.max(r.length, l.length);
+  const x = i => pad + (W - 2 * pad) * (n <= 1 ? 0 : i / (n - 1));
+  const y = v => H - pad - (H - 2 * pad) * ((v - lo) / span);
+  const path = s => s.map((p, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(p.return_pct).toFixed(1)}`)
+                        .join(' ');
+  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:180px;background:#131722;
+      border:1px solid #2d3748;border-radius:8px">
+    <line x1="${pad}" y1="${y(0)}" x2="${W - pad}" y2="${y(0)}" stroke="#2d3748"/>
+    <path d="${path(r)}" fill="none" stroke="#94a3b8" stroke-width="2"/>
+    <path d="${path(l)}" fill="none" stroke="#38bdf8" stroke-width="2"/>
+    <text x="${pad}" y="14" fill="#94a3b8" font-size="11">灰=规则(R) 蓝=规则+LLM(L)，纵轴为收益率%</text>
+  </svg>`;
+}
+window.__render = function (j) {
+  const env = j.envelope, s = env.sections || {}, sec = s.llm_impact || {};
+  const out = [];
+  // 角色
+  out.push('<div class="card"><h2>角色与权限</h2><table><tr><th>角色</th><th>状态</th><th>说明</th></tr>');
+  for (const r of (sec.roles || [])) {
+    out.push(`<tr><td>${esc(r.role)}</td><td>${statusTag(r.status)}</td>
+      <td class="why">${esc(r.why || r.note || '')}</td></tr>`);
+  }
+  out.push('</table><div class="why">主链与 L1 的权限是两件事：主链 llm_permissions 为 shadow，'
+    + '而 L1 是独立纸面账户。不得用一处的权限描述另一处。</div></div>');
+  // 配对
+  const pr = sec.paired || {};
+  out.push('<div class="card"><h2>R / L 配对</h2>');
+  if (pr.applicable === false || pr.status === 'NOT_APPLICABLE') {
+    out.push(`<div>${statusTag('NOT_APPLICABLE')}<div class="why">${esc(pr.why || '')}</div></div>`);
+  } else if (!pr.common_sessions) {
+    out.push(`<div>${statusTag('NO_OBJECT')}<div class="why">
+      还没有双方都有效的公共 session（初始化回放不构成前向业绩）。</div></div>`);
+  } else {
+    out.push('<div class="grid">' + [
+      ['公共 session', pr.common_sessions],
+      ['R 全成本收益', pct((pr.R_full_cost_return || 0) * 100)],
+      ['L 全成本收益', pct((pr.L_full_cost_return || 0) * 100)],
+      ['L − R', pct((pr.L_minus_R_return || 0) * 100)],
+      ['R 最大回撤', pct((pr.R_max_drawdown || 0) * 100)],
+      ['L 最大回撤', pct((pr.L_max_drawdown || 0) * 100)],
+      ['L 程序侧弃权应用', pr.L_program_abstain_applications],
+      ['L 模型知情应用', pr.L_model_informed_applications],
+      ['VETO', pr.L_VETO], ['ABSTAIN', pr.L_ABSTAIN], ['PASS', pr.L_PASS],
+    ].map(([k, v]) => `<div class="tile"><div class="k">${k}</div><div class="v">${v == null ? '—' : v}</div></div>`).join('') + '</div>');
+    if (pr.L_program_abstain_applications) {
+      out.push(`<div class="why">其中 ${pr.L_program_abstain_applications} 个应用是**程序侧弃权**
+        （模型从未参与，L 采用父策略、与 R 同路）⇒ 这些配对是退化的，不携带模型信息。</div>`);
+    }
+    if (pr.full_cost_is_upper_bound) {
+      out.push(`<div class="why">成本口径 PROVISIONAL：上列为「同一已执行交易路径下、待扣非负费用后的净值上界」。</div>`);
+    }
+  }
+  out.push(navChart(sec.nav_r || [], sec.nav_l || []));
+  out.push('</div>');
+  // 成本预算
+  const cb = sec.cost_budget || {};
+  out.push('<div class="card plain"><h2>模型成本与预算</h2>');
+  if (cb.status === 'NOT_COLLECTED') {
+    out.push(`<div>${statusTag('NOT_COLLECTED')}<div class="why">${esc(cb.why || '')}</div></div>`);
+  } else {
+    out.push('<div class="grid">' + [
+      ['已知费用', usd(cb.known_cost_usd)], ['费用未知次数', cb.unknown_cost_count],
+      ['在飞调用', cb.in_flight_count], ['已预留', usd(cb.reserved_usd)],
+      ['预算', usd(cb.budget_usd)], ['剩余可用', usd(cb.remaining_usd)],
+    ].map(([k, v]) => `<div class="tile"><div class="k">${k}</div><div class="v">${v == null ? '—' : v}</div></div>`).join('') + '</div>');
+    out.push(`<div class="why">口径：${esc(cb.cost_basis || '')}。「费用未知」不是 0 —— 超时/异常时金额不可知，单列并预留。</div>`);
+  }
+  out.push('</div>');
+  // 决策清单
+  const rows = sec.decision_table || [];
+  out.push(`<div class="card"><h2>决策清单（${rows.length}）</h2>`);
+  if (!rows.length) out.push('<div class="why">还没有决策记录。</div>');
+  else {
+    out.push('<table><tr><th>机会</th><th>账户</th><th>最终动作</th><th>模型原始</th>'
+      + '<th>原因码</th><th>冻结</th><th>成交</th><th>费用</th></tr>');
+    for (const r of rows) {
+      out.push(`<tr><td><a href="/decisions/${encodeURIComponent(env.scope_id + '@' + r.opportunity_id)}">
+        ${esc((r.opportunity_id || '').slice(0, 22))}…</a></td>
+        <td>${esc((r.scope || '').split(':').pop())}</td>
+        <td>${esc(r.action || '—')}</td>
+        <td>${esc(r.raw_action || '—')}</td>
+        <td class="why">${esc(r.reason_code || '—')}</td>
+        <td>${r.decision_frozen ? '是' : '否'}</td>
+        <td>${r.execution_applied ? '是' : '否'}</td>
+        <td class="num">${r.cost_uncertain ? '<span class="tag nc">未知待补记</span>'
+          : usd(r.model_cost_usd)}</td></tr>`);
+    }
+    out.push('</table>');
+  }
+  out.push(`<div class="why">「有效 HOLD / 与规则一致」不是失败，也不算「改变了动作」。</div></div>`);
+  out.push(diagBlock('证据与诊断（llm_impact section）', sec));
+  return out.join('');
+};
+{% endblock %}
