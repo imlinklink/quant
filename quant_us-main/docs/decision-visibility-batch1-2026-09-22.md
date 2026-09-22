@@ -1,7 +1,9 @@
-# 决策可视化第一批（六页）交付记录
+# 决策可视化第一批 + 第二批 交付记录
 
-日期：2026-09-22。状态：**已上到在跑服务 8890**（`quant-runtime-main` pin `31c59ff`）。
-依据：`docs/decision-visibility-product-requirements-2026-09-22.md`（需求草案）第一批。
+日期：2026-09-22。状态：**两批都已上到在跑服务 8890**（`quant-runtime-main` pin `574eb5a`）。
+依据：`docs/decision-visibility-product-requirements-2026-09-22.md`（需求草案）。
+
+> 文件名保留 `batch1`（第一批先落地），本文件同时记录第二批（见 §8）。
 
 ## 0. 一句话
 
@@ -120,3 +122,36 @@ python3 -m pytest quant_us-main/tests/unit/ops/test_analytics_export.py \
                   quant_us-main/tests/unit/live/test_analytics_readonly.py -q
 curl -s http://127.0.0.1:8890/api/analytics/scopes
 ```
+
+## 8. 第二批（同日，`caa478f` / pin `574eb5a`）
+
+需求 §8 第二批是「看清策略和 LLM 是否有效」。**纯新增，零删除** —— 第一批的 section 结构
+接得住（6 文件 +316 行）。
+
+**核心是四份研究归一成同一张对比表。** 它们产物形状各不相同（诊断研究是
+`comparison`+`statistics`，策略研究是 `step1`/`entry_arms`/`sleeve`），
+`normalize_study` 显式按形状取值：
+
+| 实验 | 类型 | 判定 | 扣费后收益 | 胜率 | MDD | 尾部 |
+|---|---|---|---|---|---|---|
+| SD-P0P1-20260921-012 | 冻结基线 | `INSUFFICIENT_EVIDENCE` | 266.15% | 52.79% | −13.87% | 未采集 |
+| S1 机械利润保护 | 卖出·同机会对照 | `NO_IMPROVEMENT` | 未采集（只给 R 汇总） | 只报计数 | — | A 1.376 → B 1.338 |
+| B1 抄底替换 | 买入·替换 | `RISK_TRADEOFF` | 未采集（只给差值） | 未采集 | 未采集 | Δ+0.454R |
+| 抄底 sleeve | 买入·补充 | `RISK_REJECTED` | 231.91% | 49.31% | −14.55% | −1.865R |
+
+**几条刻意的口径**：
+- **取不到就不填**：差额类产物（抄底替换只给差值）的绝对值标「未采集」，**不在此处与基线
+  相加合成** —— 合成出来的数没人复核，而页面并列显示基线行与差值行已经足够。
+- **胜率只给计数时只报计数**：S1 的产物给的是 `n_profitable/n_closed`，比值口径（分母是
+  197 还是 201）要看报告，**不在这里相除**。
+- **权衡并列、不给结论**：S1 就是实例 —— 盈利笔数 104→113（升）而净 R 161.9→90.8（降），
+  两件事同时可见，页面不写成「策略提升」（需求 §5.5、场景 8）。
+- 每行带**产物 sha256**，结论可溯源到文件。
+
+**顺带**：`/opportunities` 加「应用动作的原因分布」（区分模型自己弃权 vs 程序侧弃权 ——
+后者意味着模型从未被咨询）；`/llm-impact` 加「最有帮助/最有损害」与「提前退出的收益与
+损害」两块。两项当前都**没有成熟样本**，如实显示「未采集 + 原因」，不在噪声上排名次。
+
+**一个我犯的错（已补测试）**：第一次实现把基线胜率映射到 `statistics.exits.realized_win_rate`，
+而它其实在 **`comparison.exits`** 里 ⇒ 页面静默显示「未采集」。新增的
+`StrategyComparisonTests` 钉死字段路径与四种形状的识别，形状不认识就红。

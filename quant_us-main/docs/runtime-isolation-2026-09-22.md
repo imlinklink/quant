@@ -61,7 +61,7 @@ L1 的代码在我今天的每次研究提交后都悄悄变了，而记录上�
 
 | 运行 checkout | pin 的 commit | 内容 | 约束 |
 |---|---|---|---|
-| `quant-runtime-main` | `31c59ff` = `cf2440d` + 决策可视化 | M1 影子实验、三臂前向、**实盘服务**、可视化页面 | **store schema 9 —— 不得再往前移**（M1 的账本是 schema 9；合并后的 main 已是 schema 10） |
+| `quant-runtime-main` | `574eb5a` = `31c59ff` + 可视化第二批 | M1 影子实验、三臂前向、**实盘服务**、可视化页面 | **store schema 9 —— 不得再往前移**（M1 的账本是 schema 9；合并后的 main 已是 schema 10） |
 | `quant-runtime-research` | `c43b215`（合并后的 main HEAD） | L1 持仓实验 | schema 10 |
 
 ### 四之四、第三次移动 runtime-main 的 pin（2026-09-22 下午）：决策可视化六页
@@ -86,6 +86,19 @@ checkout 跑），而 pin 上的那一份还停在运行版本隔离**之前**�
 
 **新增排程**：`com.quant.web-snapshots`（北京周二~周六 21:30 / 22:30），排在所有写账本的
 作业之后。
+
+### 四之五、第四次移动 runtime-main 的 pin（同日）：可视化第二批
+
+`31c59ff` → **`574eb5a`**（`main` 的 `caa478f`）。第二批是**纯新增**（6 文件 +316 行、零删除），
+仍全部不在 `frozen_code` 里，冻结哈希 **12/12 一致**（已核）。
+
+**为什么不并进 `31c59ff` 一次移动**：第二批引入了**运行版本内的新 section 形状**
+（`normalize_study` 的四种产物映射）。分成两次提交，将来回看 pin 历史时能分清哪一批带来了
+什么；并进去就只剩一个「可视化」大提交。
+
+**同一教训再记一次**：模板改动后**必须 `launchctl kickstart -k` 重启服务**才生效
+（Flask 在 `debug=False` 下缓存 Jinja 模板，而服务此前已经渲染过这些页面）——
+不重启的表现是「页面 200 但内容还是旧的」，比 404 更难发现。
 
 ### 四之三、第二次移动 runtime-main 的 pin（2026-09-22 午间）：段首日公司行动
 
