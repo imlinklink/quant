@@ -99,6 +99,25 @@ window.__render = function (j) {
     out.push('</table>');
   }
   out.push(`<div class="why">「有效 HOLD / 与规则一致」不是失败，也不算「改变了动作」。</div></div>`);
+  // 最好/最坏案例（第二批要求「最有帮助与最有损害的决策都可下钻」）
+  const cs = sec.cases || {};
+  out.push('<div class="card plain"><h2>最有帮助 / 最有损害的决策</h2>');
+  if (cs.status !== 'OK') {
+    out.push(`<div>${statusTag(cs.status || 'NOT_COLLECTED')}
+      <div class="why">${esc(cs.why || '')}</div></div>`);
+  } else {
+    for (const [tag, list] of [['最有帮助', cs.best || []], ['最有损害', cs.worst || []]]) {
+      out.push(`<div class="sec-title">${tag}</div>`);
+      out.push((list.length ? list.map(c => `<div class="why">${esc(JSON.stringify(c))}</div>`).join('')
+        : '<div class="why">无</div>'));
+    }
+  }
+  const ee = cs.early_exit_harm || {};
+  if (ee.status) {
+    out.push(`<div class="sec-title">提前退出的收益与损害</div>
+      <div>${statusTag(ee.status)}<div class="why">${esc(ee.why || '')}</div></div>`);
+  }
+  out.push('</div>');
   out.push(diagBlock('证据与诊断（llm_impact section）', sec));
   return out.join('');
 };

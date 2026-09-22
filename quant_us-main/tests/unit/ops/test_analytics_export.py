@@ -284,5 +284,67 @@ class WriterTests(unittest.TestCase):
             self.assertTrue(outsider.exists(), '守卫拒绝时不得真的删掉')
 
 
+class StrategyComparisonTests(unittest.TestCase):
+    """第二批核心：四份研究归一成同一张表。
+
+    这组测试的价值在**字段路径**：第一次实现时我把基线胜率写成
+    `statistics.exits.realized_win_rate`，而它其实在 `comparison.exits` 里 ——
+    结果是页面上静默显示「未采集」。下面第一条就是钉死这个的。
+    """
+    BASE = ROOT / 'data'
+
+    @classmethod
+    def setUpClass(cls):
+        r = reg.load_registry()
+        cls.rows = {}
+        for e in reg.expand(cls.BASE, r):
+            if e['kind'] != 'research':
+                continue
+            secs = S.research_sections(cls.BASE, e)
+            cls.rows[e['scope_id']] = S.normalize_study(cls.BASE, e, secs['research'])
+
+    def test_every_registered_study_is_recognized(self):
+        kinds = {sid: row['kind'] for sid, row in self.rows.items()}
+        self.assertEqual(sorted(kinds), sorted(self.rows))
+        unknown = [sid for sid, k in kinds.items() if k is None]
+        self.assertEqual(unknown, [], f'产物形状没被识别 —— 新产物要么映射、要么显式说明：{unknown}')
+        self.assertEqual(sorted(set(kinds.values())),
+                         ['baseline', 'entry_replacement', 'entry_sleeve', 'exit_protection'])
+
+    def test_baseline_win_rate_comes_from_comparison_exits(self):
+        row = self.rows['research:SD-P0P1-20260921-012']
+        m = row['metrics']
+        self.assertEqual(m['win_rate_pct']['status'], C.OK,
+                         '胜率在 comparison.exits.realized_win_rate，不在 statistics 里')
+        self.assertAlmostEqual(m['win_rate_pct']['value'], 52.79, places=1)
+        self.assertAlmostEqual(m['return_pct']['value'], 266.15, places=1)
+        self.assertAlmostEqual(m['mdd_pct']['value'], -13.87, places=1)
+
+    def test_exit_protection_reports_both_arms_and_the_tradeoff(self):
+        row = self.rows['research:SR-EXIT-PROTECT-20260921-001']
+        self.assertIn('A_规则基线', row['arms'])
+        self.assertIn('B_加利润保护', row['arms'])
+        a = row['arms']['A_规则基线']
+        b = row['arms']['B_加利润保护']
+        # 胜率升（104→113 笔盈利）而净 R 降（161.9→90.8）—— 两件事必须同时可见
+        self.assertGreater(b['profitable']['value'], a['profitable']['value'])
+        self.assertLess(b['sum_net_r']['value'], a['sum_net_r']['value'])
+
+    def test_delta_only_artifact_does_not_invent_absolute_numbers(self):
+        """差额类产物只给差值 ⇒ 绝对值必须「未采集」，不得填 0 或替它合成。"""
+        row = self.rows['research:SR-BOTTOM-20260921-001']
+        self.assertEqual(row['kind'], 'entry_replacement')
+        for key in ('return_pct', 'mdd_pct', 'win_rate_pct'):
+            self.assertEqual(row['metrics'][key]['status'], C.NOT_COLLECTED, key)
+            self.assertIsNone(row['metrics'][key]['value'], key)
+        self.assertEqual(row['deltas']['terminal_return_pp']['status'], C.OK)
+        self.assertAlmostEqual(row['deltas']['terminal_return_pp']['value'], -75.8, places=1)
+
+    def test_every_row_carries_a_verifiable_source(self):
+        for sid, row in self.rows.items():
+            self.assertTrue(row['source'].get('file'), f'{sid} 缺来源文件')
+            self.assertTrue(row['source'].get('sha256'), f'{sid} 缺产物哈希（结果要可溯源）')
+
+
 if __name__ == '__main__':
     unittest.main()
