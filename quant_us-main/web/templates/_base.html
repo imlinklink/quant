@@ -46,7 +46,9 @@
   .tag.nc { background: #3b2f14; color: #fbbf24; }
   .tag.warn { background: #422006; color: #fcd34d; }
   .tag.bad { background: #450a0a; color: #fca5a5; }
-  .why { font-size: 12px; color: #64748b; }
+  .why { font-size: 12px; color: #94a3b8; line-height: 1.65; }
+  .card { overflow-x: auto; }
+  @media (max-width: 640px) { .grid { grid-template-columns: repeat(2,minmax(0,1fr)); } .tile .v {font-size:16px;} header {padding:12px;} main {padding:0 8px 32px;} td {min-width:80px;} }
   details.diag { background: #131722; border: 1px solid #2d3748; border-radius: 8px;
                  padding: 8px 14px; margin-top: 12px; }
   details.diag summary { cursor: pointer; color: #94a3b8; font-size: 13px; }
@@ -110,6 +112,11 @@ function usd(v) {
 }
 function micro(v) { return v == null ? '—' : usd(v / 1e6); }
 function num(v, d) { return v == null ? '—' : Number(v).toFixed(d == null ? 2 : d); }
+function timestamp(v) {
+  if (!v) return '—';
+  const d = new Date(v);
+  return Number.isNaN(d.getTime()) ? esc(v) : d.toLocaleString('zh-CN', {timeZone:'Asia/Shanghai', hour12:false})+' 北京';
+}
 function pct(v, d) { return v == null ? '—' : Number(v).toFixed(d == null ? 2 : d) + '%'; }
 // 指标渲染：**null 绝不显示成 0**（需求 §7）—— 一律走状态标签
 function metricCell(m) {
@@ -129,6 +136,16 @@ async function api(path) {
   return j;
 }
 let STATE = {scopes: [], scopeId: null};
+function rememberScope() {
+  if (typeof history !== 'undefined') {
+    const u=new URL(location.href); u.searchParams.set('scope', STATE.scopeId); history.replaceState(null,'',u);
+  }
+  document.querySelectorAll('.nav-tab').forEach(a=>{
+    if (['/overview','/positions','/opportunities','/llm-impact'].includes(new URL(a.href,location.href).pathname)) {
+      const u=new URL(a.href,location.href);u.searchParams.set('scope',STATE.scopeId);a.href=u;
+    }
+  });
+}
 function renderScopeBar() {
   const bar = document.getElementById('scopebar');
   bar.innerHTML = STATE.scopes.map(s =>
@@ -136,7 +153,7 @@ function renderScopeBar() {
            data-scope="${esc(s.scope_id)}">${esc(s.label || s.scope_id)}</span>`
   ).join('') + '<span class="muted" style="margin-left:auto">切换范围不会把不同范围的数字合计</span>';
   bar.querySelectorAll('.scope-chip').forEach(el => el.onclick = () => {
-    STATE.scopeId = el.dataset.scope; renderScopeBar(); loadScope();
+    STATE.scopeId = el.dataset.scope; rememberScope(); renderScopeBar(); loadScope();
   });
 }
 function renderCtx(env, server) {
@@ -147,10 +164,10 @@ function renderCtx(env, server) {
   el.innerHTML = [
     `范围 <b>${esc(env.scope_kind)}</b>`,
     `数据截止 <b>${esc(env.as_of || '—')}</b>`,
-    `快照生成 ${esc((env.generated_at || '').slice(0, 19).replace('T', ' '))}`,
+    `快照生成 ${timestamp(env.generated_at)}`,
     `策略 <b>${esc(sv.parent_strategy_id || '—')}/${esc(sv.parent_version || '—')}</b>`,
     `账本 schema <b>${esc(src.ledger_schema_on_disk == null ? '—' : src.ledger_schema_on_disk)}</b>`,
-    `运行版本 <b>${esc((src.writer_pin || '—'))}</b>`,
+    `登记运行版本 <b>${esc((src.writer_pin || '—'))}</b>`,
     server && server.stale ? `<span class="tag warn">快照已过时 ${Math.round(server.snapshot_age_seconds / 60)} 分钟</span>` : '',
   ].join(' ');
 }
@@ -180,6 +197,7 @@ async function boot(renderer) {
     const want = new URLSearchParams(location.search).get('scope');
     STATE.scopeId = (want && STATE.scopes.some(s => s.scope_id === want)) ? want
                     : STATE.scopes[0].scope_id;
+    rememberScope();
     renderScopeBar();
     await loadScope(renderer);
   } catch (e) {
@@ -189,10 +207,12 @@ async function boot(renderer) {
 }
 async function loadScope(renderer) {
   const r = renderer || window.__render;
+  const requestedScope = STATE.scopeId;
   const el = document.getElementById('content');
   el.innerHTML = '<div class="empty">加载中…</div>';
   try {
     const j = await api('/api/analytics/' + encodeURIComponent(STATE.scopeId));
+    if (STATE.scopeId !== requestedScope) return;
     renderCtx(j.envelope, j.server);
     el.innerHTML = r(j);
   } catch (e) {

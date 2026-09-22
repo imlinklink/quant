@@ -114,7 +114,9 @@ class PageRenderTests(unittest.TestCase):
         finally:
             os.unlink(payload)
         self.assertIn('SHADOW:M1-FORWARD-S-20260917:R', html, '账户没出现在页面上')
-        self.assertIn('99,', html, '净值没出现在页面上')          # $99,970.57
+        body = webapp.app.test_client().get('/api/analytics/paper:M1-FORWARD-S-20260917').get_json()
+        value = body['envelope']['sections']['overview']['accounts'][0]['equity']['value']
+        self.assertIn(f'{value:,.2f}', html, '净值没出现在页面上')
         self.assertIn('检查', html, '「需要处理」没有列出做过哪些检查')
 
     def test_llm_impact_page_shows_the_decision_row(self):
@@ -141,7 +143,10 @@ class PageRenderTests(unittest.TestCase):
         finally:
             os.unlink(payload)
         self.assertIn('初始化回放', html, '图上没有区分回放与前向')
-        self.assertIn('还没有前向数据', html, '没有前向数据时必须明说，不能写成"全部为前向"')
+        # 真实前向账户会增长；只在实际尚无前向数据时要求该文案。
+        body = webapp.app.test_client().get('/api/analytics/paper:L1-POSITION-20260922').get_json()
+        if not body['envelope']['sections']['boundary']['nav_forward_sessions']:
+            self.assertIn('还没有前向数据', html)
         self.assertIn('2026-09-21', html, '图上没有标出前向起点')
         self.assertNotIn('全部为前向', html, '有回放数据时不得声称"全部为前向"')
 

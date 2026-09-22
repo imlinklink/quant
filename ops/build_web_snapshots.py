@@ -78,18 +78,8 @@ def _paper_scope(base: Path, entry: dict, now: datetime):
     boundary['nav_replay_sessions'] = len(replay_nav)
     boundary['nav_forward_sessions'] = len(forward_nav)
     # 模型有效样本：**只数前向区间内确实调过真实模型并完成的尝试**
-    valid = 0
-    for a in entry['accounts']:
-        if not a['account_id'].endswith(':L'):
-            continue
-        for app in store.applications(a['account_id']):
-            attempt = store.job_run(app['decision_id']) if app.get('decision_id') else None
-            if not attempt or attempt.get('model_id') in S.PINNED_VOCABULARY.FIXTURE_MODEL_IDS:
-                continue
-            if attempt.get('gated') or attempt.get('status') != 'COMPLETED':
-                continue
-            if entry.get('forward_start_session'):
-                valid += 1
+    valid = sum(r['scope'].endswith(':L') and r['valid_real_review'] and r['phase'] == 'forward'
+                for r in S.I.decision_rows(store, entry.get('forward_start_session')))
     boundary['model_valid_sample_count'] = valid
     boundary['model_valid_sample_why'] = (
         '只计前向起点之后、真实模型、确实发起调用且完成的评审（夹具与程序侧弃权都不算）')
@@ -115,6 +105,15 @@ def _paper_scope(base: Path, entry: dict, now: datetime):
     # sections 在 data_status 之后算：「需要处理」要用它做真实检查（不能写死空待办）
     secs, mv = S.paper_scope_sections(store, entry, prices=prices, base=base,
                                       data_status=data_status)
+    from scripts.portfolio_shadow.data_readiness import expected_session
+    expected = expected_session(now)
+    boundary['expected_completed_session'] = expected
+    for scope, actual in acct_sessions.items():
+        if expected and actual and actual < expected:
+            secs['overview']['todo'].append(
+                f'{scope} 结算截至 {actual}，最近已完成会话为 {expected}；'
+                '等待对应日作业推进或核对运行记录，不表示应补做过期模型决策')
+    secs['overview']['todo_checks'].append('账户结算日期与最近已完成交易会话（既有交易日历）')
 
     env = C.envelope(
         generation_id=_generation_id(now), scope_id=entry['scope_id'],
@@ -128,7 +127,9 @@ def _paper_scope(base: Path, entry: dict, now: datetime):
         sections={**secs, 'boundary': boundary,
                   'diagnostics': {'tables': table_counts(ledger),
                                   'experiment_status': (exp or {}).get('status')}})
-    decisions = [(f"{entry['scope_id']}@{oid}", oid) for oid, _ in store.opportunity_rows()]
+    keys = {oid for oid, _ in store.opportunity_rows()}
+    keys.update(k for k, _ in store.packets_matching('@pos:'))
+    decisions = [(f"{entry['scope_id']}@{oid}", oid) for oid in sorted(keys)]
     return env, decisions
 
 
@@ -149,6 +150,21 @@ def _decision_file(base: Path, scope_entry: dict, decision_key: str, oid: str, n
     rp = S._report()
     trace = rp.decision_trace(store, oid,
                               tuple(a['account_id'] for a in scope_entry['accounts']))
+    packet = store.packet_for_opportunity(oid) or {}
+    identity = packet.get('identity') or {}
+    parent = store.opportunity(S.I.base_opportunity(oid)) or {}
+    trace['security_id'] = identity.get('security_id') or parent.get('security_id')
+    trace['signal_session'] = identity.get('reviewed_session') or parent.get('signal_session')
+    trace['planned_execution_session'] = identity.get('execution_session') or parent.get('planned_execution_session')
+    trace['technical_evidence'] = packet.get('new_evidence') or packet.get('technical_packet') or []
+    trace['frozen_packet'] = packet
+    all_rows = S.I.decision_rows(store, scope_entry.get('forward_start_session'))
+    trace['decision_rows'] = [r for r in all_rows if r['opportunity_id'] == oid]
+    trace['lifecycle_events'] = {a['account_id']: [e for e in store.events(a['account_id'])
+        if e.get('opportunity_id') == S.I.base_opportunity(oid)] for a in scope_entry['accounts']}
+    cases = S.I.contribution_cases(store, [a['account_id'] for a in scope_entry['accounts']], all_rows)
+    trace['outcomes'] = [c for c in cases.get('all', [])
+                         if c['opportunity_id'] == S.I.base_opportunity(oid)]
     trace['decision_id'] = decision_key
     trace['scope_id'] = scope_entry['scope_id']
     trace['generated_at'] = now.isoformat()
@@ -180,7 +196,7 @@ def _experiments_index(base: Path, scopes: list, now: datetime) -> tuple:
                       'sections': secs})
     index = {'generated_at': now.isoformat(), 'research_cards': cards,
              'comparison_rows': [S.normalize_study(base, e, (S.research_sections(
-                 base, e).get('research') or {}))
+                 base, e).get('full') or {}))
                  for e in scopes if e['kind'] == 'research'],
              'note': '研究结论只用于淘汰方向；正式资格需前向登记，本页不生成「策略提升」结论'}
     return index, reports, artifacts
@@ -246,6 +262,11 @@ def build(base: Path, snapshot_dir: Path, only=None, now=None) -> tuple:
                                  'data_status': C.DS_READ_FAILED, 'as_of': None,
                                  'error': repr(exc)})
     exp_index, reports, artifacts = _experiments_index(base, scopes, now)
+    exp_index['forward_scopes'] = [
+        {'scope_id': v['scope_id'], 'as_of': v['as_of'], 'data_status': v['data_status'],
+         'boundary': v['sections'].get('boundary', {}),
+         'progress': v['sections'].get('overview', {}).get('in_progress', [])}
+        for v in files.values() if isinstance(v, dict) and v.get('scope_kind') == 'paper']
     files['experiments.json'] = exp_index
     for key, md in reports.items():
         files[f'reports/{key}.md'] = md

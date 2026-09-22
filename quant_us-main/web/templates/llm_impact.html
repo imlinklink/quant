@@ -30,11 +30,12 @@ function navChart(r, l, fwdStart) {
       `${i ? 'L' : 'M'}${x(off + i).toFixed(1)},${y(p.return_pct).toFixed(1)}`).join(' ');
     if (head.length > 1) parts.push(`<path d="${toPath(head, 0)}" fill="none" stroke="${color}"
       stroke-width="2" stroke-dasharray="5 4" opacity="0.55"/>`);
+    if (tail.length === 1) parts.push(`<circle cx="${x(idx)}" cy="${y(tail[0].return_pct)}" r="3" fill="${color}"/>`);
     if (tail.length > 1) parts.push(`<path d="${toPath(tail, idx)}" fill="none" stroke="${color}"
       stroke-width="2"/>`);
   }
   const bx = (hasFwd && splitIdx > 0) ? x(splitIdx) : null;
-  const note = !hasFwd ? '全部为前向（该范围未声明前向起点）'
+  const note = !hasFwd ? '未声明前向起点，区间性质待核对'
     : allReplay ? `全部是初始化回放 —— **还没有前向数据**（前向起点 ${esc(fwdStart)}）`
     : splitIdx === 0 ? `全部为前向（前向起点 ${esc(fwdStart)} 之前没有净值记录）`
     : `虚线=初始化回放（非前向业绩）　竖线=前向起点 ${esc(fwdStart)}`;
@@ -44,6 +45,10 @@ function navChart(r, l, fwdStart) {
     ${bx ? `<line x1="${bx}" y1="14" x2="${bx}" y2="${H - pad}" stroke="#f59e0b"
              stroke-width="1" stroke-dasharray="3 3"/>` : ''}
     ${parts.join('')}
+    <text x="4" y="60" fill="#94a3b8" font-size="10">${hi.toFixed(2)}</text>
+    <text x="4" y="${H-pad}" fill="#94a3b8" font-size="10">${lo.toFixed(2)}</text>
+    <text x="${pad}" y="${H-5}" fill="#94a3b8" font-size="10">${esc(r[0]?.session || '')}</text>
+    <text x="${W-pad}" y="${H-5}" text-anchor="end" fill="#94a3b8" font-size="10">${esc(r[r.length-1]?.session || '')}</text>
     <text x="${pad}" y="14" fill="#94a3b8" font-size="11">灰=规则(R) 蓝=规则+LLM(L)</text>
     <text x="${pad}" y="${pad + 2}" fill="#64748b" font-size="10">${note}</text>
   </svg>`;
@@ -61,6 +66,15 @@ window.__render = function (j) {
   }
   out.push('</table><div class="why">主链与 L1 的权限是两件事：主链 llm_permissions 为 shadow，'
     + '而 L1 是独立纸面账户。不得用一处的权限描述另一处。</div></div>');
+  out.push('<div class="card"><h2>模型参与与执行</h2>');
+  const pf=sec.participation_funnel || {};
+  for (const [role, m] of Object.entries(pf)) {
+    out.push(`<div class="sec-title">${role==='entry'?'入场':'持仓'}</div><div class="grid">`+
+      [['应评审',m.eligible_for_review ?? m.eligible],['已评审',m.reviewed],['数据阻断',m.data_blocked],
+       ['调用失败/降级',m.failure_abstains],['提出改变',m.plan_change_count ?? m.path_changed],
+       ['持仓动作已兑现',m.path_applied]].map(([k,v])=>`<div class="tile"><div class="k">${k}</div><div class="v">${v==null?'—':v}</div></div>`).join('')+'</div>');
+  }
+  out.push('<div class="why">本节为累计记录；提出改变与已兑现分别统计，重复评审不等于独立成熟机会。</div></div>');
   // 配对
   const pr = sec.paired || {};
   out.push('<div class="card"><h2>R / L 配对</h2>');
@@ -72,14 +86,14 @@ window.__render = function (j) {
   } else {
     out.push('<div class="grid">' + [
       ['公共 session', pr.common_sessions],
-      ['R 全成本收益', pct((pr.R_full_cost_return || 0) * 100)],
-      ['L 全成本收益', pct((pr.L_full_cost_return || 0) * 100)],
-      ['L − R', pct((pr.L_minus_R_return || 0) * 100)],
-      ['R 最大回撤', pct((pr.R_max_drawdown || 0) * 100)],
-      ['L 最大回撤', pct((pr.L_max_drawdown || 0) * 100)],
-      ['L 程序侧弃权应用', pr.L_program_abstain_applications],
-      ['L 模型知情应用', pr.L_model_informed_applications],
-      ['VETO', pr.L_VETO], ['ABSTAIN', pr.L_ABSTAIN], ['PASS', pr.L_PASS],
+      ['R 全成本收益', pr.R_full_cost_return == null ? '—' : pct(pr.R_full_cost_return * 100)],
+      ['L 全成本收益', pr.L_full_cost_return == null ? '—' : pct(pr.L_full_cost_return * 100)],
+      ['L − R', pr.L_minus_R_return == null ? '—' : pct(pr.L_minus_R_return * 100)],
+      ['R 最大回撤', pr.R_max_drawdown == null ? '—' : pct(pr.R_max_drawdown * 100)],
+      ['L 最大回撤', pr.L_max_drawdown == null ? '—' : pct(pr.L_max_drawdown * 100)],
+      ['R 平均暴露', pr.R_avg_exposure == null ? '—' : pct(pr.R_avg_exposure*100)],
+      ['L 平均暴露', pr.L_avg_exposure == null ? '—' : pct(pr.L_avg_exposure*100)],
+
     ].map(([k, v]) => `<div class="tile"><div class="k">${k}</div><div class="v">${v == null ? '—' : v}</div></div>`).join('') + '</div>');
     if (pr.L_program_abstain_applications) {
       out.push(`<div class="why">其中 ${pr.L_program_abstain_applications} 个应用是**程序侧弃权**
@@ -89,7 +103,14 @@ window.__render = function (j) {
       out.push(`<div class="why">成本口径 PROVISIONAL：上列为「同一已执行交易路径下、待扣非负费用后的净值上界」。</div>`);
     }
   }
+  out.push(`<div class="why">前向绩效区间 ${esc(pr.window_start || '未声明')} → ${esc(pr.window_end || '等待数据')}。${esc(pr.why || '')}</div>`);
+  const nr=sec.nav_r || [], nl=sec.nav_l || [];
+  const lm=new Map(nl.map(p=>[p.session,p]));
+  const delta=nr.filter(p=>lm.has(p.session)).map(p=>({...p,return_pct:lm.get(p.session).return_pct-p.return_pct}));
+  out.push('<div class="sec-title">R / L 收益路径（自实验初始资金）</div>');
   out.push(navChart(sec.nav_r || [], sec.nav_l || [], sec.forward_start_session));
+  out.push('<div class="sec-title">L−R 收益率差（百分点，自实验初始资金）</div>');
+  out.push(navChart(delta.map(p=>({...p,return_pct:0})), delta, sec.forward_start_session));
   out.push('</div>');
   // 成本预算
   const cb = sec.cost_budget || {};
@@ -110,17 +131,17 @@ window.__render = function (j) {
   out.push(`<div class="card"><h2>决策清单（${rows.length}）</h2>`);
   if (!rows.length) out.push('<div class="why">还没有决策记录。</div>');
   else {
-    out.push('<table><tr><th>机会</th><th>账户</th><th>最终动作</th><th>模型原始</th>'
-      + '<th>原因码</th><th>冻结</th><th>成交</th><th>费用</th></tr>');
+    out.push('<table><tr><th>证券 / 角色 / 会话</th><th>账户</th><th>规则 → 最终动作</th><th>模型原始</th>'
+      + '<th>原因码</th><th>冻结</th><th>执行状态</th><th>费用</th></tr>');
     for (const r of rows) {
       out.push(`<tr><td><a href="/decisions/${encodeURIComponent(env.scope_id + '@' + r.opportunity_id)}">
-        ${esc((r.opportunity_id || '').slice(0, 22))}…</a></td>
+        ${esc(r.security_id || r.opportunity_id)}</a><div class="why">${esc(r.role)} · ${esc(r.session)}</div></td>
         <td>${esc((r.scope || '').split(':').pop())}</td>
-        <td>${esc(r.action || '—')}</td>
-        <td>${esc(r.raw_action || '—')}</td>
+        <td>${esc(r.rule_action || '—')} → <b>${esc(r.action || '—')}</b></td>
+        <td>${esc(r.model_action || '无有效模型判断')}</td>
         <td class="why">${esc(r.reason_code || '—')}</td>
         <td>${r.decision_frozen ? '是' : '否'}</td>
-        <td>${r.execution_applied ? '是' : '否'}</td>
+        <td>${esc(r.execution_status || '待核对')}</td>
         <td class="num">${r.cost_uncertain ? '<span class="tag nc">未知待补记</span>'
           : usd(r.model_cost_usd)}</td></tr>`);
     }
@@ -130,21 +151,19 @@ window.__render = function (j) {
   // 最好/最坏案例（第二批要求「最有帮助与最有损害的决策都可下钻」）
   const cs = sec.cases || {};
   out.push('<div class="card plain"><h2>最有帮助 / 最有损害的决策</h2>');
-  if (cs.status !== 'OK') {
-    out.push(`<div>${statusTag(cs.status || 'NOT_COLLECTED')}
-      <div class="why">${esc(cs.why || '')}</div></div>`);
-  } else {
-    for (const [tag, list] of [['最有帮助', cs.best || []], ['最有损害', cs.worst || []]]) {
-      out.push(`<div class="sec-title">${tag}</div>`);
-      out.push((list.length ? list.map(c => `<div class="why">${esc(JSON.stringify(c))}</div>`).join('')
-        : '<div class="why">无</div>'));
-    }
+  function caseTable(list) {
+    return '<table><tr><th>机会</th><th>R 净损益</th><th>L 净损益</th><th>L−R</th><th>退出完成</th></tr>' +
+      list.map(c=>`<tr><td><a href="/decisions/${encodeURIComponent(env.scope_id+'@'+c.opportunity_id)}">${esc(c.security_id)}</a></td>
+      <td>${usd(c.R_pnl_usd)}</td><td>${usd(c.L_pnl_usd)}</td><td>${usd(c.delta_usd)}</td>
+      <td>R ${esc(c.R_exit_session)} / L ${esc(c.L_exit_session || '未入场')}</td></tr>`).join('')+'</table>';
+  }
+  out.push(`<div>${statusTag(cs.status)} · 成熟 ${cs.mature_count == null ? '—' : cs.mature_count} · 等待退出 ${cs.pending_count == null ? '—' : cs.pending_count} · 因缺失排除 ${cs.excluded_count == null ? '—' : cs.excluded_count}</div><div class="why">${esc(cs.why || '')}</div>`);
+  for (const [tag, list] of [['最有帮助', cs.best || []], ['最有损害', cs.worst || []]]) {
+    out.push(`<div class="sec-title">${tag}</div>` + (list.length ? caseTable(list) : '<div class="why">暂无符合条件的案例。</div>'));
   }
   const ee = cs.early_exit_harm || {};
-  if (ee.status) {
-    out.push(`<div class="sec-title">提前退出的收益与损害</div>
-      <div>${statusTag(ee.status)}<div class="why">${esc(ee.why || '')}</div></div>`);
-  }
+  out.push(`<div class="sec-title">提前退出的收益与损害</div><div class="why">${esc(ee.why || '')}</div>`);
+  if ((ee.cases || []).length) out.push(caseTable(ee.cases));
   out.push('</div>');
   out.push(diagBlock('证据与诊断（llm_impact section）', sec));
   return out.join('');

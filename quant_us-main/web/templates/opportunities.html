@@ -31,6 +31,15 @@ window.__render = function (j) {
       `<div class="tile"><div class="k">${esc(k)}</div><div class="v">${v}</div></div>`).join('')
      || '<div class="why">暂无机会。</div>') + '</div>');
   out.push('</div>');
+  out.push('<div class="card"><h2>逐笔机会与未成交原因</h2><table><tr><th>证券 / 信号日</th><th>触发依据</th><th>规则排名 / 执行日</th><th>各账户结果</th></tr>');
+  for (const r of (sec.rows || [])) {
+    out.push(`<tr><td><a href="/decisions/${encodeURIComponent(env.scope_id+'@'+r.opportunity_id)}">${esc(r.security_id)}</a><div class="why">${esc(r.signal_session)}</div></td>
+      <td>${esc((r.rule_reason_codes || []).join(' · '))}</td>
+      <td>${esc(r.rank)} / ${esc(r.planned_execution_session)}<div class="why">${esc(r.terminal)}</div></td>
+      <td>${(r.accounts || []).map(a=>`<div>${esc(a.scope.split(':').pop())}：${esc(a.action)} · ${esc(a.reason)}
+      ${a.fills.length ? ' · 有成交记录' : ' · 未见成交'} ${esc(a.missed.join('；'))}</div>`).join('') || '等待应用动作'}</td></tr>`);
+  }
+  out.push('</table></div>');
   const em = sec.entry_metrics || {};
   out.push(`<div class="card plain"><h2>入场评审口径</h2><div class="grid">` + [
     ['应评审', em.eligible_for_review], ['数据拦截', em.data_blocked],
