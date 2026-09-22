@@ -24,29 +24,7 @@ sys.path.insert(0, str(ROOT))
 import web.app as webapp          # noqa: E402
 
 NODE = shutil.which('node')
-
-HARNESS = r'''
-const fs = require('fs');
-// argv[0]=node, [1]=本文件, [2]=页面脚本, [3]=接口载荷
-const payload = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));
-const els = {};
-function el() {
-  return {innerHTML: '', textContent: '', style: {}, dataset: {},
-          querySelectorAll: () => [], addEventListener() {}, querySelector: () => null};
-}
-global.document = {
-  getElementById: id => (els[id] = els[id] || el()),
-  querySelectorAll: () => [],
-};
-global.window = global;
-global.location = {pathname: '/', search: ''};
-global.fetch = async () => ({ok: true, status: 200, json: async () => payload});
-const src = fs.readFileSync(process.argv[2], 'utf8');
-eval(src);
-const out = global.window.__render(payload);
-process.stdout.write(typeof out === 'string' ? out : '');
-process.exit(0);   // 不等异步的 boot()，只验同步渲染结果
-'''
+HARNESS = Path(__file__).resolve().parent / 'render_harness.js'
 
 
 @unittest.skipIf(NODE is None, 'node 不可用')
@@ -54,6 +32,13 @@ class PageRenderTests(unittest.TestCase):
     """跑真实渲染路径：接口载荷 → 页面 HTML。"""
 
     def _render(self, path, payload_path):
+        """跑真实渲染路径。**必须断言非空** —— 渲染出 0 字符而测试通过，等于没验。
+
+        （第一版只调同步的 `window.__render`，于是 boot 类页面（/experiments、
+        /schedule、/decisions）静默渲染出 0 字符，而当时的断言只看「包不包含某几个词」，
+        **一条都不可能失败** —— 与「JS 当正文」「读错字段」是同一类错误：
+        检查手段与失败模式不匹配。现在起步先断言非空。）
+        """
         client = webapp.app.test_client()
         html = client.get(path).data.decode('utf-8')
         scripts = re.findall(r'<script\b[^>]*>(.*?)</script>', html, flags=re.S | re.I)
@@ -61,20 +46,46 @@ class PageRenderTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             js = Path(d) / 'page.js'
             js.write_text('\n'.join(scripts), encoding='utf-8')
-            hz = Path(d) / 'harness.js'
-            hz.write_text(HARNESS, encoding='utf-8')
-            r = subprocess.run([NODE, str(hz), str(js), str(payload_path)],
-                               capture_output=True, text=True, timeout=60)
+            r = subprocess.run([NODE, str(HARNESS), str(js), str(payload_path), path],
+                               capture_output=True, text=True, timeout=90)
         self.assertEqual(r.returncode, 0, f'node 渲染失败：{r.stderr[-600:]}')
+        self.assertGreater(len(r.stdout.strip()), 200,
+                           f'{path} 渲染出 {len(r.stdout)} 字符 —— 页面根本没出内容')
         return r.stdout
 
     def _payload(self, scope_id):
+        return self._payload_url(f'/api/analytics/{scope_id}')
+
+    def _payload_url(self, url):
         client = webapp.app.test_client()
-        resp = client.get(f'/api/analytics/{scope_id}')
-        self.assertEqual(resp.status_code, 200, f'{scope_id} 接口不可用')
+        resp = client.get(url)
+        self.assertEqual(resp.status_code, 200, f'{url} 接口不可用')
         with tempfile.NamedTemporaryFile('w', suffix='.json', delete=False) as f:
             json.dump(resp.get_json(), f, ensure_ascii=False)
             return f.name
+
+    def test_schedule_page_shows_the_installed_jobs(self):
+        """定时任务页：已安装的作业与计划必须真的出现在页面上。"""
+        import os
+        payload = self._payload_url('/api/analytics/schedule')
+        try:
+            html = self._render('/schedule', payload)
+        finally:
+            os.unlink(payload)
+        for needle in ('com.quant.trading-service', 'com.quant.shadow-daily',
+                       'com.quant.web-snapshots', 'com.quant.watchdog', '每 300 秒'):
+            self.assertIn(needle, html, f'{needle} 没出现在页面上')
+
+    def test_experiments_page_renders_the_comparison_table(self):
+        """实验页是 boot 类页面 —— 第一版渲染桩只调同步 __render，它其实一个字都没渲染。"""
+        import os
+        payload = self._payload_url('/api/analytics/experiments')
+        try:
+            html = self._render('/experiments', payload)
+        finally:
+            os.unlink(payload)
+        self.assertIn('策略对比', html)
+        self.assertIn('冻结基线', html)
 
     def test_api_scope_envelope_carries_sections(self):
         """接口必须把 sections 放在**页面读的那个路径**上。
