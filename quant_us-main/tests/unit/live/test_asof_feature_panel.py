@@ -65,13 +65,43 @@ class AsofPanelTests(unittest.TestCase):
         self.assertTrue((panel.scale_to_next == 1.0).all())
         self.assertTrue((panel.asof_close == panel.raw_close).all())
 
-    def test_unresolved_dividend_factor_blocks_panel(self):
+    def test_dividend_on_first_session_is_inert_not_blocking(self):
+        """段首日除息的因子只会乘到空切片 `raw[:0]` ⇒ 无影响，不得阻断面板。
+
+        这条件**只可能**在段首日触发（窗口判据已保证 ex >= 段首日，而 `_prev_close`
+        只在没有更早 bar 时才失败），所以旧行为等价于「凡是段首日除息就永久无法重建」。
+        实测 `SEC-US-JPM 2015-01-02` 让整批 32 只的前向面板刷新中止。
+        """
         data = raw_bars().iloc[10:].reset_index(drop=True)
         action = pd.DataFrame([{'security_id': 'SEC-A', 'action_type': 'cash_dividend',
                                 'ex_date': str(data.session.iloc[0].date()),
                                 'ratio': 0.0, 'cash_amount': 1.0}])
-        with self.assertRaisesRegex(ValueError, 'ACTION_FACTOR_UNRESOLVED'):
-            build_asof_panel(data, action)
+        panel = build_asof_panel(data, action)
+        # 与「完全没有这条行动」逐格相同（因子没有落点）
+        reference = build_asof_panel(data, pd.DataFrame(
+            columns=['security_id', 'action_type', 'ex_date', 'ratio', 'cash_amount']))
+        pd.testing.assert_frame_equal(panel, reference)
+
+    def test_merger_on_first_session_is_inert_not_blocking(self):
+        """同理：段首日的合并对任何 bar 都不产生跳变可比。"""
+        data = raw_bars().iloc[10:].reset_index(drop=True)
+        merger = pd.DataFrame([{'security_id': 'SEC-A', 'action_type': 'merger',
+                                'ex_date': str(data.session.iloc[0].date()),
+                                'ratio': None, 'cash_amount': None}])
+        panel = build_asof_panel(data, merger)
+        self.assertTrue((panel.asof_close == panel.raw_close).all())
+
+    def test_invalid_dividend_inside_window_still_blocks(self):
+        """fail-closed 没有被放宽：段**内**不可换算的股息仍然阻断。
+
+        （`_factors_by_ex_date` 把所有可调整行动的换算失败统一包成
+        `ACTION_FACTOR_UNRESOLVED`，具体原因在 `__cause__` 里，如 `DIVIDEND_INVALID`。）
+        """
+        action = pd.DataFrame([{'security_id': 'SEC-A', 'action_type': 'cash_dividend',
+                                'ex_date': '2020-03-02', 'ratio': 0.0, 'cash_amount': 1000.0}])
+        with self.assertRaisesRegex(ValueError, 'ACTION_FACTOR_UNRESOLVED') as ctx:
+            build_asof_panel(raw_bars(), action)
+        self.assertIn('DIVIDEND_INVALID', str(ctx.exception.__cause__))
 
     def test_other_security_actions_do_not_change_panel(self):
         other = SPLIT.assign(security_id='SEC-B')
