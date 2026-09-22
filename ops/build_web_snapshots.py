@@ -176,6 +176,9 @@ def _experiments_index(base: Path, scopes: list, now: datetime) -> tuple:
                       'kind': 'research', 'run_dir': entry.get('run_dir'),
                       'sections': secs})
     index = {'generated_at': now.isoformat(), 'research_cards': cards,
+             'comparison_rows': [S.normalize_study(base, e, (S.research_sections(
+                 base, e).get('research') or {}))
+                 for e in scopes if e['kind'] == 'research'],
              'note': '研究结论只用于淘汰方向；正式资格需前向登记，本页不生成「策略提升」结论'}
     return index, reports, artifacts
 

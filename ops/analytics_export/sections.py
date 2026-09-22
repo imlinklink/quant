@@ -153,6 +153,11 @@ def _opportunities_section(store, entry_metrics) -> dict:
         t = o.get('terminal', 'WAITING')
         terminals[t] = terminals.get(t, 0) + 1
     total = sum(terminals.values())
+    # 未成交原因：**照实统计应用动作与原因码**（第二批要求的事后归因）
+    by_reason = {}
+    for a in store.applications():
+        code = a.get('reason_code') or a.get('action') or '(无)'
+        by_reason[code] = by_reason.get(code, 0) + 1
     em = entry_metrics
     stages = [
         {'stage': '候选机会', 'count': total, 'status': C.OK if total else C.NO_OBJECT},
@@ -169,6 +174,14 @@ def _opportunities_section(store, entry_metrics) -> dict:
     return {
         'funnel': {'total': total, 'by_terminal': terminals, 'stages': stages},
         'entry_metrics': em,
+        'by_reason_code': by_reason,
+        'not_collected': [
+            {'field': 'capacity_allocation', 'status': C.NOT_COLLECTED,
+             'why': '纸面引擎按运行时「五仓/重复持仓」拒绝，不产生分配记录 ⇒ '
+                    '不得由成交集合差异反推挤占（需求 §5.3）'},
+            {'field': 'bottom_signal_state', 'status': C.NOT_COLLECTED,
+             'why': '纸面前向路径不跑抄底信号（那是研究侧的单向对照实验，未接入前向）'},
+        ],
         'ranking_used': '规则排名（selection 的 portfolio_rank 仅在 Portfolio 角色启用且有冲突时参与）',
     }
 
@@ -257,6 +270,19 @@ def _llm_impact_section(store, manifest, entry_metrics, position_metrics, paired
         'paired': paired,
         'nav_r': nav_r, 'nav_l': nav_l,
         'cost_budget': cost,
+        # 第二批要求「最有帮助与最有损害的决策都可下钻」与「提前退出的收益与损害案例」。
+        # **没有样本就不排序**：全项目当前 1 笔成交、0 条成熟结果，按 R 差值排序等于在
+        # 噪声上排名次。宁可显示未采集 + 原因（需求 §5.4 末段：无实际干预样本时如实显示）。
+        'cases': {
+            'best': [], 'worst': [],
+            'status': C.NOT_COLLECTED,
+            'why': '逐笔 L−R 损益差需要已成熟的结果；当前没有足够的终结决策可排序',
+            'early_exit_harm': {
+                'status': C.NOT_COLLECTED,
+                'why': '提前退出的收益/损害案例取自 S1 同机会对照（见「策略与实验」页），'
+                       '本实验的前向路径尚无样本',
+            },
+        },
         'vocabulary_version': VOCABULARY_VERSION,
     }
 
@@ -443,6 +469,150 @@ def compact(obj, *, depth=0):
     if isinstance(obj, str) and len(obj) > MAX_STR:
         return obj[:MAX_STR] + f'…（{len(obj)} 字）'
     return obj
+
+
+# ---- 策略对比（需求 §5.5 第二批）：四份研究结论的同一张表 --------------------
+# 每份研究的产物形状**不一样**（诊断研究是 comparison+statistics，策略研究是
+# step1/entry_arms/sleeve），所以这里显式按形状取值，取不到的**如实标未采集**，
+# 绝不填 0 —— 需求 §7 的那条规则在跨实验的表上同样适用。
+def _m(value, unit=None, *, scale=1.0, status=None, why='', label=None):
+    if value is None:
+        return C.metric(None, unit, status=status or C.NOT_COLLECTED, why=why, label=label)
+    return C.metric(value * scale, unit, status=status, label=label)
+
+
+def _dig(d, *path):
+    cur = d
+    for k in path:
+        if not isinstance(cur, dict) or k not in cur:
+            return None
+        cur = cur[k]
+    return cur
+
+
+def _source_ref(base: Path, entry: dict, art_key: str) -> dict:
+    import hashlib
+    rel = (entry.get('artifacts') or {}).get(art_key)
+    if not rel:
+        return {}
+    p = base / entry['run_dir'] / rel
+    if not p.exists():
+        return {'file': rel, 'status': C.READ_FAILED}
+    return {'file': rel, 'sha256': hashlib.sha256(p.read_bytes()).hexdigest()[:16],
+            'path': str(p)}
+
+
+def normalize_study(base: Path, entry: dict, research: dict) -> dict:
+    """把一份研究产物归一成「四个数 + 判定 + 来源」一行。形状不认识就如实说。"""
+    art = research or {}
+    row = {'scope_id': entry['scope_id'], 'label': entry.get('label'),
+           'run_dir': entry.get('run_dir'), 'status': C.OK, 'metrics': {}, 'verdict': {},
+           'deltas': {}, 'sample': {}, 'source': {}, 'kind': None, 'notes': []}
+    cmp_ = art.get('comparison') or {}
+    stats = art.get('statistics') or {}
+    result = art.get('result') or {}
+
+    if cmp_.get('full_cost_return') is not None:               # 诊断：冻结基线本身
+        row['kind'] = 'baseline'
+        row['metrics'] = {
+            'return_pct': _m(cmp_['full_cost_return'], '%', scale=100),
+            'mdd_pct': _m(cmp_.get('max_drawdown'), '%', scale=100),
+            # ← 胜率在 `comparison.exits` 里，**不在** `statistics` 里（第一次就取错了）
+            'win_rate_pct': _m(_dig(cmp_, 'exits', 'realized_win_rate'), '%', scale=100),
+            'tail': _m(None, 'R', why='基线产物未单列尾部（ES / 最差单笔）；同机会对照见 S1 行'),
+        }
+        row['verdict'] = {'token': cmp_.get('phase_conclusion'), 'verdict': cmp_.get('verdict'),
+                          'why': '只有基线、没有 challenger ⇒ verdict 为 null 是设计（§9.3）'}
+        row['sample'] = {'sessions': cmp_.get('sessions'),
+                         'trades': _dig(cmp_, 'exits', 'count'),
+                         'closed': _dig(cmp_, 'exits', 'closed'),
+                         'right_censored': _dig(cmp_, 'exits', 'right_censored')}
+        row['concentration'] = {
+            'top1_security_share_of_gain': _m(
+                _dig(stats, 'concentration', 'top1_security_share_of_gain'), '%', scale=100),
+            'top1_trade_share_of_gain': _m(
+                _dig(stats, 'concentration', 'top1_trade_share_of_gain'), '%', scale=100)}
+        row['source'] = _source_ref(base, entry, 'comparison')
+        row['checks'] = cmp_.get('checks')
+    elif _dig(result, 'summary', 'sum_net_r_A') is not None:   # S1 利润保护
+        row['kind'] = 'exit_protection'
+        s = result.get('summary') or {}
+        row['arms'] = {
+            'A_规则基线': {'sum_net_r': _m(s.get('sum_net_r_A'), 'R'),
+                          'worst_trade_r': _m(s.get('worst_a'), 'R'),
+                          'tail_es': _m(s.get('tail_es_a'), 'R'),
+                          'profitable': _m(s.get('n_profitable_a'), '笔')},
+            'B_加利润保护': {'sum_net_r': _m(s.get('sum_net_r_B'), 'R'),
+                            'worst_trade_r': _m(s.get('worst_b'), 'R'),
+                            'tail_es': _m(s.get('tail_es_b'), 'R'),
+                            'profitable': _m(s.get('n_profitable_b'), '笔')}}
+        row['metrics'] = {
+            'sum_net_r_A': _m(s.get('sum_net_r_A'), 'R'),
+            'sum_net_r_B': _m(s.get('sum_net_r_B'), 'R'),
+            # 胜率只给计数 ⇒ 只报计数。比值口径（分母是 197 还是 201）要看报告，不在这里除。
+            'win_rate_pct': _m(None, '%', why='产物只给计数（n_profitable/n_closed），'
+                                              '比值口径需看报告，不在此处相除'),
+            'tail': _m(s.get('worst_b'), 'R', label='B 臂最差单笔 R'),
+        }
+        row['deltas'] = {'sum_net_r': _m((s.get('sum_net_r_B') or 0) - (s.get('sum_net_r_A') or 0)
+                                         if s.get('sum_net_r_A') is not None else None, 'R'),
+                         'tail_es_improvement': _m(s.get('tail_es_improvement'), 'R'),
+                         'giveback_reduction_pct': _m(s.get('giveback_reduction_pct'), '%',
+                                                      scale=100)}
+        row['verdict'] = {'token': _dig(result, 'verdict', 'token'),
+                          'why': _dig(result, 'verdict', 'note') or ''}
+        row['sample'] = {'trades': s.get('n_trades'), 'closed': s.get('n_closed'),
+                         'activated': s.get('n_activated'), 'untouched': s.get('n_untouched')}
+        row['source'] = _source_ref(base, entry, 'result')
+    elif _dig(result, 'a', 'cagr') is not None:                # 抄底 sleeve
+        row['kind'] = 'entry_sleeve'
+        a, b = result.get('a') or {}, result.get('b') or {}
+        row['arms'] = {
+            'A_规则基线': {'return_pct': _m(a.get('total_return'), '%', scale=100),
+                          'cagr_pct': _m(a.get('cagr'), '%', scale=100),
+                          'mdd_pct': _m(a.get('mdd'), '%', scale=100),
+                          'win_rate_pct': _m(a.get('win_rate'), '%', scale=100),
+                          'payoff': _m(a.get('profit_loss_ratio')),
+                          'worst_trade_r': _m(a.get('worst_trade_r'), 'R')},
+            'B_加抄底 sleeve': {'return_pct': _m(b.get('total_return'), '%', scale=100),
+                                'cagr_pct': _m(b.get('cagr'), '%', scale=100),
+                                'mdd_pct': _m(b.get('mdd'), '%', scale=100),
+                                'win_rate_pct': _m(b.get('win_rate'), '%', scale=100),
+                                'payoff': _m(b.get('profit_loss_ratio')),
+                                'worst_trade_r': _m(b.get('worst_trade_r'), 'R')}}
+        row['metrics'] = row['arms']['B_加抄底 sleeve']
+        row['deltas'] = {'terminal_return_pp': _m(result.get('delta_terminal_return'), 'pp',
+                                                  scale=100),
+                         'mdd_pp': _m(result.get('delta_mdd'), 'pp', scale=100),
+                         'worst_trade_r': _m(result.get('delta_worst_trade_r'), 'R')}
+        row['verdict'] = {'token': 'RISK_REJECTED',
+                          'why': '收益与风险同时变差（登记判据）'}
+        row['sample'] = {'n_a': _dig(result, 'entries', 'n_a'),
+                         'n_b': _dig(result, 'entries', 'n_b'),
+                         'common': _dig(result, 'entries', 'common')}
+        row['source'] = _source_ref(base, entry, 'result')
+    elif _dig(result, 'comparison', 'delta_terminal_return') is not None:   # 抄底替换
+        row['kind'] = 'entry_replacement'
+        d = result['comparison']
+        row['metrics'] = {'return_pct': _m(None, '%', why='该产物只给差值 ⇒ 与上面的基线行并列看，'
+                                                            '不在此处相加合成（合成出来的数没人复核）'),
+                          'mdd_pct': _m(None, '%', why='同上'),
+                          'win_rate_pct': _m(None, '%', why='同上'),
+                          'tail': _m(d.get('delta_worst_trade_r'), 'R', label='最差单笔 R 的**变化**')}
+        row['deltas'] = {'terminal_return_pp': _m(d.get('delta_terminal_return'), 'pp', scale=100),
+                         'cagr_pp': _m(d.get('delta_cagr'), 'pp', scale=100),
+                         'mdd_pp': _m(d.get('delta_mdd'), 'pp', scale=100),
+                         'stress_2x_terminal_return_pp': _m(d.get('delta_terminal_return_2x'),
+                                                            'pp', scale=100)}
+        row['verdict'] = {'token': _dig(result, 'verdict', 'token'),
+                          'why': _dig(result, 'verdict', 'note') or ''}
+        row['sample'] = {'n_min': _dig(result, 'verdict', 'n_min'),
+                         'bottom_signals': _dig(result, 'bottom_signals', 'n_opportunities')}
+        row['source'] = _source_ref(base, entry, 'result')
+    else:
+        row['status'] = C.NOT_COLLECTED
+        row['notes'].append('产物形状未被识别 —— 不猜数字，请先看原始产物')
+    return row
 
 
 def research_sections(base: Path, entry: dict) -> dict:

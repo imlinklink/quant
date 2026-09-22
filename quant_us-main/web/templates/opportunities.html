@@ -45,6 +45,14 @@ window.__render = function (j) {
       : pct(em.data_block_rate * 100)}</div>`);
   if (em.veto_unapplied) out.push(`<div class="why">⚠️ ${em.veto_unapplied} 次 VETO 已冻结但未落到执行 —— 否决必须兑现，否则等于没发生。</div>`);
   out.push(`<div class="why">${esc(em.note || '')}</div>`);
+  // 未成交/未改变动作的原因分布（第二批：漏斗细化到"为什么没走到下一步"）
+  const br = sec.by_reason_code || {};
+  out.push('<div class="sec-title">应用动作的原因分布</div><div class="grid">' +
+    (Object.entries(br).map(([k, v]) =>
+      `<div class="tile"><div class="k">${esc(k)}</div><div class="v">${v}</div></div>`).join('')
+     || '<div class="why">还没有应用动作记录。</div>') + '</div>');
+  out.push(`<div class="why">原因码区分「模型自己弃权」与「程序侧弃权（模型从未被咨询）」：
+    后者在总量与配对里都必须单列，否则一次调度缺口会被读成「模型没有价值」。</div>`);
   out.push(`<div class="why">排序采用：${esc(sec.ranking_used || '—')}</div></div>`);
   for (const n of (sec.not_collected || [])) {
     out.push(`<div class="card warn"><h2>该阶段未采集</h2>
