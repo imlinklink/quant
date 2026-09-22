@@ -47,16 +47,41 @@ def _arm_manifest(base, *, experiment_id: str, scope: str, start_session: str,
     return m
 
 
-def _provider(kind: str, *, arm, data, prices, market, calendar, quality, actions, sessions):
+def build_monthly_snapshots(prices, actions, sessions) -> dict:
+    """**一次算好、多臂共用**的月末截面 `{session: snapshot}`（规划 §'共享最贵的一步'）。
+
+    与生成器内部走的是**同一对函数**（`point_in_time_momentum_snapshot` +
+    `rank_monthly_snapshot`），不另写一份；`members=None` 与生成器默认一致。
+    等价性由「A 臂复现基线 012 的全部成交」这条控制兜住。
+    """
+    from scripts.medium_term.momentum_features import point_in_time_momentum_snapshot
+    from scripts.medium_term.stock_cross_section import rank_monthly_snapshot
+    from scripts.portfolio_shadow.candidate_adapter import month_end_sessions
+    view = prices[['security_id', 'session', 'raw_open', 'raw_high', 'raw_low',
+                   'raw_close', 'volume']].rename(columns={
+        'raw_open': 'open', 'raw_high': 'high', 'raw_low': 'low', 'raw_close': 'close'})
+    ends = set(month_end_sessions(sessions))
+    return {s: rank_monthly_snapshot(point_in_time_momentum_snapshot(view, actions, s), s)
+            for s in sessions if s in ends}
+
+
+def _provider(kind: str, *, arm, data, prices, market, calendar, quality, actions, sessions,
+              monthly_snapshots=None):
     if kind == 'b3':
-        return IncrementalCandidateGenerator(
+        gen = IncrementalCandidateGenerator(
             prices=prices, market=market, quality=quality, actions=actions, blocked={},
             calendar=calendar, experiment_id=arm['experiment_id'],
             parent_version=arm['manifest'].parent_version,
             exit_policy_id=arm['manifest'].execution_policy['exit_policy_id'],
             top_n=arm['manifest'].risk_policy.get('top_n', 5),
             max_wait_sessions=arm['manifest'].execution_policy.get('max_wait_sessions', 20),
-            require_matured=False, parent_strategy_id=arm['manifest'].parent_strategy_id)
+            require_matured=False, parent_strategy_id=arm['manifest'].parent_strategy_id,
+            monthly_snapshots=monthly_snapshots)
+        # **不用 `precompute_signals()`**：实测它改变了产出 —— 加缓存后 A 臂总收益
+        # 236.28% 而基线 012 是 266.15%（A 臂的职责就是复现基线），即缓存与逐日 as-of
+        # **不等价**。P0-4 只证明了信号是「比较型」，那不足以覆盖等待窗内的逐日推进。
+        # 保留慢路径是对的：省下的时间不值得换掉「A 臂复现基线」这条控制。
+        return gen
     return BottomSignalGenerator(
         prices=prices, calendar=sessions, actions=actions, quality=quality,
         experiment_id=arm['experiment_id'],
@@ -65,11 +90,15 @@ def _provider(kind: str, *, arm, data, prices, market, calendar, quality, action
 
 
 def run_arm(kind: str, *, study_dir: Path, arm_id: str, fee_bp: int,
-            limit: int | None = None) -> dict:
+            limit: int | None = None, window: tuple | None = None,
+            monthly_snapshots=None) -> dict:
     """跑一条臂的完整账户。返回 {navs, trades, events, states, opportunities, rejections}。"""
     data, prices, market, calendar, quality, actions, _entries = load_study(study_dir)
     start, end = (str(pd.Timestamp(data['research_window'][k]).date()) for k in ('start', 'end'))
     sessions = [s for s in calendar if pd.Timestamp(start) <= s <= pd.Timestamp(end)]
+    if window is not None:
+        sessions = [s for s in sessions if pd.Timestamp(window[0]) <= s
+                    <= pd.Timestamp(window[1])]
     if limit:
         sessions = sessions[:limit]
     base = manifest_from_dict(
@@ -80,7 +109,8 @@ def run_arm(kind: str, *, study_dir: Path, arm_id: str, fee_bp: int,
                              parent_code_hash=data['working_tree_hash'])
     arm = {'experiment_id': arm_id, 'manifest': manifest}
     provider = _provider(kind, arm=arm, data=data, prices=prices, market=market,
-                         calendar=calendar, quality=quality, actions=actions, sessions=sessions)
+                         calendar=calendar, quality=quality, actions=actions, sessions=sessions,
+                         monthly_snapshots=monthly_snapshots)
     acts = defaultdict(list)
     converted, _dropped = shadow_actions(actions, universe=set(prices.security_id),
                                          session_range=(start, end))
@@ -114,7 +144,8 @@ SLEEVE_B3 = 4
 SLEEVE_BOTTOM = 1
 
 
-def run_sleeve_arm(study_dir: Path, *, fee_bp: int = 10, limit: int | None = None) -> dict:
+def run_sleeve_arm(study_dir: Path, *, fee_bp: int = 10, limit: int | None = None,
+                   window: tuple | None = None, monthly_snapshots=None) -> dict:
     """**B3 + 抄底 sleeve**：总风险预算不变，只把容量按 sleeve 分配（登记 §fixed_total_risk）。
 
     两个生成器共用同一个账户；某一路已占满自己的 sleeve 时，该路当日的新意图**不送进引擎**
@@ -125,6 +156,9 @@ def run_sleeve_arm(study_dir: Path, *, fee_bp: int = 10, limit: int | None = Non
     data, prices, market, calendar, quality, actions, _entries = load_study(study_dir)
     start, end = (str(pd.Timestamp(data['research_window'][k]).date()) for k in ('start', 'end'))
     sessions = [s for s in calendar if pd.Timestamp(start) <= s <= pd.Timestamp(end)]
+    if window is not None:
+        sessions = [s for s in sessions if pd.Timestamp(window[0]) <= s
+                    <= pd.Timestamp(window[1])]
     if limit:
         sessions = sessions[:limit]
     base = manifest_from_dict(
@@ -136,7 +170,8 @@ def run_sleeve_arm(study_dir: Path, *, fee_bp: int = 10, limit: int | None = Non
                              parent_code_hash=data['working_tree_hash'])
     arm = {'experiment_id': arm_id, 'manifest': manifest}
     b3 = _provider('b3', arm=arm, data=data, prices=prices, market=market, calendar=calendar,
-                   quality=quality, actions=actions, sessions=sessions)
+                   quality=quality, actions=actions, sessions=sessions,
+                   monthly_snapshots=monthly_snapshots)
     bottom = _provider('bottom', arm=arm, data=data, prices=prices, market=market,
                        calendar=calendar, quality=quality, actions=actions, sessions=sessions)
     acts = defaultdict(list)
@@ -400,19 +435,48 @@ SLEEVE_REGISTRATION = (Path(__file__).resolve().parents[2] / 'docs/preregistrati
                        'ENTRY-BOTTOM-SLEEVE-20260922.json')
 
 
-def sleeve_study(study_dir: Path, *, limit: int | None = None) -> dict:
-    """固定总风险预算下的补充价值对照（预登记 `ENTRY-BOTTOM-SLEEVE-20260922`）。"""
+def sleeve_study(study_dir: Path, *, limit: int | None = None,
+                 out_dir: Path | None = None) -> dict:
+    """固定总风险预算下的补充价值对照（预登记 `ENTRY-BOTTOM-SLEEVE-20260922`）。
+
+    分两段并把 **1× 成本那一段先落盘**：原先四次运行全算完才写盘，中途看不到任何结果
+    （实测跑了 11 分钟仍零输出）。2× 只影响成本情景，不影响 1× 的结论。
+    """
     study_dir = Path(study_dir)
     if not SLEEVE_REGISTRATION.exists():
         raise ValueError(f'PREREGISTRATION_MISSING:{SLEEVE_REGISTRATION}')
     data = json.loads((study_dir / 'study_manifest.json').read_text(encoding='utf-8'))
+    _emit = (lambda name, payload: None)
+    # **一次算好、四次运行共用**的月末截面（最贵的一步：1.29s/月末 × 127 ≈ 164s/臂）。
+    # 与生成器内部走同一对函数 ⇒ 不另立定义；等价性由「A 臂复现基线 012」这条控制兜住。
+    from scripts.strategy_research.runner import load_study
+    _data, _prices, _market, _calendar, _quality, _actions, _entries = load_study(study_dir)
+    _sessions = [s for s in _calendar
+                 if pd.Timestamp(_data['research_window']['start']) <= s
+                 <= pd.Timestamp(_data['research_window']['end'])]
+    if limit:
+        _sessions = _sessions[:limit]
+    snapshots = build_monthly_snapshots(_prices, _actions, _sessions)
+    if out_dir is not None:
+        def _emit(name, payload):
+            Path(out_dir).mkdir(parents=True, exist_ok=True)
+            (Path(out_dir) / name).write_text(
+                json.dumps(payload, ensure_ascii=False, indent=1, default=str),
+                encoding='utf-8')
     a = run_arm('b3', study_dir=study_dir, arm_id='ENTRY-B3-SLEEVE-BASE', fee_bp=10,
-                limit=limit)
-    b = run_sleeve_arm(study_dir, fee_bp=10, limit=limit)
-    a2 = run_arm('b3', study_dir=study_dir, arm_id='ENTRY-B3-SLEEVE-BASE-2X', fee_bp=20,
-                 limit=limit)
-    b2 = run_sleeve_arm(study_dir, fee_bp=20, limit=limit)
+                limit=limit, monthly_snapshots=snapshots)
+    b = run_sleeve_arm(study_dir, fee_bp=10, limit=limit, monthly_snapshots=snapshots)
     cmp_ = compare(a, b)
+    _emit('sleeve-1x.json', {'stage': '1x', 'a': cmp_['a'], 'b': cmp_['b'],
+                             'delta_terminal_return': cmp_['delta_terminal_return'],
+                             'entries': cmp_['entries'], 'new_entries_pnl': cmp_['new_entries_pnl'],
+                             'sleeve_full': b['sleeve_full'], 'by_stream': None})
+    print(json.dumps({'stage': '1x 完成（已落盘 sleeve-1x.json）',
+                      'delta_terminal_return': round(cmp_['delta_terminal_return'], 4),
+                      'entries': cmp_['entries']}, ensure_ascii=False), flush=True)
+    a2 = run_arm('b3', study_dir=study_dir, arm_id='ENTRY-B3-SLEEVE-BASE-2X', fee_bp=20,
+                 limit=limit, monthly_snapshots=snapshots)
+    b2 = run_sleeve_arm(study_dir, fee_bp=20, limit=limit, monthly_snapshots=snapshots)
     # 风控参数必须逐字相同 —— 本项的核心约束，由代码断言而不是人工核对
     risk_same = (a['manifest'].risk_policy == b['manifest'].risk_policy
                  and a['manifest'].execution_policy == b['manifest'].execution_policy
