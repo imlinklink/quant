@@ -11,12 +11,19 @@ window.__render = function (j) {
       <h2>数据状态：${dataStatusTag(env.data_status)}</h2>
       <div class="why">${esc((env.missing_reasons || []).map(m => m.field + ' — ' + m.why).join('；') || '')}</div></div>`);
   }
-  // 需要处理 / 当前无需处理（需求 §5.1 第 2 条：必须显式说「没有」）
+  // 需要处理：**必须列出做过哪些检查**。原先这里写死空数组 ⇒ 显示「当前无需处理」
+  // 是一句没检查过的断言（用户 review 点名）。现在有待办列待办，没待办列检查项，
+  // 并单列「本页做不到的检查」，免得把"没查"当成"没问题"。
   const todo = o.todo || [];
+  const checks = o.todo_checks || [];
+  const uncheckable = o.todo_uncheckable || [];
   out.push(`<div class="card ${todo.length ? 'warn' : 'plain'}">
-    <h2>需要处理</h2>${todo.length
+    <h2>需要处理${todo.length ? `（${todo.length} 项）` : ''}</h2>${todo.length
       ? '<ul>' + todo.map(t => `<li>${esc(t)}</li>`).join('') + '</ul>'
-      : '<div class="why">当前无需处理。人工确认待办在 <a href="/approvals">确认台</a>。</div>'}
+      : '<div class="why">下列检查**均未发现问题**（不是「没检查」）：</div>'
+        + '<ul class="why">' + checks.map(c => `<li>${esc(c)}</li>`).join('') + '</ul>'}
+    ${uncheckable.length ? `<div class="sec-title">本页做不到的检查（别人管）</div>
+      <ul class="why">${uncheckable.map(c => `<li>${esc(c)}</li>`).join('')}</ul>` : ''}
   </div>`);
   // 账户摘要：每个账户一张卡，**不同范围不合计**
   const accts = o.accounts || [];

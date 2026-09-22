@@ -21,9 +21,14 @@ STALE = 'STALE'                          # 数据过期
 READ_FAILED = 'READ_FAILED'              # 读取失败
 NOT_APPLICABLE = 'NOT_APPLICABLE'        # 不适用
 UNCLASSIFIED = 'UNCLASSIFIED'            # 词表未覆盖（同样是「未采集」，但不静默归桶）
+# **「没做」必须与「没到」分开**：需求 §7 那九态描述的是数据的世界；但一块**功能尚未实现**
+# 的展示如果只标 NOT_COLLECTED，读起来像「等数据到了就会自动出现」。用户 review 点名过这条，
+# 故单列一态，页面上直说「未实现」。
+NOT_IMPLEMENTED = 'NOT_IMPLEMENTED'
 
 STATUSES = (OK, NO_OBJECT, PENDING_EXECUTION, PENDING_SETTLEMENT, INSUFFICIENT_SAMPLE,
-            NOT_COLLECTED, STALE, READ_FAILED, NOT_APPLICABLE, UNCLASSIFIED)
+            NOT_COLLECTED, STALE, READ_FAILED, NOT_APPLICABLE, UNCLASSIFIED,
+            NOT_IMPLEMENTED)
 
 # ---- 数据源整体状态 -----------------------------------------------------------
 DS_OK = 'OK'

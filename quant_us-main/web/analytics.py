@@ -178,6 +178,8 @@ def api_scope(scope_id):
                         'hint': '其他范围仍可切换查看'}), 503
     except ValueError as exc:
         return jsonify({'ok': False, 'error': str(exc)}), 400
-    envelope = {k: v for k, v in data.items() if k != 'sections'}
-    return jsonify({'ok': True, 'server': _server_block(),
-                    'envelope': envelope, 'sections': data.get('sections', {})})
+    # **信封含 sections**（快照本来就是一体），接口只交这一种形状。
+    # 曾经交过 `{'envelope': <去掉 sections>, 'sections': <单独一份>}` —— 页面读的是
+    # `env.sections`，于是拿到 undefined ⇒ **有数据也显示成假空白**（M1 那 2 条持仓一直在
+    # 接口里）。两处形状 = 两边各自小心 = 迟早漂移，所以这里收敛成一份。
+    return jsonify({'ok': True, 'server': _server_block(), 'envelope': data})
