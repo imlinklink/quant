@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 
 from . import contract as C
+from . import insights as I
 from .manifest_view import ManifestView
 from .vocabulary import PINNED_VOCABULARY, VOCABULARY_VERSION, classify_unknown
 
@@ -149,9 +150,20 @@ def _positions_section(rows, scopes) -> dict:
 
 def _opportunities_section(store, entry_metrics) -> dict:
     terminals = {}
-    for o in store.opportunities():
-        t = o.get('terminal', 'WAITING')
+    recorded_terminals = store.opportunity_terminals()
+    detail_rows = []
+    for oid, o in store.opportunity_rows():
+        t = recorded_terminals.get(oid, o.get('terminal', 'WAITING'))
         terminals[t] = terminals.get(t, 0) + 1
+        apps = [a for a in store.applications() if a['opportunity_id'] == oid]
+        outcomes = []
+        for app in apps:
+            linked = [e for e in store.events(app['scope']) if e.get('opportunity_id') == oid]
+            outcomes.append({'scope': app['scope'], 'action': app.get('action'),
+                             'reason': app.get('reason_code'),
+                             'fills': [e for e in linked if e.get('type') == 'fill'],
+                             'missed': [e.get('reason') for e in linked if e.get('type') == 'missed']})
+        detail_rows.append({'opportunity_id': oid, **o, 'terminal': t, 'accounts': outcomes})
     total = sum(terminals.values())
     # 未成交原因：**照实统计应用动作与原因码**（第二批要求的事后归因）
     by_reason = {}
@@ -174,6 +186,7 @@ def _opportunities_section(store, entry_metrics) -> dict:
     return {
         'funnel': {'total': total, 'by_terminal': terminals, 'stages': stages},
         'entry_metrics': em,
+        'rows': detail_rows,
         'by_reason_code': by_reason,
         'not_collected': [
             {'field': 'capacity_allocation', 'status': C.NOT_COLLECTED,
@@ -186,44 +199,88 @@ def _opportunities_section(store, entry_metrics) -> dict:
     }
 
 
+def _enrich_positions(section, store, manifest, base, decisions):
+    """已存持仓 + 对应生命周期行情 + 实际模型裁决。没有保存的保护线不反推。"""
+    import pandas as pd
+    for p in section['positions']:
+        state = store.latest_state(p['scope'])[1]
+        session, oid = state.get('last_session'), p.get('opportunity_id')
+        p['price_session'] = session
+        p['horizon_sessions'] = (manifest.execution_policy or {}).get('horizon')
+        p['remaining_sessions'] = (max(0, p['horizon_sessions'] - p['holding_sessions'])
+                                   if p['horizon_sessions'] and p.get('holding_sessions') is not None else None)
+        reviews = [r for r in decisions if r['scope'] == p['scope'] and
+                   r['parent_opportunity_id'] == oid and r['role'] == 'position']
+        p['review'] = ({'reviewed': True, **reviews[-1]} if reviews else
+                       {'reviewed': False, 'status': C.NO_OBJECT})
+        p['decision_key'] = reviews[-1]['opportunity_id'] if reviews else oid
+        p['chart'] = []
+        path = base / PANEL_DIR / ('US_' + p['security_id'].replace('SEC-US-', '') + '.csv.gz')
+        if not path.exists() or not session or not p.get('entry_session'):
+            p['price_status'] = C.NOT_COLLECTED
+            continue
+        df = pd.read_csv(path, usecols=['session', 'raw_close'])
+        df['session'] = df['session'].astype(str)
+        df = df[(df.session >= p['entry_session']) & (df.session <= session)].sort_values('session')
+        df = df.dropna(subset=['raw_close'])
+        p['chart'] = [{'session': str(r.session), 'price': float(r.raw_close)}
+                      for r in df.itertuples()]
+        if df.empty or str(df.session.iloc[-1]) != session:
+            p['price_status'] = C.NOT_COLLECTED
+            continue
+        price = int(round(float(df.raw_close.iloc[-1]) * 1e6))
+        entry, shares = p.get('entry_price_micro'), p.get('shares')
+        p.update(current_price_micro=price, price_status=C.OK)
+        if entry and shares is not None:
+            p['unrealized_price_pnl_usd'] = (price - entry) * shares / 1e6
+            p['price_return_pct'] = (price / entry - 1) * 100
+        stop = p.get('stop_micro')
+        p['stop_distance_pct'] = ((price - stop) / price * 100 if stop is not None and price else None)
+        events = [e for e in store.events(p['scope']) if e.get('security_id') == p['security_id']
+                  and p['entry_session'] <= str(e.get('session', '')) <= session]
+        actions = [e for e in events if e.get('type') in ('split', 'dividend_record')]
+        if actions:
+            # 原始价图可以显示，但跨拆股/除息的峰值不能直接相减。
+            p['chart_note'] = '本生命周期有公司行动；图为原始收盘价，跨行动的回吐不直接计算。'
+            p['giveback'] = {'status': C.NOT_APPLICABLE,
+                             'why': '跨拆股/除息的可比峰值尚未保存；不使用不一致价格基准推算回吐'}
+        else:
+            high_row = df.loc[df.raw_close.idxmax()]
+            high = max(float(high_row.raw_close) * 1e6, entry or 0)
+            if entry:
+                changed_shares = any(e.get('side') == 'SELL' for e in events)
+                p['giveback'] = {
+                    'status': C.OK, 'value_pp': (high - price) / entry * 100,
+                    'max_return_pct': (high / entry - 1) * 100,
+                    'current_return_pct': (price / entry - 1) * 100,
+                    'anchor_session': str(high_row.session) if high > entry else p['entry_session'],
+                    'price_basis': '已保存的持仓期原始收盘价；不含盘中峰值、分红和费用',
+                    'amount_status': C.NOT_APPLICABLE if changed_shares else C.OK,
+                    'amount_usd': None if changed_shares else (high - price) * (shares or 0) / 1e6,
+                    'amount_why': '减仓后不回乘当前数量' if changed_shares else '',
+                }
+        initial_stop = ((p.get('protection') or {}).get('initial_stop_micro') or {}).get('value')
+        p['current_r'] = ((price - entry) / (entry - initial_stop)
+                          if entry and initial_stop is not None and entry > initial_stop and not actions else None)
+    return section
+
+
 def _llm_impact_section(store, manifest, entry_metrics, position_metrics, paired,
                         forward_start_session=None) -> dict:
     """角色、决策清单、参与漏斗、R/L 配对、成本预算。
 
-    **`portfolio`/`review` 两个角色标「未采集」**：现有 metrics 接口只覆盖
-    selection/entry/position（需求 §2 明写「不能直接假设覆盖全部角色」）。填 0 会把
-    「没有这个数据源」显示成「这个角色什么都没做」。
+    角色按本实验 manifest 判断；主链角色不能当作已在纸面实验启用。
     """
     llm = manifest.llm_policy or {}
     roles = []
-    for role, note in (('selection', '实盘决策层，与影子实验无关'),
-                       ('entry', '本实验的入场否决（overlay=entry_veto）'),
-                       ('position', '持仓评审（overlay=position_action）'),
-                       ('portfolio', None), ('review', None)):
-        roles.append({
-            'role': role,
-            'enabled': role in ('entry', 'position') or role == 'selection',
-            'note': note,
-            'status': C.OK if note else C.NOT_COLLECTED,
-            'why': '' if note else '现有 metrics 接口只覆盖 selection/entry/position，本角色无读取来源',
-        })
-    apps = store.applications()
-    table = []
-    for a in sorted(apps, key=lambda x: (x.get('scope', ''), x.get('opportunity_id', ''))):
-        raw = a.get('raw_action') or ''
-        table.append({
-            'opportunity_id': a.get('opportunity_id'),
-            'scope': a.get('scope'), 'role': 'entry',
-            'action': a.get('action'), 'raw_action': raw or None,
-            'degraded_from': raw if raw and raw != a.get('action') else None,
-            'reason_code': a.get('reason_code'),
-            'decision_frozen': a.get('decision_frozen'),
-            'execution_applied': a.get('execution_applied'),
-            'model_cost_usd': (a.get('model_cost') or 0) / 1e6,
-            'cost_uncertain': a.get('cost_uncertain', False),
-            # 需求 §5.4：结果成熟状态
-            'maturity': 'PENDING_SETTLEMENT' if not a.get('execution_applied') else 'IMMATURE',
-        })
+    for role in ('selection', 'entry', 'position', 'portfolio', 'review'):
+        enabled = ((role == 'entry' and llm.get('overlay') == 'entry_veto') or
+                   (role == 'position' and llm.get('position_overlay') == 'position_action'))
+        roles.append({'role': role, 'enabled': enabled,
+                      'status': C.OK if enabled else C.NOT_APPLICABLE,
+                      'note': ('本实验纸面动作；仍须校验与硬风控通过' if enabled else
+                               '本实验未启用此角色；其他范围权限不在这里推断')})
+    table = I.decision_rows(store, forward_start_session)
     # 成本预算：口径与 `overlay_review.budget_usage` 同义，但**自己数在飞的尝试**
     # （pin 的 store 没有 `in_flight_attempts`，见包 docstring）
     budget_micro = llm.get('model_budget_micro')
@@ -233,7 +290,7 @@ def _llm_impact_section(store, manifest, entry_metrics, position_metrics, paired
     if l_scope:
         for a in store.applications(l_scope):
             spent += a.get('model_cost') or 0
-            if a.get('cost_uncertain'):
+            if a.get('cost_uncertain') or a.get('model_cost') is None:
                 unsettled += 1
         # 在飞 = 状态为 CALL_STARTED 的尝试（**原始 SQL 计数**：pin 的 store 没有
         # `in_flight_attempts`，见包 docstring）
@@ -244,6 +301,7 @@ def _llm_impact_section(store, manifest, entry_metrics, position_metrics, paired
         'unknown_cost_count': unsettled,
         'in_flight_count': inflight,
         'reserved_usd': reserved / 1e6,
+        'call_reserve_usd': reserve_micro / 1e6,
         'budget_usd': (budget_micro / 1e6) if budget_micro is not None else None,
         'remaining_usd': ((budget_micro - spent - reserved) / 1e6)
         if budget_micro is not None else None,
@@ -264,8 +322,8 @@ def _llm_impact_section(store, manifest, entry_metrics, position_metrics, paired
                 continue
             # **每一点标注它属于回放还是前向**：图上不分开画，就会把 24 天初始化回放
             # 当成前向业绩（需求场景 7）。页面据此把回放段画成虚线并标边界。
-            phase = ('replay' if forward_start_session and s < forward_start_session
-                     else 'forward')
+            phase = ('unknown' if not forward_start_session else
+                     'replay' if s < forward_start_session else 'forward')
             nav_r.append({'session': s, 'return_pct': (r_full - initial) / initial * 100,
                           'phase': phase})
             nav_l.append({'session': s, 'return_pct': (l_full - initial) / initial * 100,
@@ -278,22 +336,7 @@ def _llm_impact_section(store, manifest, entry_metrics, position_metrics, paired
         'nav_r': nav_r, 'nav_l': nav_l,
         'forward_start_session': forward_start_session,
         'cost_budget': cost,
-        # 第二批要求「最有帮助与最有损害的决策都可下钻」与「提前退出的收益与损害案例」。
-        # **这两块是未实现，不是"暂时没有样本"** —— 用户 review 点名过：原先的 why 写成
-        # 「需要已成熟的结果」，读起来像"数据到了就会自动出现"，而实际没有任何计算实现。
-        # 如实说明，免得把"没做"当成"没到"。
-        'cases': {
-            'best': [], 'worst': [],
-            'status': C.NOT_IMPLEMENTED,
-            'why': '**未实现**：逐笔 L−R 损益差的排序与下钻尚未编写（不是样本不足 —— '
-                   '即使积累出成熟样本，这里也不会自动出现）',
-            'early_exit_harm': {
-                'status': C.NOT_IMPLEMENTED,
-                'why': '**未实现**：提前退出的收益/损害案例尚未编写。'
-                       '现有的同机会对照结论在「策略与实验」页（S1 行），但那是研究产物，'
-                       '不是按本实验逐笔计算的',
-            },
-        },
+        'cases': I.contribution_cases(store, manifest.account_scopes, table),
         'vocabulary_version': VOCABULARY_VERSION,
     }
 
@@ -325,11 +368,11 @@ def _build_todo(entry_metrics, position_metrics, cost_budget, accounts, data_sta
         todos.append(f'数据来源状态是 {data_status} —— 见本页底部「证据与诊断」的 missing_reasons')
     if entry_metrics.get('veto_unapplied'):
         todos.append(f"⚠️ {entry_metrics['veto_unapplied']} 次 VETO 已冻结但未落到执行"
-                     f"（账户照样买入）—— 否决必须兑现，否则等于没发生")
+                     f"—— 尚未兑现不等于已买入，请核对执行记录")
     if cost_budget.get('status') == C.OK:
         remaining = cost_budget.get('remaining_usd')
-        if remaining is not None and remaining <= 0:
-            todos.append('模型调用预算已用尽 —— 之后的评审会以 ABSTAIN 采用父策略，不再调用模型')
+        if remaining is not None and remaining < cost_budget.get('call_reserve_usd', 0.000001):
+            todos.append('模型预算不足以预留下次调用费用，后续评审将受预算阻断')
         if cost_budget.get('unknown_cost_count'):
             todos.append(f"有 {cost_budget['unknown_cost_count']} 次调用的成本未知，待补记")
         if cost_budget.get('in_flight_count'):
@@ -338,13 +381,17 @@ def _build_todo(entry_metrics, position_metrics, cost_budget, accounts, data_sta
         if acct.get('cost_status') == 'PROVISIONAL':
             todos.append(f"{acct['account_id']} 的成本口径是暂定（有未知费用未补记），"
                          f"净值只是上界")
+    for label, metrics in (('入场', entry_metrics), ('持仓', position_metrics)):
+        for field, name in (('data_blocked', '数据阻断'), ('failure_abstains', '调用失败/降级')):
+            if metrics.get(field):
+                todos.append(f'{label}累计 {metrics[field]} 次{name}，见机会或决策清单；历史事件不代表当前故障')
     checks = ['数据来源状态与 missing_reasons',
-              'VETO 未兑现（冻结了否决但账户仍买入）',
+              'VETO 冻结后是否兑现',
               '模型调用预算是否用尽 / 成本未知 / 在飞调用',
               '账户成本口径是否暂定']
     uncheckable = ['人工确认待办（属确认台，本页不读它，见「需要处理」里的链接）',
                    '执行结果待对账（需要执行侧对账数据，尚未接入本页）',
-                   '数据阻断的机会（需要按机会列出阻断原因，尚未接入本页）']
+                   '上游原始库完整性与下次作业状态（仍由既有看护检查）']
     return todos, checks, uncheckable
 
 
@@ -405,7 +452,7 @@ def paper_scope_sections(store, entry, *, prices=None, base=None,
     # 配对绩效需要**两个**账户；三臂实验只有一个（只差宇宙，没有 R/L 配对）⇒ 不适用，
     # 而不是算出一个假数（需求 §7：不适用与 0 是两件事）。
     if len(manifest.account_scopes) >= 2:
-        paired = rp.paired_performance(store, manifest, None, vocab)
+        paired = I.forward_performance(store, manifest, entry.get('forward_start_session'), rp)
     else:
         paired = {'applicable': False, 'status': C.NOT_APPLICABLE,
                   'why': '本实验只有一个账户（三臂只差宇宙，没有 R/L 配对）'}
@@ -417,9 +464,20 @@ def paper_scope_sections(store, entry, *, prices=None, base=None,
     overview = _overview_section(manifest, accounts, em, pm, entry,
                                  cost_budget=llm.get('cost_budget'),
                                  data_status=data_status)
+    cases = llm['cases']
+    overview['period_activity'].update(
+        matured_samples=cases.get('mature_count'),
+        maturity_status=cases['status'],
+        maturity_why='已完成且有真实模型干预的配对机会数；不替代协议的独立样本门槛')
+    overview['period_activity']['model_valid_reviews'] = sum(
+        r['valid_real_review'] and r['phase'] == 'forward' for r in llm['decision_table'])
+    overview['period_activity']['position_path_changed'] = sum(
+        r['path_changed'] and r['role'] == 'position' and r['scope'].endswith(':L')
+        for r in llm['decision_table'])
     return {
         'overview': overview,
-        'positions': _positions_section(rows, manifest.account_scopes),
+        'positions': _enrich_positions(_positions_section(rows, manifest.account_scopes),
+                                       store, manifest, base, llm['decision_table']),
         'opportunities': _opportunities_section(store, em),
         'llm_impact': llm,
         'accounts': accounts,
@@ -444,9 +502,17 @@ def live_sections(base: Path, entry: dict) -> tuple:
         for ns, payload in con.execute('SELECT namespace, payload FROM books'):
             books[ns] = json.loads(payload)
     accounts, positions = [], []
+    todos, missing_namespaces = [], []
     for ns in entry['namespaces']:
-        book = books.get(ns) or {'positions': {}, 'orders': {}}
+        if ns not in books:
+            missing_namespaces.append(ns)
+            accounts.append({'account_id': ns, 'status': C.NOT_COLLECTED})
+            continue
+        book = books[ns]
         pos = book.get('positions') or {}
+        for order_id, order in (book.get('orders') or {}).items():
+            if order.get('status') in ('unknown', 'failed', 'partially_filled', 'executing'):
+                todos.append(f"{ns} 订单 {order_id}：{order.get('status')}，请到确认台核对")
         accounts.append({
             'account_id': ns, 'status': C.OK,
             'positions_count': len(pos), 'orders_count': len(book.get('orders') or {}),
@@ -454,20 +520,28 @@ def live_sections(base: Path, entry: dict) -> tuple:
                                why='实盘账本不保存净值序列（净值在监控器内存里）'),
         })
         for code, p in sorted(pos.items()):
-            positions.append({'account_id': ns, 'security_id': code, **p})
+            positions.append({'account_id': ns, 'account_label': ns, 'security_id': code,
+                              **p, 'shares': p.get('qty'),
+                              'entry_price_micro': (round(p['entry_price'] * 1e6)
+                                                    if p.get('entry_price') is not None else None),
+                              'giveback': {'status': C.NOT_COLLECTED, 'why': '本源没有持仓期价格历史'}})
     sections = {
         'overview': {
             'accounts': accounts,
             'period_activity': {
-                'opportunities': C.metric(None, status=C.NOT_COLLECTED,
-                                          why='实盘层的候选漏斗不在本页数据源里'),
-                'reviewed': C.metric(None, status=C.NOT_COLLECTED, why='同上'),
+                'opportunities': None,
+                'reviewed': None,
+                'maturity_status': C.NOT_COLLECTED,
+                'maturity_why': '本源只读模拟执行账本，不含候选与评审结果统计',
             },
             'llm_scope': {
                 'permission_note': '主链 LLM 权限为 shadow ⇒ 校验通过的决策也不改变执行路径；'
                                    '本范围是**模拟成交**（trd_env=SIMULATE / DRY-RUN）',
             },
-            'in_progress': [], 'todo': [],
+            'in_progress': [], 'todo': todos,
+            'todo_checks': ['已读取命名空间中的订单未知、失败、部分成交与执行中状态'],
+            'todo_uncheckable': ['净值、监控器保护线、提案待办未接入本源'] +
+                                [f'命名空间未找到：{ns}' for ns in missing_namespaces],
         },
         'positions': {'positions': positions, 'not_collected': [
             {'field': 'protection_state', 'status': C.NOT_COLLECTED,
@@ -616,7 +690,7 @@ def normalize_study(base: Path, entry: dict, research: dict) -> dict:
         }
         row['deltas'] = {'sum_net_r': _m((s.get('sum_net_r_B') or 0) - (s.get('sum_net_r_A') or 0)
                                          if s.get('sum_net_r_A') is not None else None, 'R'),
-                         'tail_es_improvement': _m(s.get('tail_es_improvement'), 'R'),
+                         'tail_es_improvement': _m(s.get('tail_es_improvement'), '%', scale=100),
                          'giveback_reduction_pct': _m(s.get('giveback_reduction_pct'), '%',
                                                       scale=100)}
         row['verdict'] = {'token': _dig(result, 'verdict', 'token'),
@@ -633,20 +707,25 @@ def normalize_study(base: Path, entry: dict, research: dict) -> dict:
                           'mdd_pct': _m(a.get('mdd'), '%', scale=100),
                           'win_rate_pct': _m(a.get('win_rate'), '%', scale=100),
                           'payoff': _m(a.get('profit_loss_ratio')),
+                          'tail_es': _m(a.get('tail_es_r'), 'R'),
                           'worst_trade_r': _m(a.get('worst_trade_r'), 'R')},
             'B_加抄底 sleeve': {'return_pct': _m(b.get('total_return'), '%', scale=100),
                                 'cagr_pct': _m(b.get('cagr'), '%', scale=100),
                                 'mdd_pct': _m(b.get('mdd'), '%', scale=100),
                                 'win_rate_pct': _m(b.get('win_rate'), '%', scale=100),
                                 'payoff': _m(b.get('profit_loss_ratio')),
+                                'tail_es': _m(b.get('tail_es_r'), 'R'),
                                 'worst_trade_r': _m(b.get('worst_trade_r'), 'R')}}
-        row['metrics'] = row['arms']['B_加抄底 sleeve']
+        row['metrics'] = dict(row['arms']['B_加抄底 sleeve'])
+        row['metrics']['tail'] = row['metrics']['worst_trade_r']
         row['deltas'] = {'terminal_return_pp': _m(result.get('delta_terminal_return'), 'pp',
                                                   scale=100),
                          'mdd_pp': _m(result.get('delta_mdd'), 'pp', scale=100),
                          'worst_trade_r': _m(result.get('delta_worst_trade_r'), 'R')}
-        row['verdict'] = {'token': 'RISK_REJECTED',
-                          'why': '收益与风险同时变差（登记判据）'}
+        verdict = (art.get('result_full') or result).get('verdict') or {}
+        row['verdict'] = {'token': verdict.get('token'),
+                          'why': '读取完整结果的登记判定；缺失时不推断',
+                          'checks': verdict.get('checks')}
         row['sample'] = {'n_a': _dig(result, 'entries', 'n_a'),
                          'n_b': _dig(result, 'entries', 'n_b'),
                          'common': _dig(result, 'entries', 'common')}
@@ -654,11 +733,18 @@ def normalize_study(base: Path, entry: dict, research: dict) -> dict:
     elif _dig(result, 'comparison', 'delta_terminal_return') is not None:   # 抄底替换
         row['kind'] = 'entry_replacement'
         d = result['comparison']
-        row['metrics'] = {'return_pct': _m(None, '%', why='该产物只给差值 ⇒ 与上面的基线行并列看，'
-                                                            '不在此处相加合成（合成出来的数没人复核）'),
-                          'mdd_pct': _m(None, '%', why='同上'),
-                          'win_rate_pct': _m(None, '%', why='同上'),
-                          'tail': _m(d.get('delta_worst_trade_r'), 'R', label='最差单笔 R 的**变化**')}
+        row['arms'] = {}
+        for key, label in (('a', 'A_规则基线'), ('b', 'B_抄底替换')):
+            arm = d.get(key) or {}
+            row['arms'][label] = {
+                'return_pct': _m(arm.get('total_return'), '%', scale=100),
+                'mdd_pct': _m(arm.get('mdd'), '%', scale=100),
+                'win_rate_pct': _m(arm.get('win_rate'), '%', scale=100),
+                'payoff': _m(arm.get('profit_loss_ratio')),
+                'tail_es': _m(arm.get('tail_es_r'), 'R'),
+                'worst_trade_r': _m(arm.get('worst_trade_r'), 'R')}
+        row['metrics'] = dict(row['arms']['B_抄底替换'])
+        row['metrics']['tail'] = row['metrics']['worst_trade_r']
         row['deltas'] = {'terminal_return_pp': _m(d.get('delta_terminal_return'), 'pp', scale=100),
                          'cagr_pp': _m(d.get('delta_cagr'), 'pp', scale=100),
                          'mdd_pp': _m(d.get('delta_mdd'), 'pp', scale=100),

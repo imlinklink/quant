@@ -3,6 +3,24 @@
 {% block title %}持仓与退出{% endblock %}
 {% block heading %}持仓与退出{% endblock %}
 {% block script %}
+function priceChart(p) {
+  const pts = p.chart || [];
+  if (!pts.length) return '<div class="why">没有可用的持仓期价格序列。</div>';
+  const W=680, H=170, pad=38, stop=p.stop_micro == null ? null : p.stop_micro/1e6;
+  const values=pts.map(x=>x.price).concat(stop == null ? [] : [stop]);
+  const lo=Math.min(...values), hi=Math.max(...values), span=hi-lo || 1;
+  const x=i=>pad+(W-2*pad)*i/Math.max(1,pts.length-1), y=v=>H-pad-(H-2*pad)*(v-lo)/span;
+  const d=pts.map((v,i)=>`${i?'L':'M'}${x(i)},${y(v.price)}`).join(' ');
+  return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="持仓期收盘价与当前保护线" style="width:100%;max-height:220px">
+    <path d="${d}" fill="none" stroke="#38bdf8" stroke-width="2"/>
+    ${pts.map((v,i)=>`<circle cx="${x(i)}" cy="${y(v.price)}" r="3" fill="#38bdf8"><title>${esc(v.session)} ${usd(v.price)}</title></circle>`).join('')}
+    ${stop == null ? '' : `<circle cx="${x(pts.length-1)}" cy="${y(stop)}" r="4" fill="#f59e0b"><title>当前已生效保护线 ${usd(stop)}</title></circle>`}
+    <text x="4" y="22" fill="#94a3b8" font-size="11">${usd(hi)}</text>
+    <text x="4" y="${H-pad}" fill="#94a3b8" font-size="11">${usd(lo)}</text>
+    <text x="${pad}" y="${H-8}" fill="#94a3b8" font-size="11">${esc(pts[0].session)}</text>
+    <text x="${W-pad}" y="${H-8}" text-anchor="end" fill="#94a3b8" font-size="11">${esc(pts[pts.length-1].session)}</text>
+  </svg><div class="why">蓝线：收盘价；橙点：当前保护线（不回画成历史生效线）。${esc(p.chart_note || '')}</div>`;
+}
 window.__render = function (j) {
   const env = j.envelope, s = env.sections || {}, sec = s.positions || {};
   const notice = researchScopeNotice(env);
@@ -27,9 +45,16 @@ window.__render = function (j) {
         ['入场日', esc(p.entry_session || '—')],
         ['持有 session', p.holding_sessions == null ? '—' : p.holding_sessions],
         ['当前止损', micro(p.stop_micro)],
+        ['最新收盘', micro(p.current_price_micro)],
+        ['价格浮盈亏（未扣费）', usd(p.unrealized_price_pnl_usd)],
+        ['当前收益 R', num(p.current_r)],
+        ['距保护线', pct(p.stop_distance_pct)],
+        ['距时间退出（会话）', p.remaining_sessions == null ? '—' : p.remaining_sessions],
         ['退出政策', esc(p.exit_policy_id || '—')],
       ].map(([k, v]) => `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('') +
       '</div>');
+    out.push(`<div class="why">估值会话 ${esc(p.price_session || '未采集')}；价格浮盈亏不含分红和费用。</div>`);
+    out.push(priceChart(p));
     // 保护状态（需求 §5.2 本轮最高优先级）
     out.push('<div class="sec-title">保护与退出</div><table><tr><th>项</th><th>值</th><th>状态</th></tr>');
     for (const r of rows) {
@@ -39,12 +64,13 @@ window.__render = function (j) {
         <td>${statusTag(r.status)}${r.why ? `<div class="why">${esc(r.why)}</div>` : ''}</td></tr>`);
     }
     out.push('</table>');
+    out.push(`<div>规则退出条件：价格触及当前已生效止损 ${micro(p.stop_micro)}，或达到 ${esc(p.exit_policy_id || '登记退出条件')}；模型持有意见不能阻止硬退出。</div>`);
     out.push(`<div class="why">保护线不保证跳空时的成交价格；待生效线与已生效线在账本里是分开的字段。</div>`);
     // 浮盈回吐
     out.push('<div class="sec-title">浮盈回吐</div>');
     if (gb.status === 'OK') {
       out.push(`<div class="grid">` + [
-        ['回吐（百分点）', pct(gb.value_pp)],
+        ['回吐（百分点）', gb.value_pp == null ? '—' : num(gb.value_pp) + ' 个百分点'],
         ['持仓期最大收益率', pct(gb.max_return_pct)],
         ['当前收益率', pct(gb.current_return_pct)],
         ['锚点 session', esc(gb.anchor_session || '—')],
@@ -66,9 +92,12 @@ window.__render = function (j) {
     const rv = p.review || {};
     out.push(`<div class="sec-title">模型评审</div>`);
     out.push(rv.reviewed
-      ? `<div class="why">最近评审 session=${esc(rv.last_review_session || '—')}｜
-         主体键=${esc(rv.subject_key || '—')}｜包=${esc((rv.packet_id || '').slice(0, 16))}…</div>`
-      : `<div>${statusTag('NO_OBJECT')}<div class="why">这笔持仓还没有过一次模型持仓评审。</div></div>`);
+      ? `<div>规则：${esc(rv.rule_action)} → 模型：${esc(rv.model_action || '无有效建议')}
+         → 最终动作：<b>${esc(rv.action)}</b> · ${esc(rv.execution_status)}</div>
+         <div class="why">评审执行会话 ${esc(rv.session)} · ${esc(rv.reason_code || '')}
+         ${esc((rv.execution_reasons || []).join('；'))}</div>`
+      : '<div class="why">该持仓生命周期尚无持仓评审动作，继续按原规则管理。</div>');
+    if (p.decision_key) out.push(`<a href="/decisions/${encodeURIComponent(env.scope_id + '@' + p.decision_key)}">查看当时依据与完整执行轨迹</a>`);
     out.push(diagBlock('证据与诊断（该持仓原文）', p));
     out.push('</div>');
   }

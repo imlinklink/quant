@@ -12,7 +12,8 @@ async function bootDecision() {
   try {
     const j = await api('/api/analytics/decisions/' + encodeURIComponent(id));
     const t = j.trace || {}, out = [];
-    document.getElementById('meta').textContent = t.generated_at || '';
+    document.getElementById('meta').textContent = timestamp(t.generated_at);
+    STATE.scopeId=t.scope_id; rememberScope();
     out.push(`<div class="card"><h2>${esc(t.security_id || '—')}
       <span class="why">${esc(t.signal_session || '—')} → ${esc(t.planned_execution_session || '—')}</span></h2>
       <div class="ctx" style="display:flex">机会 <b>${esc(t.opportunity_id || '—')}</b>
@@ -21,12 +22,12 @@ async function bootDecision() {
     const rp = t.rule_plan || {};
     tl.push(['1. 冻结规则计划', `${esc(rp.parent_strategy_id || '—')}/${esc(rp.parent_version || '—')}
       ｜入场=${esc(rp.entry_rule || '—')}｜退出=${esc(rp.exit_policy_id || '—')}
-      ｜止损基准=${esc(String(rp.stop_reference == null ? '—' : rp.stop_reference))}
+      ｜止损基准=${esc(rp.stop_reference == null ? '—' : JSON.stringify(rp.stop_reference))}
       ｜决策截止=${esc(rp.decision_deadline || '—')}`]);
     tl.push(['2. 证据（' + esc(t.evidence_mode || '—') + '）',
       (t.events || []).length
         ? (t.events || []).map(e => `${esc((e.summary || '').slice(0, 90))}
-            ${e.source_url ? `(<a href="${esc(e.source_url)}" target="_blank">链接</a>)` : ''}
+            ${/^https?:\/\//i.test(e.source_url || '') ? `(<a href="${esc(e.source_url)}" target="_blank" rel="noopener noreferrer">来源</a>)` : esc(e.source_url ? '本地来源：'+e.source_url : '')}
             <span class="why">${esc(e.published_at || '')} / ${esc(e.observed_at || '')}</span>`).join('<br>')
         : '<span class="why">包里没有事件（严格模式下证据供给可能为空，这不等于模型判断为中性）</span>']);
     for (const [scope, a] of Object.entries(t.accounts || {})) {
@@ -44,6 +45,18 @@ async function bootDecision() {
       out.push(`<div class="sec-title">${h}</div><div class="why">${body}</div>`);
     }
     out.push('</div>');
+    const dr = t.decision_rows || [];
+    out.push('<div class="card"><h2>实际成交与结果</h2>');
+    for (const row of dr) {
+      out.push(`<div class="sec-title">${esc(row.scope)} · ${esc(row.role)}</div>
+        <div>规则 ${esc(row.rule_action)} → 模型 ${esc(row.model_action || '无有效建议')} → 最终 ${esc(row.action)}</div>
+        <div class="why">${esc(row.execution_status)} · ${esc((row.execution_reasons || []).join('；'))}</div>`);
+      for (const f of (row.fills || [])) out.push(`<div>${esc(f.session)} ${esc(f.side)} ${esc(f.shares)} 股 × ${micro(f.price_micro)} · 交易费 ${micro(f.fee_micro)} · ${esc(f.reason)}</div>`);
+    }
+    for (const c of (t.outcomes || [])) out.push(`<div>生命周期配对：R ${usd(c.R_pnl_usd)} / L ${usd(c.L_pnl_usd)} / 差额 ${usd(c.delta_usd)}（含已知成本）</div>`);
+    if (!(t.outcomes || []).length) out.push('<div class="why">暂无已完成且符合真实模型干预条件的生命周期贡献结果。</div>');
+    out.push('</div>');
+    if ((t.technical_evidence || []).length) out.push(diagBlock('当时的技术事实与证据', t.technical_evidence));
     out.push(`<div class="why">模型推断与程序计算事实在此分开显示；模型没有报告的理由不会被补造。
       关联缺失时显示断点，不按股票与近似时间拼出完整轨迹（需求 §5.6）。</div>`);
     out.push(diagBlock('证据与诊断（trace 原文）', t));

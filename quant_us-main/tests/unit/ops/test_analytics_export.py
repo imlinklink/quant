@@ -332,13 +332,26 @@ class StrategyComparisonTests(unittest.TestCase):
 
     def test_delta_only_artifact_does_not_invent_absolute_numbers(self):
         """差额类产物只给差值 ⇒ 绝对值必须「未采集」，不得填 0 或替它合成。"""
-        row = self.rows['research:SR-BOTTOM-20260921-001']
+        entry = {'scope_id': 'test', 'run_dir': 'test', 'artifacts': {}}
+        row = S.normalize_study(self.BASE, entry, {'result': {
+            'comparison': {'delta_terminal_return': -.758}}})
         self.assertEqual(row['kind'], 'entry_replacement')
         for key in ('return_pct', 'mdd_pct', 'win_rate_pct'):
             self.assertEqual(row['metrics'][key]['status'], C.NOT_COLLECTED, key)
             self.assertIsNone(row['metrics'][key]['value'], key)
         self.assertEqual(row['deltas']['terminal_return_pp']['status'], C.OK)
         self.assertAlmostEqual(row['deltas']['terminal_return_pp']['value'], -75.8, places=1)
+
+    def test_actual_bottom_result_has_absolute_arm_values(self):
+        row = self.rows['research:SR-BOTTOM-20260921-001']
+        payload = json.loads((self.BASE / 'strategy_research/SR-BOTTOM-20260921-001/entry_arms.json').read_text())
+        b = payload['comparison']['b']
+        self.assertAlmostEqual(row['metrics']['return_pct']['value'], b['total_return'] * 100)
+        self.assertAlmostEqual(row['metrics']['win_rate_pct']['value'], b['win_rate'] * 100)
+
+    def test_tail_improvement_is_percent_not_r(self):
+        row = self.rows['research:SR-EXIT-PROTECT-20260921-001']
+        self.assertEqual(row['deltas']['tail_es_improvement']['unit'], '%')
 
     def test_every_row_carries_a_verifiable_source(self):
         for sid, row in self.rows.items():

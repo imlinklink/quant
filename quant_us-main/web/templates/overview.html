@@ -5,6 +5,8 @@
 {% block script %}
 window.__render = function (j) {
   const env = j.envelope, s = env.sections || {}, o = s.overview || {};
+  const notice = researchScopeNotice(env);
+  if (notice) return notice;
   const out = [];
   if (env.data_status !== 'OK') {
     out.push(`<div class="card ${env.data_status === 'READ_FAILED' ? 'bad' : 'warn'}">
@@ -20,9 +22,9 @@ window.__render = function (j) {
   out.push(`<div class="card ${todo.length ? 'warn' : 'plain'}">
     <h2>需要处理${todo.length ? `（${todo.length} 项）` : ''}</h2>${todo.length
       ? '<ul>' + todo.map(t => `<li>${esc(t)}</li>`).join('') + '</ul>'
-      : '<div class="why">下列检查**均未发现问题**（不是「没检查」）：</div>'
+      : '<div class="why">'+(checks.length ? '已完成的检查未发现待处理项：' : '此范围未接入待办检查。')+'</div>'
         + '<ul class="why">' + checks.map(c => `<li>${esc(c)}</li>`).join('') + '</ul>'}
-    ${uncheckable.length ? `<div class="sec-title">本页做不到的检查（别人管）</div>
+    ${uncheckable.length ? `<div class="sec-title">尚未覆盖的检查</div>
       <ul class="why">${uncheckable.map(c => `<li>${esc(c)}</li>`).join('')}</ul>` : ''}
   </div>`);
   // 账户摘要：每个账户一张卡，**不同范围不合计**
@@ -37,6 +39,7 @@ window.__render = function (j) {
       ['全成本净值', usd(a.full_cost_equity && a.full_cost_equity.value)],
       ['回撤', a.drawdown && a.drawdown.value != null ? pct(a.drawdown.value) : '—'],
       ['持仓数', a.positions_count],
+      ['可用现金', usd(a.cash_available && a.cash_available.value)],
       ['估值', esc(a.valuation_status || '—')],
       ['风险状态', esc(a.risk_state || '—')],
       ['成本口径', esc(a.cost_status || '—')],
@@ -53,14 +56,14 @@ window.__render = function (j) {
     ['持仓路径改变', p.position_path_changed],
   ].map(([k, v]) => `<div class="tile"><div class="k">${k}</div><div class="v">${v == null ? '—' : v}</div></div>`)
     .join('') + '</div>' +
-    `<div class="why">结果成熟数：${statusTag(p.maturity_status)} ${esc(p.maturity_why || '')}</div>` +
+    `<div class="why">结果成熟数：${statusTag(p.maturity_status)} ${p.matured_samples == null ? '' : p.matured_samples + ' 个机会'} ${esc(p.maturity_why || '')}</div>` +
     `<div class="why">「作业跑成功」与「产生了有效决策」是两件事：本页只统计有记录的对象。</div></div>`);
   // 在验证什么
   out.push('<div class="card"><h2>正在验证什么</h2>');
   for (const w of (o.in_progress || [])) {
     out.push(`<div class="sec-title">${esc(w.what)}</div><div class="grid">` + [
       ['登记窗口', esc(w.enrollment_window || '—')], ['评审日', esc(w.review_date || '—')],
-      ['最少独立样本', w.min_decisions == null ? '—' : w.min_decisions],
+      ['登记最少决策数', w.min_decisions == null ? '—' : w.min_decisions],
       ['状态', esc(w.status)],
     ].map(([k, v]) => `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('') +
       '</div>');

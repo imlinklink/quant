@@ -10,7 +10,7 @@ async function bootExperiments() {
     '<span class="muted" style="margin:0">本页跨全部实验（研究结论 + 前向进度），不受范围切换影响</span>';
   try {
     const j = await api('/api/analytics/experiments');
-    document.getElementById('meta').textContent = j.generated_at || '';
+    document.getElementById('meta').textContent = timestamp(j.generated_at);
     const out = [];
     out.push(`<div class="card warn"><h2>怎么读这一页</h2>
       <div class="why">研究结论只用于**淘汰方向**；正式资格需前向登记。本页不生成「策略提升」结论：
@@ -20,7 +20,7 @@ async function bootExperiments() {
     function cell(m) {
       if (!m) return '—';
       if (m.status !== 'OK' || m.value == null) return statusTag(m.status);
-      const v = m.unit === '%' ? pct(m.value) : (m.unit === 'R' ? num(m.value, 2) + 'R'
+      const v = m.unit === 'pp' ? num(m.value,2)+' 个百分点' : m.unit === '%' ? pct(m.value) : (m.unit === 'R' ? num(m.value, 2) + 'R'
               : num(m.value, 2));
       return esc(v);
     }
@@ -47,37 +47,44 @@ async function bootExperiments() {
       }
       out.push('</table>');
       out.push(`<div class="why">「未采集」不是 0 —— 产物里没有这个数就不显示数（需求 §7）。
-        差额类产物（如抄底替换）只给差值 ⇒ 与基线行并列看，**不在页面上相加合成**。</div>`);
+        绝对值直接读取各臂产物；只有差额的产物仍保持缺失，不拼接不同实验的收益。</div>`);
     }
     out.push('</div>');
     // ---- 两臂并列（有的话）----
     for (const r of rows) {
       if (!r.arms) continue;
       const out2 = [];
-      out2.push('<table><tr><th>臂</th><th>R 合计</th><th>最差单笔</th><th>尾部 ES</th><th>盈利笔数</th></tr>');
+      const labels = {sum_net_r:'净 R 合计', return_pct:'扣费收益', mdd_pct:'最大回撤',
+        win_rate_pct:'胜率', payoff:'盈亏比', cagr_pct:'年化收益', worst_trade_r:'最差单笔 R',
+        tail_es:'尾部 ES (R)', profitable:'盈利笔数'};
+      const keys = [...new Set(Object.values(r.arms).flatMap(ms=>Object.keys(ms)))];
+      out2.push('<table><tr><th>臂</th>'+keys.map(k=>`<th>${esc(labels[k] || k)}</th>`).join('')+'</tr>');
       for (const [arm, ms] of Object.entries(r.arms)) {
-        const g = k => (ms[k] && ms[k].status === 'OK' && ms[k].value != null)
-          ? (ms[k].unit === 'R' ? num(ms[k].value, 2) + 'R' : String(ms[k].value)) : '—';
-        out2.push(`<tr><td>${esc(arm)}</td><td class="num">${g('sum_net_r')}</td>
-          <td class="num">${g('worst_trade_r')}</td><td class="num">${g('tail_es')}</td>
-          <td class="num">${g('profitable')}</td></tr>`);
+        out2.push(`<tr><td>${esc(arm)}</td>`+keys.map(k=>`<td class="num">${cell(ms[k])}</td>`).join('')+'</tr>');
       }
       out2.push('</table>');
-      const d = r.deltas || {};
-      out2.push(`<div class="why">变化：R 合计 ${cell(d.sum_net_r)}｜尾部 ES 改善 ${cell(d.tail_es_improvement)}
-        ｜回吐减少 ${cell(d.giveback_reduction_pct)}</div>`);
-      out2.push(`<div class="why">⚠️ 胜率升而净收益降就并列显示两者，**不写成「策略提升」**。</div>`);
+      out2.push('<div class="why">变化：'+Object.entries(r.deltas || {}).map(([k,m])=>esc(({terminal_return_pp:'终值收益差',mdd_pp:'回撤幅度变化',cagr_pp:'年化收益差',stress_2x_terminal_return_pp:'双倍成本收益差',sum_net_r:'净 R 变化',tail_es_improvement:'尾部 ES 改善',giveback_reduction_pct:'回吐减少',worst_trade_r:'最差单笔变化'})[k] || k)+' '+cell(m)).join(' · ')+'</div>');
+      out2.push(`<div class="why">${esc((r.verdict || {}).why || '')}</div>`);
       out.push(`<div class="card plain"><h2>${esc(r.label)} — 两臂明细</h2>${out2.join('')}</div>`);
     }
+    out.push('<div class="card"><h2>前向实验进度</h2>');
+    for (const f of (j.forward_scopes || [])) {
+      const b=f.boundary || {};
+      out.push(`<div class="sec-title"><a href="/overview?scope=${encodeURIComponent(f.scope_id)}">${esc(f.scope_id)}</a></div>
+        <div>数据截至 ${esc(f.as_of || '等待数据')} · 前向起点 ${esc(b.forward_start_session || '未声明')}
+        · 前向会话 ${esc(b.nav_forward_sessions)} · 有效模型评审 ${esc(b.model_valid_sample_count)}</div>`);
+      for (const p of f.progress || []) out.push(`<div class="why">评估日 ${esc(p.review_date || '以登记协议为准')} · 最少决策要求 ${esc(p.min_decisions == null ? '以登记协议为准' : p.min_decisions)}；评审次数不等于独立成熟样本。</div>`);
+    }
+    out.push('</div>');
     for (const c of (j.research_cards || [])) {
       const sec = c.sections || {}, r = sec.research || {};
       out.push(`<div class="card"><h2>${esc(c.label || c.scope_id)}</h2>
         <div class="why">${esc(c.run_dir || '')}</div>`);
       const st = r.statistics || {};
       const cmp = r.comparison || {};
-      const vd = st.verdict || cmp.verdict || (r.result && r.result.verdict) || null;
+      const vd = (rows.find(x=>x.scope_id===c.scope_id) || {}).verdict || null;
       out.push(`<div class="grid">` + [
-        ['判定', vd ? `<b>${esc(String(vd))}</b>` : '<span class="tag nc">未采集</span>'],
+        ['判定', vd ? `<b>${esc(typeof vd === 'object' ? vd.token || vd.verdict || '待核对' : vd)}</b>` : '<span class="tag nc">未采集</span>'],
         ['产物', Object.keys(sec.research || {}).length],
         ['缺失产物', (sec.missing_artifacts || []).length],
       ].map(([k, v]) => `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('') + '</div>');
