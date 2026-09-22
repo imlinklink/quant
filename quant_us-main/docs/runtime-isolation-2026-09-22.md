@@ -61,8 +61,45 @@ L1 的代码在我今天的每次研究提交后都悄悄变了，而记录上�
 
 | 运行 checkout | pin 的 commit | 内容 | 约束 |
 |---|---|---|---|
-| `quant-runtime-main` | `7271033` = `47a8c95` + 日报改动 | M1 影子实验、三臂前向、**实盘服务** | **store schema 9 —— 不得再往前移**（M1 的账本是 schema 9；合并后的 main 已是 schema 10） |
+| `quant-runtime-main` | `cf2440d` = `7271033` + 段首日行动修复 | M1 影子实验、三臂前向、**实盘服务** | **store schema 9 —— 不得再往前移**（M1 的账本是 schema 9；合并后的 main 已是 schema 10） |
 | `quant-runtime-research` | `c43b215`（合并后的 main HEAD） | L1 持仓实验 | schema 10 |
+
+### 四之三、第二次移动 runtime-main 的 pin（2026-09-22 午间）：段首日公司行动
+
+**症状**：三臂前向自 `start`（09-21）起从未推进过。第一次真跑日作业即 `FAIL refresh 失败，
+本次不推进` —— `refresh_data --universe forward-arms` 在 `SEC-US-JPM` 上抛
+`ACTION_FACTOR_UNRESOLVED:SEC-US-JPM:2015-01-02`。
+
+**根因**：JPM 有一条 `cash_dividend`，`ex_date` 正好是它原始日线的**第一根 bar**（2015-01-02）。
+`_factors_by_ex_date` 用 `first <= ex <= last` 收集行动，于是这条落进窗口；而 `_prev_close`
+要求一根**严格早于**除息日的 bar，段首日没有 ⇒ 抛错。但这个因子只会被乘到空切片
+（`build_asof_panel` 里 `factor[:i] *= f` 且 `i=0`），`scale_to_next` 也只读 `by_ex[nxt]`
+而 `nxt` 不可能是段首日 ⇒ **对该段每一行都没有影响**。对股息而言该错误**只可能**在
+`ex == 段首日` 触发（窗口判据已保证 `ex >= first`）⇒ 这个 fail-closed 守卫唯一的效果
+就是让段首日除息的面板**永远无法重建**。
+
+**安全性证据**：剔除该条后重建 JPM 面板，历史段与库中已有的那份逐格差 **≤5.7e-14**
+（`HISTORY_TOL=1e-9`）⇒ **库里的面板本就是"没有应用该因子"算出来的**，改判据不改变任何
+已有输入。全 39 只里**只有 JPM** 有落在段首日的可调整行动 ⇒ 对 13 只 TECH 是**构造性无操作**。
+
+**改动**：`_factors_by_ex_date` 的窗口判据改 `first < ex <= last`（抽成 `_affects_segment`
+一份定义，merger 检查同用），与 `generate_historical_setups._raw_asof_snapshots` 里早有的
+同一条规则对齐。修在**共享原语**里而不是调用方 —— 两处调用方各需要一次，正是"同一件事
+两份定义"的温床。fail-closed 未放宽：段内不可换算的股息仍阻断（有测试钉死）。
+
+**核验**：`frozen_code` 12 个文件哈希 **0 处不一致** ✓；三臂 `run-day --session auto` 推进到
+**session=2026-09-21**（重放 1 个 session、三臂 eq=100,000、pos=0）✓；32 只观察宇宙面板全部
+到 09-21 ✓；`install_launchd --check` / `install_cron --check` / `check_config_record` 三项全绿 ✓；
+服务 health **200** ✓；全量测试 **1622 passed**（修前 1620 passed + 2 failed，那 2 条正是
+数据完整性守卫在真实数据上报出的"面板落后于原始库"，随刷新完成自动转绿 —— 守卫本身工作正常）。
+
+**注意两个不对称**：① 面板目录里另有 **7 只**（`US_HON/LIN/ORCL/QCOM/SNDK/TSM/UNH`）停在
+09-10，它们**不在**三臂的 32 只宇宙里（属 39 只幸存者审计集，只被已停用的刷新路径覆盖），
+不影响观察；② `quant-runtime-research` **没有**跟这次 pin —— L1 的刷新只覆盖 13 只 TECH
+与 ETF，构造上碰不到这条路径。
+
+**顺带**：`main` 同步提交为 `e2a9170`（此项两处改动）。`runtime-main-pin` 分支已随之前移；
+**未推送**（推送按用户口径单独处理）。
 
 **合并（`3ff2b7f`）之后，两个运行 checkout 只差 schema 9/10 这一件事** —— 这正是它们必须分开的原因。
 
