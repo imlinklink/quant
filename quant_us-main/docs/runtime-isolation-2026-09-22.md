@@ -61,7 +61,7 @@ L1 的代码在我今天的每次研究提交后都悄悄变了，而记录上�
 
 | 运行 checkout | pin 的 commit | 内容 | 约束 |
 |---|---|---|---|
-| `quant-runtime-main` | `f558eff` = `574eb5a` + 页面 JS 修复 | M1 影子实验、三臂前向、**实盘服务**、可视化页面 | **store schema 9 —— 不得再往前移**（M1 的账本是 schema 9；合并后的 main 已是 schema 10） |
+| `quant-runtime-main` | `21cdfe8` = `f558eff` + 用户 review 修复 | M1 影子实验、三臂前向、**实盘服务**、可视化页面 | **store schema 9 —— 不得再往前移**（M1 的账本是 schema 9；合并后的 main 已是 schema 10） |
 | `quant-runtime-research` | `c43b215`（合并后的 main HEAD） | L1 持仓实验 | schema 10 |
 
 ### 四之四、第三次移动 runtime-main 的 pin（2026-09-22 下午）：决策可视化六页
@@ -124,6 +124,24 @@ checkout 跑），而 pin 上的那一份还停在运行版本隔离**之前**�
 
 **教训（值得当规矩用）**：**页面类改动的验收不能只看状态码**。至少要有一条断言
 「渲染出来的正文里没有出现本该被执行的代码」。
+
+### 四之七、第六次移动（同日）：用户 review 的 4 条修复
+
+`f558eff` → **`21cdfe8`**（`main` 的 `d616f8d`）。详见 `交付总结-2026-09-22.md` §9。
+
+**最该记的一条**：四个页面读 `env.sections`，而接口把 `sections` 放在**顶层** ⇒
+`undefined` ⇒ **有数据也显示成假空白**（M1 那 2 条持仓一直在接口里，我此前却把稀疏
+页面解释成"空仓造成的"—— 用错误解释掩盖了一个 P1）。修法是接口**只交一种形状**。
+
+**补上了一条真正能抓住它的测试**（用户点名要的验证）：
+`tests/unit/live/test_analytics_render_node.py` 把页面渲染出的 `<script>` 抽出来，
+在 node 里用最小 DOM/fetch 桩跑 `window.__render(真实接口载荷)`，断言产出的 HTML 里
+**真有** `SEC-US-LITE` / `934.88` / `783.17` / 账户 id / `ABSTAIN` / `DECISION_DEADLINE_MISSED`。
+**只断言「200 + 字节数」抓不到字段路径错** —— 这条测试补的正是那个盲区。
+（node 不存在时自动 skip，不让 Python 套件硬依赖 node。）
+
+顺带：新增状态 `NOT_IMPLEMENTED`，把**"没做"与"没到"分开** —— 页面上的占位展示原先标
+`NOT_COLLECTED`，读起来像"数据到了就会自动出现"。
 
 ### 四之三、第二次移动 runtime-main 的 pin（2026-09-22 午间）：段首日公司行动
 
