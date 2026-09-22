@@ -76,11 +76,23 @@ def registration_digest() -> str:
     return hashlib.sha256(REGISTRATION.read_bytes()).hexdigest()
 
 
-def load_study(study_dir: Path):
-    """读冻结 study 的输入与账本成交。用既有加载器，不自己从文件名推证券 id。"""
+def load_inputs(study_dir: Path):
+    """只读 study 的**冻结输入**（不碰账本）。
+
+    账户级的臂运行只需要输入 —— 而池子扩样的 study（`SD-POOL32-*`）**只冻结输入**、
+    没有 `variants/baseline/ledger.sqlite3`。原先 `run_arm` 走 `load_study` 会在那里
+    直接 `unable to open database file`（实测）。
+    """
     study_dir = Path(study_dir)
     data = json.loads((study_dir / 'study_manifest.json').read_text(encoding='utf-8'))
     prices, market, calendar, quality, actions = load(data, study_dir)
+    return data, prices, market, calendar, quality, actions
+
+
+def load_study(study_dir: Path):
+    """读冻结 study 的输入与账本成交。用既有加载器，不自己从文件名推证券 id。"""
+    study_dir = Path(study_dir)
+    data, prices, market, calendar, quality, actions = load_inputs(study_dir)
     entries = entries_from_ledger(study_dir)
     recorded = recorded_exits(study_dir)
     merged = []
@@ -285,7 +297,12 @@ def step1(study_dir: Path, *, horizon: int = 60) -> dict:
     reg = registration()
     if int(reg['policy_under_test']['parameters']['atr_period']) != DEFAULT_PROTECTION.atr_period:
         raise ValueError('REGISTRATION_CODE_MISMATCH:atr_period')
-    data, prices, _market, calendar, _quality, actions, entries = load_study(study_dir)
+    if baseline_trades is None:
+        data, prices, _market, calendar, _quality, actions, entries = load_study(study_dir)
+    else:
+        # 池子扩样重跑：只读 study 的**冻结输入**，基线成交来自 `baseline_trades`
+        data, prices, _market, calendar, _quality, actions = load_inputs(study_dir)
+        entries = _entries_from_baseline_trades(baseline_trades)
     acts_by_date: dict = defaultdict(list)
     converted, _dropped = shadow_actions(
         actions, universe=set(prices.security_id),
@@ -340,9 +357,15 @@ def _reproduction_failures(rows: list[dict], arm_key: str = 'A_off') -> list[dic
                 bad.append({'security_id': r['security_id'], 'entry_session': r['entry_session'],
                             'recorded': 'RIGHT_CENSORED', 'replayed': a['status']})
             continue
+        # 成交价只在**两边都有**时比：池子路径的基线成交来自 `trades_from_events`，
+        # 它把价格记成 `exit_price`（美元）而非 `exit_price_micro`；缺这一列**不削弱控制**
+        # —— 净损益是价格与股数的函数，`net_pnl_micro` 一致即蕴含成交价与费用一致。
+        # 缺的那部分计数由调用方披露（不静默）。
+        price_mismatch = (r['exit_price_recorded'] is not None
+                          and a['exit_price_micro'] != r['exit_price_recorded'])
         if (a['status'] != 'CLOSED' or a['exit_reason'] != recorded_reason
                 or a['exit_session'] != r['exit_session_recorded']
-                or a['exit_price_micro'] != r['exit_price_recorded']
+                or price_mismatch
                 or a['net_pnl_micro'] != r['net_pnl_recorded']):
             bad.append({'security_id': r['security_id'], 'entry_session': r['entry_session'],
                         'recorded': [recorded_reason, r['exit_session_recorded'],
@@ -485,7 +508,39 @@ def step1_verdict(summary: dict) -> dict:
 TREND_REGISTRATION = ROOT / 'docs/preregistrations/EXIT-TREND-MA2060-20260922.json'
 
 
-def step1_trend(study_dir: Path, *, horizon: int = 60) -> dict:
+def _entries_from_baseline_trades(path: Path) -> list[dict]:
+    """把一次基线臂运行的逐笔成交变成 `entries`（池子扩样重跑用）。
+
+    **为什么不用 `load_study`**：那条路要 study 自己的账本与 `exit_diagnostics.json`，
+    而 32 只池子的 study 只是冻结了**输入**（诊断要的基线成交由我自己跑一次得到）。
+    复现控制仍然成立：A 臂（孤立走查）必须复现这次基线运行的每一笔。
+    """
+    payload = json.loads(Path(path).read_text(encoding='utf-8'))
+    # 进场信息只在**成交事件**里（`trades_from_events` 的输出没有 entry_price/stop/shares），
+    # 出场信息在 trades 里 ⇒ 两边按 (证券, 入场日) 合并。缺一边即报错，不静默配错。
+    exits = {(str(t['security_id']), str(t['entry_session'])): t for t in payload['trades']}
+    out = []
+    for b in payload['buys']:
+        key = (str(b['security_id']), str(b['entry_session']))
+        t = exits.get(key)
+        if t is None:
+            raise ValueError(f'BASELINE_EXIT_MISSING:{key[0]}:{key[1]}')
+        out.append({'security_id': key[0], 'entry_session': key[1],
+                    'shares': int(b['shares']),
+                    'entry_price_micro': int(b['entry_price_micro']),
+                    'stop_micro': int(b['stop_micro']),
+                    'entry_fee_micro': int(b.get('entry_fee_micro') or 0),
+                    'exit_reason_recorded': t.get('exit_reason'),
+                    'exit_session_recorded': t.get('exit_session'),
+                    'exit_price_recorded': t.get('exit_price_micro'),
+                    'net_pnl_recorded': t.get('net_pnl_micro')})
+    if not out:
+        raise ValueError('BASELINE_TRADES_EMPTY')
+    return out
+
+
+def step1_trend(study_dir: Path, *, horizon: int = 60,
+                baseline_trades: Path | None = None) -> dict:
     """趋势退出 vs H60 的同机会对照（预登记 `EXIT-TREND-MA2060-20260922`）。
 
     A = H60 + 硬止损；B = 趋势退出 + 同一硬止损（**无时间退出**）。
@@ -495,7 +550,12 @@ def step1_trend(study_dir: Path, *, horizon: int = 60) -> dict:
     study_dir = Path(study_dir)
     if not TREND_REGISTRATION.exists():
         raise ValueError(f'PREREGISTRATION_MISSING:{TREND_REGISTRATION}')
-    data, prices, _market, calendar, _quality, actions, entries = load_study(study_dir)
+    if baseline_trades is None:
+        data, prices, _market, calendar, _quality, actions, entries = load_study(study_dir)
+    else:
+        # 池子扩样重跑：只读 study 的**冻结输入**，基线成交来自 `baseline_trades`
+        data, prices, _market, calendar, _quality, actions = load_inputs(study_dir)
+        entries = _entries_from_baseline_trades(baseline_trades)
     acts_by_date: dict = defaultdict(list)
     converted, _dropped = shadow_actions(
         actions, universe=set(prices.security_id),
@@ -529,6 +589,8 @@ def step1_trend(study_dir: Path, *, horizon: int = 60) -> dict:
         rows.append({**entry, 'A': a, 'B': b, 'A2': a2, 'B2': b2, 'trend_intact_at_a_exit': intact})
     return {'registration_sha256': hashlib.sha256(TREND_REGISTRATION.read_bytes()).hexdigest(),
             'study_id': data['study_id'], 'n_trades': len(rows), 'fee_bp': fee_bp,
+            'exit_price_compared': sum(1 for r in rows
+                                       if r['exit_price_recorded'] is not None),
             'trades': rows, 'summary': summarise_trend(rows),
             'verdict': trend_verdict(summarise_trend(rows))}
 

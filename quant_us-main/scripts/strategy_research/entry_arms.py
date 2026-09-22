@@ -31,7 +31,7 @@ from scripts.strategy_diagnostics.experiments import shadow_actions, step_accoun
 from scripts.strategy_diagnostics.exit_attribution import summarize, trades_from_events
 from scripts.strategy_diagnostics.statistics import annual_returns
 from scripts.strategy_research.bottom_signal import BottomSignalGenerator
-from scripts.strategy_research.runner import load_study
+from scripts.strategy_research.runner import load_inputs, load_study
 
 FEE_STRESS_BP = 20
 
@@ -93,7 +93,7 @@ def run_arm(kind: str, *, study_dir: Path, arm_id: str, fee_bp: int,
             limit: int | None = None, window: tuple | None = None,
             monthly_snapshots=None) -> dict:
     """跑一条臂的完整账户。返回 {navs, trades, events, states, opportunities, rejections}。"""
-    data, prices, market, calendar, quality, actions, _entries = load_study(study_dir)
+    data, prices, market, calendar, quality, actions = load_inputs(study_dir)
     start, end = (str(pd.Timestamp(data['research_window'][k]).date()) for k in ('start', 'end'))
     sessions = [s for s in calendar if pd.Timestamp(start) <= s <= pd.Timestamp(end)]
     if window is not None:
@@ -153,7 +153,7 @@ def run_sleeve_arm(study_dir: Path, *, fee_bp: int = 10, limit: int | None = Non
     改的只是「谁先占槽」，不是风险。
     """
     study_dir = Path(study_dir)
-    data, prices, market, calendar, quality, actions, _entries = load_study(study_dir)
+    data, prices, market, calendar, quality, actions = load_inputs(study_dir)
     start, end = (str(pd.Timestamp(data['research_window'][k]).date()) for k in ('start', 'end'))
     sessions = [s for s in calendar if pd.Timestamp(start) <= s <= pd.Timestamp(end)]
     if window is not None:
@@ -449,7 +449,7 @@ def sleeve_study(study_dir: Path, *, limit: int | None = None,
     _emit = (lambda name, payload: None)
     # **一次算好、四次运行共用**的月末截面（最贵的一步：1.29s/月末 × 127 ≈ 164s/臂）。
     # 与生成器内部走同一对函数 ⇒ 不另立定义；等价性由「A 臂复现基线 012」这条控制兜住。
-    from scripts.strategy_research.runner import load_study
+    from scripts.strategy_research.runner import load_inputs, load_study
     _data, _prices, _market, _calendar, _quality, _actions, _entries = load_study(study_dir)
     _sessions = [s for s in _calendar
                  if pd.Timestamp(_data['research_window']['start']) <= s
