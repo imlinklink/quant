@@ -195,7 +195,7 @@ class TemplateSingleSourceTests(unittest.TestCase):
         """
         import re
         for path in ('/overview', '/positions', '/opportunities', '/llm-impact',
-                     '/experiments'):
+                     '/experiments', '/schedule'):
             html = self._rendered(path)
             body = re.sub(r'<script\b.*?</script>', '', html, flags=re.S | re.I)
             for needle in ('window.__render', 'out.push', 'function (', '=>'):
@@ -211,7 +211,8 @@ class TemplateSingleSourceTests(unittest.TestCase):
                     '/positions': 'boot(window.__render)',
                     '/opportunities': 'boot(window.__render)',
                     '/llm-impact': 'boot(window.__render)',
-                    '/experiments': 'bootExperiments()'}
+                    '/experiments': 'bootExperiments()',
+                    '/schedule': 'bootSchedule()'}
         for path, needle in starters.items():
             html = self._rendered(path)
             scripts = '\n'.join(re.findall(r'<script\b.*?</script>', html, flags=re.S | re.I))
@@ -220,7 +221,7 @@ class TemplateSingleSourceTests(unittest.TestCase):
     def test_script_tags_are_balanced(self):
         import re
         for path in ('/overview', '/positions', '/opportunities', '/llm-impact',
-                     '/experiments'):
+                     '/experiments', '/schedule'):
             html = self._rendered(path)
             self.assertEqual(len(re.findall(r'<script\b', html, re.I)),
                              len(re.findall(r'</script>', html, re.I)), path)

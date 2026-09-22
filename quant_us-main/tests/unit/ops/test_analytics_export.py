@@ -359,5 +359,65 @@ class StrategyComparisonTests(unittest.TestCase):
             self.assertTrue(row['source'].get('sha256'), f'{sid} 缺产物哈希（结果要可溯源）')
 
 
+class ScheduleTests(unittest.TestCase):
+    """定时任务页的数据采集。两条回归都是实测踩到的。"""
+
+    def test_within_uses_path_components_not_string_prefix(self):
+        """`/Users/x/quant-runtime-main` **不在** `/Users/x/quant` 里。
+
+        第一版用字符串前缀判断 ⇒ 字符串上前者确实以后者开头 ⇒ 开发 checkout 被误报
+        「服务仍在跑旧代码」。本仓库在删除守卫上踩过同一个坑（子串匹配），这是第二次。
+        """
+        from ops.analytics_export.schedule import _within
+        self.assertFalse(_within('/Users/x/quant-runtime-main/quant_us-main', '/Users/x/quant'))
+        self.assertFalse(_within('/Users/x/quant-research', '/Users/x/quant'))
+        self.assertTrue(_within('/Users/x/quant/ops', '/Users/x/quant'))
+        self.assertTrue(_within('/Users/x/quant', '/Users/x/quant'))
+
+    def test_collect_reads_installed_state(self):
+        from ops.analytics_export import schedule as SCH
+        data = SCH.collect(ROOT / 'data')
+        labels = {j['label'] for j in data['launchd']}
+        for expect in ('com.quant.trading-service', 'com.quant.shadow-daily',
+                       'com.quant.watchdog'):
+            self.assertIn(expect, labels, f'{expect} 没被采集到（只采已安装的）')
+        # 每个作业都要有可读的计划文本与命令，缺了就说明解析退化了
+        for j in data['launchd']:
+            self.assertTrue(j.get('schedule_text'), f"{j['label']} 没有计划文本")
+            self.assertTrue(j.get('argv'), f"{j['label']} 没有命令")
+        self.assertTrue(data['source']['crontab_read'], 'crontab 采集失败')
+        self.assertGreaterEqual(len(data['cron']), 1)
+        for e in data['cron']:
+            self.assertIn('schedule_text', e)
+            self.assertIn('command', e)
+
+    def test_version_check_flags_stale_service(self):
+        """运行版本核对必须能给出生死判定，而不是含糊带过。
+
+        这条正是 2026-09-22 踩过的：代码已更新、服务仍跑旧的，而三项 --check 都抓不到。
+        """
+        from ops.analytics_export import schedule as SCH
+        data = SCH.collect(ROOT / 'data')
+        checks = data['version_checks']
+        self.assertTrue(checks, '没有做运行版本核对')
+        for v in checks:
+            self.assertIn(v['verdict'], ('OK', 'STALE', 'NOT_COLLECTED'))
+            self.assertTrue(v['why'], '判定必须带理由')
+        # 常驻服务所在的 checkout 必须给出可比较的判定（而不是 NOT_COLLECTED）
+        served = [v for v in checks if v.get('service')]
+        self.assertTrue(served, '没有识别出常驻服务所在目录')
+        for v in served:
+            self.assertIn(v['verdict'], ('OK', 'STALE'))
+            self.assertIsNotNone(v['service_started_at'], '取不到服务启动时刻')
+
+    def test_gaps_are_declared_not_hidden(self):
+        from ops.analytics_export import schedule as SCH
+        data = SCH.collect(ROOT / 'data')
+        fields = {g['field'] for g in data['gaps']}
+        self.assertTrue(any('cron' in f for f in fields), 'cron 不记退出码这件事必须写出来')
+        for g in data['gaps']:
+            self.assertTrue(g['why'])
+
+
 if __name__ == '__main__':
     unittest.main()

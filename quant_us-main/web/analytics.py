@@ -106,6 +106,21 @@ def page_experiments():
     return render_template('experiments.html')
 
 
+@bp.route('/schedule')
+def page_schedule():
+    return render_template('schedule.html')
+
+
+@bp.route('/api/analytics/schedule')
+def api_schedule():
+    """定时任务：**已安装**的事实（plist / crontab / launchctl），由导出器采集。"""
+    try:
+        data = _read_latest('schedule.json')
+    except (FileNotFoundError, ValueError) as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 404
+    return jsonify({'ok': True, 'server': _server_block(), **data})
+
+
 @bp.route('/decisions/<path:decision_id>')
 def page_decision(decision_id):
     # id 只在快照里存在；不存在就报错，绝不回退到「按代码找相似的一笔」

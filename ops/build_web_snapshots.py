@@ -24,6 +24,7 @@ sys.path.insert(0, str(ROOT))
 
 from ops.analytics_export import contract as C                      # noqa: E402
 from ops.analytics_export import registry as reg                    # noqa: E402
+from ops.analytics_export import schedule as SCH                    # noqa: E402
 from ops.analytics_export import sections as S                      # noqa: E402
 from ops.analytics_export import write as W                         # noqa: E402
 from ops.analytics_export.readers import (RawSqlStore, experiment_row,  # noqa: E402
@@ -268,6 +269,14 @@ def build(base: Path, snapshot_dir: Path, only=None, now=None) -> tuple:
          'progress': v['sections'].get('overview', {}).get('in_progress', [])}
         for v in files.values() if isinstance(v, dict) and v.get('scope_kind') == 'paper']
     files['experiments.json'] = exp_index
+    # 定时任务：采**已安装**的事实（plist / crontab / launchctl），不是定义文件
+    try:
+        files['schedule.json'] = SCH.collect(base)
+    except Exception as exc:                      # 采集失败不该拖垮其他范围
+        files['schedule.json'] = {'generated_at': now.isoformat(),
+                                  'status': C.DS_READ_FAILED, 'why': repr(exc),
+                                  'launchd': [], 'cron': [], 'version_checks': [], 'gaps': []}
+        failed.append({'scope_id': 'schedule', 'error': repr(exc)})
     for key, md in reports.items():
         files[f'reports/{key}.md'] = md
     for key, payload in artifacts.items():

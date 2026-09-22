@@ -1,0 +1,86 @@
+{% extends '_base.html' %}
+{% set page = 'schedule' %}
+{% block title %}定时任务{% endblock %}
+{% block heading %}定时任务{% endblock %}
+{% block script %}
+window.__render = function () { return ''; };
+async function bootSchedule() {
+  const el = document.getElementById('content');
+  document.getElementById('scopebar').innerHTML =
+    '<span class="muted" style="margin:0">本页只显示**已安装的**作业（真正会跑的），不显示定义文件里写了什么</span>';
+  try {
+    const j = await api('/api/analytics/schedule');
+    document.getElementById('meta').textContent = j.generated_at || '';
+    const out = [];
+    if (j.status === 'READ_FAILED') {
+      out.push(`<div class="card bad"><h2>采集失败</h2><div class="why">${esc(j.why || '')}</div></div>`);
+    }
+    // ---- 运行版本核对（先看这块：它是「服务仍在跑旧代码」唯一可查的地方）----
+    for (const v of (j.version_checks || [])) {
+      const cls = v.verdict === 'OK' ? 'plain' : (v.verdict === 'STALE' ? 'bad' : 'warn');
+      out.push(`<div class="card ${cls}"><h2>运行版本核对 · ${esc(v.root)}</h2>
+        <div class="grid">` + [
+          ['HEAD', esc((v.head || {}).sha || '—')],
+          ['提交时刻', esc((v.head || {}).committed_at || '—')],
+          ['服务进程', esc(v.service || '—')],
+          ['服务启动于', esc(v.service_started_at || '—')],
+        ].map(([k, val]) => `<div class="tile"><div class="k">${k}</div><div class="v" style="font-size:13px">${val}</div></div>`).join('') +
+        `</div><div class="why">${statusTag(v.verdict)} ${esc(v.why || '')}</div></div>`);
+    }
+    // ---- launchd 作业 ----
+    const jobs = j.launchd || [];
+    out.push(`<div class="card"><h2>launchd 作业（${jobs.length}）</h2>`);
+    if (!jobs.length) out.push('<div class="why">没有采集到作业。</div>');
+    else {
+      out.push('<table><tr><th>作业</th><th>计划（本地时区）</th><th>状态</th>'
+        + '<th>命令</th><th>工作目录</th></tr>');
+      for (const job of jobs) {
+        const st = job.running
+          ? `<span class="tag ok">运行中 pid=${job.pid}</span>`
+          : (job.last_exit_status === 0 ? `<span class="tag muted">未在跑 · 上次正常退出</span>`
+             : (job.last_exit_status == null ? statusTag('NOT_COLLECTED')
+                : `<span class="tag bad">未在跑 · 上次退出码 ${job.last_exit_status}</span>`));
+        const env = Object.entries(job.env || {});
+        out.push(`<tr>
+          <td><b>${esc(job.label)}</b>${job.keep_alive ? ' <span class="tag warn">常驻</span>' : ''}</td>
+          <td class="why">${esc(job.schedule_text || '—')}</td>
+          <td>${st}${job.exit_meaning ? `<div class="why">${esc(job.exit_meaning)}</div>` : ''}</td>
+          <td class="why" style="max-width:340px;word-break:break-all">${esc((job.argv || []).join(' '))}
+            ${env.length ? `<div class="why">环境：${esc(env.map(([k, v]) => k + '=' + v).join('，'))}</div>` : ''}</td>
+          <td class="why" style="word-break:break-all">${esc(job.workdir || '—')}</td></tr>`);
+      }
+      out.push('</table>');
+      out.push(`<div class="why">「未在跑」对**批处理**作业是正常的（跑完就退出）；对**常驻**作业才是问题。</div>`);
+    }
+    out.push('</div>');
+    // ---- cron ----
+    const cron = j.cron || [];
+    out.push(`<div class="card"><h2>cron 条目（${cron.length}）</h2>`);
+    if (!cron.length) out.push('<div class="why">没有 cron 条目。</div>');
+    else {
+      out.push('<table><tr><th>计划（本地时区）</th><th>原始表达式</th><th>命令</th></tr>');
+      for (const e of cron) {
+        out.push(`<tr><td class="why">${esc(e.schedule_text || '—')}</td>
+          <td class="why"><code>${esc(e.spec)}</code></td>
+          <td class="why" style="word-break:break-all">${esc(e.command)}</td></tr>`);
+      }
+      out.push('</table>');
+    }
+    out.push(`<div class="why">${statusTag('NOT_COLLECTED')} macOS 的 cron **不记录退出码**，
+      而且**睡过不补跑** —— 想判断它有没有跑，只能看它写的日志文件的修改时间。</div></div>`);
+    // ---- 说明与缺口 ----
+    out.push('<div class="card plain"><h2>这些数字怎么读</h2><ul class="why">'
+      + (j.notes || []).map(n => `<li>${esc(n)}</li>`).join('') + '</ul>');
+    for (const g of (j.gaps || [])) {
+      out.push(`<div class="sec-title">${esc(g.field)} ${statusTag(g.status)}</div>
+        <div class="why">${esc(g.why)}</div>`);
+    }
+    out.push('</div>');
+    out.push(diagBlock('证据与诊断（schedule.json 原文）', j));
+    el.innerHTML = out.join('');
+  } catch (e) {
+    el.innerHTML = `<div class="card bad"><h2>读取失败</h2><div class="why">${esc(e.message)}</div></div>`;
+  }
+}
+bootSchedule();
+{% endblock %}
