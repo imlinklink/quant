@@ -167,7 +167,7 @@ class KnowledgeCutoffFreezeTests(unittest.TestCase):
 
     def test_real_model_requires_declared_knowledge_cutoff(self):
         m = manifest(llm_policy={'overlay': 'entry_veto', 'evidence_mode': 'strict',
-                                 'use_real_model': True, 'evidence_window_days': 30, 'evidence_max_events': 50})
+                                 'use_real_model': True, 'model_budget_micro': 5_000_000, 'evidence_window_days': 30, 'evidence_max_events': 50})
         errors = m.validate()
         self.assertTrue(any('knowledge_cutoff' in e for e in errors), errors)
         with self.assertRaises(ValueError):
@@ -175,7 +175,7 @@ class KnowledgeCutoffFreezeTests(unittest.TestCase):
 
     def test_explicit_unknown_is_accepted_so_it_stays_visible(self):
         m = manifest(llm_policy={'overlay': 'entry_veto', 'evidence_mode': 'strict',
-                                 'use_real_model': True, 'knowledge_cutoff': 'unknown',
+                                 'use_real_model': True, 'model_budget_micro': 5_000_000, 'knowledge_cutoff': 'unknown',
                                  'evidence_window_days': 30, 'evidence_max_events': 50})
         self.assertEqual(m.validate(), [])
 
@@ -190,7 +190,7 @@ class ReportDisclosureTests(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         self.store = ShadowStore(Path(self.tmp) / 'ledger.sqlite3', 'exp1')
         self.m = manifest(llm_policy={'overlay': 'entry_veto', 'evidence_mode': 'strict',
-                                      'use_real_model': True,
+                                      'use_real_model': True, 'model_budget_micro': 5_000_000,
                                       'knowledge_cutoff': '2025-06-01T00:00:00+00:00',
                                       'evidence_window_days': 30, 'evidence_max_events': 50}
                           ).freeze('2026-01-02')
@@ -215,7 +215,7 @@ class UnknownPolicyKeyTests(unittest.TestCase):
     def test_misspelled_llm_policy_key_is_named(self):
         # 拼错的 knowledge_cutoff 原先只会让 freeze 门报「缺失」，操作者按提示补上
         # 另一个拼写 —— 真正的错字反而看不见
-        m = manifest(llm_policy={'overlay': 'entry_veto', 'use_real_model': True,
+        m = manifest(llm_policy={'overlay': 'entry_veto', 'use_real_model': True, 'model_budget_micro': 5_000_000,
                                  'knowledge_cutof': '2025-06-01'})
         errors = m.validate()
         self.assertTrue(any('knowledge_cutof' in e for e in errors), errors)

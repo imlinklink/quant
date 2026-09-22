@@ -8,6 +8,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from decimal import Decimal, ROUND_HALF_UP
 
+from mutifactor.llm.contracts.position_v2 import POSITION_ACTIONS
+
 from scripts.live_trading.decision_ledger.event_store import digest, stable_id
 
 MICRO = 1_000_000  # 1 USD = 1e6 微美元
@@ -48,10 +50,15 @@ POLICY_KEYS = {
     'execution_policy': ('entry_rule', 'exit_policy_id', 'horizon', 'max_wait_sessions'),
     'llm_policy': ('overlay', 'use_real_model', 'knowledge_cutoff', 'evidence_mode',
                    'evidence_window_days', 'evidence_max_events', 'position_overlay',
-                   'portfolio_review'),
+                   'portfolio_review', 'technical_packet', 'open_actions',
+                   'model_budget_micro', 'model_call_reserve_micro', 'model_id',
+                   'model_timeout_seconds', 'position_review_cadence'),
     'evaluation_protocol': ('main_metric', 'enrollment_window', 'review_date',
-                            'cost_allocation'),
+                            'cost_allocation', 'min_decisions', 'decision_rule'),
 }
+# 持仓评审频率（规划 §4.1：启动时冻结）。本轮只实现「逐 session 逐持仓」一种：
+# 写成冻结值而不是靠默认，是为了让改频率必须新建 experiment_id。
+POSITION_REVIEW_CADENCES = ('every_session',)
 # 与 risk_policy._DEFAULTS 的键一致，由测试钉死
 LADDER_KEYS = ('limit_breach', 'review_required', 'paused_entry', 'reduced',
                'normal_recover', 'reduced_recover', 'recover_sessions')
@@ -149,8 +156,52 @@ class Manifest:
                 if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
                     errors.append(f'llm_policy.{key} 缺失或非法：{value!r}'
                                   f'（需要模型判断的角色必填正整数）')
+        # 调用预算（规划 §4.1）：用真实模型的实验**必须**显式给出上限，否则一次失控的
+        # 重试循环就是一张没有封顶的账单。缺省（None）表示未启用真实模型，不报错。
+        budget = self.llm_policy.get('model_budget_micro')
+        if self.llm_policy.get('use_real_model'):
+            if not isinstance(budget, int) or isinstance(budget, bool) or budget <= 0:
+                errors.append(f'llm_policy.model_budget_micro 缺失或非法：{budget!r}'
+                              f'（use_real_model=true 时必填正整数，单位微美元）')
+        # 评估规则（规划 §4.1：启动时冻结，含评估点与「不自动晋级」）：
+        # 填了就必须合法，不能让一个拼错的规则名静默失效。
+        min_decisions = self.evaluation_protocol.get('min_decisions')
+        if min_decisions is not None and (not isinstance(min_decisions, int)
+                                          or isinstance(min_decisions, bool)
+                                          or min_decisions <= 0):
+            errors.append(f'evaluation_protocol.min_decisions 非法：{min_decisions!r}')
+        rule = self.evaluation_protocol.get('decision_rule')
+        if rule is not None and rule != 'report_only_no_auto_promotion':
+            errors.append(f'evaluation_protocol.decision_rule 非法：{rule!r}'
+                          '（本轮只允许 report_only_no_auto_promotion）')
+        cadence = self.llm_policy.get('position_review_cadence')
+        if cadence is not None and cadence not in POSITION_REVIEW_CADENCES:
+            errors.append(f'llm_policy.position_review_cadence 非法：{cadence!r}'
+                          f'（允许：{list(POSITION_REVIEW_CADENCES)}）')
+        timeout = self.llm_policy.get('model_timeout_seconds')
+        if timeout is not None and (not isinstance(timeout, int) or timeout <= 0):
+            errors.append(f'llm_policy.model_timeout_seconds 非法：{timeout!r}（正整数秒）')
+        reserve = self.llm_policy.get('model_call_reserve_micro')
+        if self.llm_policy.get('use_real_model') and reserve is not None:
+            if not isinstance(reserve, int) or isinstance(reserve, bool) or reserve <= 0:
+                errors.append(f'llm_policy.model_call_reserve_micro 非法：{reserve!r}'
+                              f'（正整数微美元；不填则按预算的 0.2% 折算）')
         if not self.calendar_version:
             errors.append('calendar_version 缺失')
+        # 技术包（规划 §6.2）与开放动作集（§6.1）：两者必须**一起**出现在持仓角色上。
+        # 只开技术包不给动作集 ⇒ 模型仍可返回 reduce/post_exit_review，本轮的限定角色失效；
+        # 只给动作集不开技术包 ⇒ 门仍按新闻判充分性，模型永远不被调用。都要 fail-closed。
+        if self.llm_policy.get('technical_packet'):
+            if self.llm_policy.get('position_overlay') != 'position_action':
+                errors.append('llm_policy.technical_packet 需要 position_overlay=position_action')
+            actions = self.llm_policy.get('open_actions')
+            if not isinstance(actions, (list, tuple)) or not actions:
+                errors.append(f'llm_policy.open_actions 缺失或非法：{actions!r}')
+            else:
+                unknown_actions = sorted(set(actions) - set(POSITION_ACTIONS))
+                if unknown_actions:
+                    errors.append(f'llm_policy.open_actions 含未知动作 {unknown_actions}'
+                                  f'（允许：{sorted(POSITION_ACTIONS)}）')
         # 未知键：拼错的键会被 `dict.get` 静默忽略，让安全门无声失效
         for name, allowed in POLICY_KEYS.items():
             unknown = sorted(set(getattr(self, name) or {}) - set(allowed))
@@ -241,6 +292,18 @@ class Position:
     exit_policy_id: str
     opportunity_id: str
     holding_sessions: int = 0
+    # ---- 机械利润保护的状态（规划 §4.3；未启用时全部保持中性值）----
+    # 成交时**冻结**的单笔风险金额（净 R 的分母，不随浮盈变化，§7）。拆股不改它：
+    # 它是一次成交的风险额，不是按当前股数重算的口径。
+    initial_risk_micro: int = 0
+    # H = 持仓期内**已完成收盘价**的最高值。拆股按同一比例缩放、除息按每股分红下调
+    # （与 stop_micro 同一会计规则），否则公司行动会让保护线相对价格失真。
+    highest_completed_close_micro: int = 0
+    # **粘性**：除息下调 H 后不得退回未激活（否则已保本的持仓会突然失去保护）。
+    protection_activated: bool = False
+    # T 收盘算出、T+1 生效的保护线；None 表示没有待生效的更新。
+    pending_stop_micro: int | None = None
+    pending_stop_effective_session: str = ''
 
 
 @dataclass
@@ -309,7 +372,15 @@ class AccountState:
                                 'initial_stop_micro': p.initial_stop_micro,
                                 'stop_micro': p.stop_micro, 'exit_policy_id': p.exit_policy_id,
                                 'opportunity_id': p.opportunity_id,
-                                'holding_sessions': p.holding_sessions}
+                                'holding_sessions': p.holding_sessions,
+                                # 利润保护状态进哈希：不进的话「重放一致」对保护线无感，
+                                # 崩溃恢复后的保护线错位不会被任何断言发现。
+                                'initial_risk_micro': p.initial_risk_micro,
+                                'highest_completed_close_micro': p.highest_completed_close_micro,
+                                'protection_activated': p.protection_activated,
+                                'pending_stop_micro': p.pending_stop_micro,
+                                'pending_stop_effective_session':
+                                    p.pending_stop_effective_session}
                           for sid, p in sorted(self.positions.items())},
         })
 

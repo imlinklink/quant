@@ -1,0 +1,142 @@
+{
+  "schema_version": "diagnostic-preregistration-v1",
+  "registration_id": "EXIT-TREND-MA2060-20260922",
+  "registered_at": "2026-09-22",
+  "study_basis": "SD-P0P1-20260921-012",
+  "study_manifest_hash": "c40bc7b36b6a89eecc42a7a1cfae9ef5588d89075957800ae70f1deccc699c41",
+  "code_revision_at_registration": "23803d0",
+  "design_refs": [
+    "strategy-weakness-diagnosis-and-improvement-design-2026-09-20.md §3 H2",
+    "§6.2 退出损益拆解",
+    "§6.3 第一候选退出规则 MA20_60_NEXT_OPEN_V1",
+    "§6.4 引擎阶段顺序",
+    "§8.2 一个问题一个改动",
+    "§9.1/§9.2/§9.3 口径与门槛",
+    "§15 P2"
+  ],
+  "prior_exposure": {
+    "blind": false,
+    "what_was_seen": [
+      "012 的退出分类：TIME_EXIT 111 笔 +$460,918（Σ+253.39R）；STOP 72 笔 −$155,494；GAP_STOP 14 笔 −$38,438；合计 Σnet_R +161.45、ΣUSD +$266,150",
+      "H3（固定止损）与 S1（机械利润保护）都判『保留原策略』：S1 的净 R −71.10R 而尾部无改善",
+      "H-A（日线确认）CONCENTRATED",
+      "本实验的假设来自**设计文档预先写好的 H2**，不是看着这批结果挑出来的；但规则的具体数值（MA20/MA60/次日开盘）确实是在已知这些汇总之后才落地的 —— 登记不制造盲测，它固定的是『改什么、怎么判定』"
+    ],
+    "why_disclosed": "按 §8.4，被查看过的区间不得再称为未见样本外；本诊断只用于**淘汰**。"
+  },
+  "hypothesis": {
+    "id": "H2-TIME-EXIT-TRUNCATES-TRENDS",
+    "statement": "H60（固定持有 60 个 session 后收盘卖出）**过早截断趋势**：趋势仍完整时被强制平仓，放弃了本可继续持有的收益。改为「趋势破坏才走」，可能提高账户收益。",
+    "competing_explanation": "固定期限是**风险控制**而非缺陷 —— 它把持有期上限写死，从而限制了单个标的的暴露时间与尾部累积；取消它会让单笔亏损有机会变得更深、回撤更长。H3 已证硬止损把最差单笔封在 −1.87R，但那只约束了**入场后**的风险，不约束持有时间。",
+    "not_claimed": [
+      "不引入 40 个 session 锁仓",
+      "**不新增每票 120 日强平**（那会是一条隐含的第三条规则；要最长持有期须另立登记）",
+      "不改变初始硬止损、定仓、手续费、五仓上限、池子与市场门",
+      "不把机会级收益差相加当成组合增量"
+    ]
+  },
+  "policy_under_test": {
+    "name": "MA20_60_NEXT_OPEN_V1",
+    "definition": [
+      "T 收盘：`close <= MA20` **且** `close < MA60` ⇒ 冻结一条次日开盘的退出意图",
+      "MA20/MA60 = **复权**收盘价的简单移动平均（与既有信号管线同一处实现 `_adjusted_bars`）",
+      "T+1 **开盘**执行（不假定能按收盘价成交）",
+      "**替换 H60 期限退出**：本臂没有时间退出",
+      "**初始硬止损继续保留**：跳空止损（开盘 ≤ 止损价 → 按开盘价）与日内硬止损（最低 ≤ 止损价 → 按止损价）都不变",
+      "同日两者都成立时**只成交一次，优先记 `GAP_STOP`**（§6.4），被覆盖的趋势退出意图原因保留在事件里",
+      "信号缺失（预热不足 / NaN）⇒ **当日不产生趋势退出**，硬止损照常有效，并记质量状态；绝不用缺失值当真值"
+    ],
+    "single_change_rule": "本诊断**只**把「到期退出」换成「趋势退出」。入场、初始硬止损、定仓、五仓上限、费用、公司行动会计全部逐字保留。",
+    "parameters": {
+      "ma_fast": 20,
+      "ma_slow": 60,
+      "execution": "next_open"
+    },
+    "parameter_rationale_not_a_grid": [
+      "MA20 与 MA60 是**设计文档 §6.3 预先写死**的两个值（由 2026-09-20 的设计给出），不是本轮搜出来的",
+      "不在 {MA10, MA20, MA30} × {MA50, MA60, MA120} 里挑：那会让本轮变成参数搜索，而本轮要回答的是『趋势退出这个**机制**是否成立』",
+      "看到结果后不得改这两个值；要试新值必须另立登记"
+    ]
+  },
+  "holding_period_and_censoring": {
+    "why_this_section": "替换 H60 **同时改变了持有期上限**（用户 2026-09-22 指出）。不写清处置方式，右删失会被静默当成『没有发生』，或只统计已平仓交易而得到偏乐观的对比。",
+    "no_time_exit": "本臂没有到期退出，也没有任何隐式的持有期上限",
+    "window_end": "观察窗最后一个 session 收盘时仍未平仓的持仓：**按市值估值**，不伪造已实现交易",
+    "right_censoring": "这些持仓记 `RIGHT_CENSORED`，**不计入**已平仓胜率与已实现损益；单独报出笔数与占比",
+    "comparison_rule": "A 臂（H60）在窗内已平仓、而 B 臂仍然持仓的那些交易：机会级一律按**同一窗末市价**对两臂做同口径估值（否则 B 臂会凭空少一截收益），并**单独列出被删失的笔数**；账户级无需此处理（净值本就按市价计）",
+    "not_a_failure": "未触发趋势退出**不是**运行失败，是本规则的定义行为"
+  },
+  "step1_opportunity_level": {
+    "purpose": "先剔出『出场规则本身』的贡献，不看账户路径依赖",
+    "paired_population": "012 实际成交的全部 201 笔入场（同入场日、同入场价、同股数、同费用、同 ATR14）",
+    "counterfactual": "对每一笔用**同一条价格路径**算两种结局：(A) H60 + 硬止损；(B) 趋势退出 + 同一硬止损（无时间退出）。股数、入场价、费用完全相同，差异只来自出场。",
+    "metrics": [
+      "逐笔与汇总的净损益（USD 与 net_R），窗末未平仓按市价估值",
+      "持有期分布（均值、中位数、最大值）与右删失笔数/占比",
+      "尾部：净 R 分布下尾 5% ES、最差单笔 net_R、亏损笔分布",
+      "浮盈回吐（与 S1 同一口径，便于横向比较）",
+      "**趋势完整度**（§6.2 要求的『到期退出时趋势仍完整的比例』）：A 臂每一笔 TIME_EXIT 在退出日是否满足 `close > MA20 或 close >= MA60`"
+    ],
+    "required_controls": [
+      "**A 臂必须复现 012 的全部成交**（原因/日期/价格/净损益），对不上即 ENGINEERING_BLOCKED",
+      "B 臂不得出现任何 `TIME_EXIT`（没有时间退出）—— 反证：出现即实现有误",
+      "两臂的硬止损退出集合必须**逐笔相同**（止损不受本改动影响）—— 不等即实现有误",
+      "信号缺失的笔：B 臂当日不得产生趋势退出，且必须记质量状态",
+      "1× 与 2× 费用两个情景"
+    ]
+  },
+  "step2_account_level": {
+    "precondition": "step1 判为 EVIDENCE_SUPPORTED 或 RISK_TRADEOFF 才跑",
+    "engine": "portfolio_shadow.paper_engine.step（真实现金、T+1、公司行动、五仓上限、回撤阶梯、单笔风险预算），两臂同引擎同起点同冻输入",
+    "must_answer": [
+      "持有期变长是否挤掉后续机会：`DUPLICATE_ACTIVE_SECURITY` / `MAX_POSITIONS` 拒绝数的变化，以及被挤掉的机会清单",
+      "回撤与尾部是否因『取消持有期上限』而变差（这是本假设的**主要风险**）",
+      "窗末未平仓的市值与占比（净值已含，但要报出来）",
+      "现金闲置与暴露的变化（描述）"
+    ]
+  },
+  "decision_rules": {
+    "step1_gates": {
+      "revenue": "两臂配对净损益差（窗末同口径估值）**> 0**",
+      "non_inferiority_bound_R": -8.0,
+      "non_inferiority_basis": "与 S1 同一把尺子（A 臂 Σnet_R +161.45 的 5%），便于横向比较",
+      "risk_gate": "最差单笔 net_R 不劣于 A，**且** 净 R 下尾 5% ES 不劣于 A",
+      "cost_stress": "2× 费用下净损益差仍 > 0",
+      "concentration_gate": "增量单一证券贡献 ≤ 50%，且剔除最大贡献后仍 > 0"
+    },
+    "step2_gates": {
+      "non_inferiority_bound_CAGR_pp": -1.5,
+      "risk_gate": "下尾 5% ES 相对改善或持平",
+      "mdd_budget": "abs(MDD_B) − abs(MDD_A) ≤ 0.03",
+      "tail_constraint": "最差单笔 net_R 不劣于 A 臂"
+    },
+    "verdicts": {
+      "EVIDENCE_SUPPORTED": "收益改善且风险未恶化",
+      "RISK_TRADEOFF": "风险改善但收益未改善 ⇒ 防守选项，不得写成全面优胜",
+      "NO_IMPROVEMENT": "收益未改善且风险也未改善",
+      "RISK_REJECTED": "回撤超预算或尾部恶化（**本假设最可能的失败方式**）",
+      "CONCENTRATED": "增量集中在 ≤2 只证券或 ≤5 笔 ⇒ 保留原策略（§8.2）",
+      "INSUFFICIENT_SAMPLE": "配对样本不足",
+      "ENGINEERING_BLOCKED": "A 臂未复现基线，或控制项不过",
+      "INCONCLUSIVE": "区间跨零且达不到任何一档"
+    },
+    "forbidden": [
+      "看到结果后改 MA20/MA60 或加第三个条件",
+      "把 `horizon` 改成巨大整数来实现『没有期限退出』（必须走显式的退出策略分派）",
+      "只统计已平仓交易而忽略右删失",
+      "在同一窗口上换参数重试到出现赢家"
+    ]
+  },
+  "validation": {
+    "exploratory_window": {"start": "2015-01-02", "end": "2026-08-31"},
+    "exploratory_status": "已被查看过 ⇒ 只能用于淘汰；正式资格需另立前向登记",
+    "validation_kind": "prospective",
+    "first_assessment_at": "若值得保留，另立前向登记：≥30 个独立成熟组 且 ≥60 个交易日",
+    "independence_unit": "证券 × 候选轮次"
+  },
+  "stop_conditions": [
+    "A 臂无法复现 012 的成交 ⇒ 停在工程修复",
+    "B 臂出现 TIME_EXIT，或两臂的止损退出集合不相等 ⇒ 实现有误，先修",
+    "发现未来数据被用于当日决策（T 收盘信号在 T 成交）⇒ 先修"
+  ]
+}

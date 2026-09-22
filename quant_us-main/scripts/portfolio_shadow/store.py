@@ -60,7 +60,14 @@ def _shift_iso(value, seconds: int) -> str:
 #       （'OK' → 'COMPLETED'），body 增 model_status 保留原始词汇；put_job_run 增两道守卫。
 #   9 → 冻结身份补 start_session（manifest_hash 的输入变了，旧账本记录的哈希一律不匹配）；
 #       save_experiment 拒绝同 id 不同配置；运行时新增 verify_manifest_frozen 校验。
-SHADOW_SCHEMA_VERSION = 9
+#  10 → 机械利润保护（预登记 EXIT-PROTECT-20260921）：Position 增
+#       initial_risk_micro / highest_completed_close_micro / protection_activated /
+#       pending_stop_micro / pending_stop_effective_session / protection_version，
+#       且**全部进 state_hash**；新增 `protection_state`（每持仓每 session 无条件写，
+#       否则重放重建不出 H）与 `stop_update_applied`（T+1 实际抬线的时刻）两类 step 事件。
+#       ⇒ 本版本的代码**读不了** 9 及更早的账本，反之亦然（这是刻意：用新代码解读
+#       旧状态得出的持仓保护线会是错的）。已冻结的 012 只读不写，不受影响。
+SHADOW_SCHEMA_VERSION = 10
 
 _SHADOW_DDL = '''
 CREATE TABLE IF NOT EXISTS shadow_schema(version INTEGER PRIMARY KEY);
@@ -523,7 +530,8 @@ class ShadowStore:
                 raise ValueError(f'SEQUENCE_GAP:{scope}:seq={seq}!=latest+1={latest + 1}')
             for i, e in enumerate(events or []):
                 if e['type'] in ('fill', 'split', 'dividend_record', 'dividend_pay', 'settle',
-                                 'nav', 'model_cost', 'model_cost_settlement', 'hold', 'missed'):
+                                 'nav', 'model_cost', 'model_cost_settlement', 'hold', 'missed',
+                                 'protection_state', 'stop_update_applied'):
                     payload = {**e, '_sequence': seq, '_index': i}
                     _insert_event(con, scope, 'shadow:step', (seq, i), payload)
             con.execute('INSERT OR REPLACE INTO shadow_account_state VALUES (?,?,?,?,?)',
@@ -535,6 +543,37 @@ class ShadowStore:
                          json.dumps(nav, ensure_ascii=False, sort_keys=True)))
             # 与状态同一事务：不留「已成交但未标记」的窗口
             _apply_marks(con, self.experiment_id, scope, applied_marks, session)
+
+    def model_cost_so_far(self, scope: str) -> tuple[int, int]:
+        """该账户**已计入**的模型成本与**金额未知**的尝试数（规划 §4.1 的调用预算用）。
+
+        未知金额记 0 并挂账待补记，所以 `spent` 会**滞后于真实花费** —— 调用方必须把
+        第二个返回值一并披露，不能拿它当准确账单。
+        """
+        row = self.latest_state(scope)
+        if not row:
+            return 0, 0
+        body = row[1]
+        return int(body.get('model_cost') or 0), len(body.get('model_cost_unsettled') or ())
+
+    def in_flight_attempts(self, scope: str) -> int:
+        """**正在飞**的模型尝试数（CALL_STARTED 且未终结）—— 调用预算必须预留它们。
+
+        只看已结算成本会让 N 个持仓在同一轮里**同时**通过预算检查：每个都以为「剩下的钱够」，
+        于是总额穿透上限。预留的量由调用方按 `model_call_reserve_micro` 折算。
+        """
+        with self.transaction(immediate=False) as con:
+            rows = con.execute(
+                "SELECT body FROM shadow_job_runs WHERE experiment_id=? AND status='CALL_STARTED'",
+                (self.experiment_id,)).fetchall()
+        count = 0
+        for (body,) in rows:
+            try:
+                if json.loads(body).get('scope') == scope:
+                    count += 1
+            except (TypeError, ValueError):
+                count += 1        # 读不懂的尝试按「在飞」算，宁可早停不可穿透
+        return count
 
     def latest_state(self, scope: str) -> tuple[int, dict] | None:
         with self.transaction(immediate=False) as con:

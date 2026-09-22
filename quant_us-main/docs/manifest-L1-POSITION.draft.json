@@ -1,0 +1,66 @@
+{
+  "experiment_id": "L1-POSITION-20260922",
+  "status": "DRAFT",
+  "parent_strategy_id": "B3",
+  "parent_version": "1",
+  "parent_code_hash": "9a76adfbd0b45d823033b7ecc6dee2624e2acc26",
+  "universe_id": "survivor13-tech",
+  "universe_hash": "4f698a951f2c12c51af4954ad4034167",
+  "account_scopes": [
+    "SHADOW:L1-POSITION-20260922:R",
+    "SHADOW:L1-POSITION-20260922:L"
+  ],
+  "initial_cash": 100000,
+  "currency": "USD",
+  "risk_policy": {
+    "single_position_risk_bp": 100,
+    "max_weight_bp": 2000,
+    "max_positions": 5,
+    "top_n": 5,
+    "drawdown_ladder": {
+      "reduced": 0.1,
+      "paused_entry": 0.15,
+      "review_required": 0.18,
+      "limit_breach": 0.2,
+      "normal_recover": 0.08,
+      "reduced_recover": 0.12,
+      "recover_sessions": 5
+    }
+  },
+  "execution_policy": {
+    "entry_rule": "b3",
+    "exit_policy_id": "H60",
+    "horizon": 60,
+    "max_wait_sessions": 20
+  },
+  "llm_policy": {
+    "overlay": "fixed_pass",
+    "position_overlay": "position_action",
+    "technical_packet": true,
+    "open_actions": [
+      "hold",
+      "exit"
+    ],
+    "position_review_cadence": "every_session",
+    "use_real_model": true,
+    "model_id": "deepseek-chat",
+    "knowledge_cutoff": "unknown",
+    "evidence_mode": "strict",
+    "evidence_window_days": 30,
+    "evidence_max_events": 50,
+    "model_budget_micro": 5000000,
+    "model_call_reserve_micro": 10000,
+    "model_timeout_seconds": 100
+  },
+  "calendar_version": "us-nyse-v1",
+  "data_hashes": {},
+  "evaluation_protocol": {
+    "main_metric": "L_minus_R_return",
+    "enrollment_window": "2026-09-22/2026-12-22",
+    "review_date": "2026-12-22",
+    "cost_allocation": "L_pays_model_cost",
+    "min_decisions": 30,
+    "decision_rule": "report_only_no_auto_promotion"
+  },
+  "start_session": "2026-08-16"
+}

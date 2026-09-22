@@ -1,0 +1,93 @@
+{
+  "schema_version": "diagnostic-preregistration-v1",
+  "registration_id": "ENTRY-BOTTOM-20260921",
+  "registered_at": "2026-09-21",
+  "study_basis": "SD-P0P1-20260921-012",
+  "study_manifest_hash": "c40bc7b36b6a89eecc42a7a1cfae9ef5588d89075957800ae70f1deccc699c41",
+  "code_revision_at_registration": "aab1148",
+  "rule_source": {
+    "spec": "docs/bottom-signal-spec-2026-09-21.md",
+    "spec_committed_in": "d40376a",
+    "note": "规则的**全部**数值与判据在进代码之前就写进了规范并提交；本文件只是把它转成机读形式。"
+  },
+  "prior_exposure": {
+    "blind": false,
+    "what_was_seen": [
+      "规则层面的构建期事实（不是收益）：13 只证券上共产生 362 个信号；状态分布 WATCH 589 / TRIGGERED 362 / INVALIDATED 156 / EXPIRED 65；按年分布 2022 年只有 1 个（熊市里 `close > MA200` 很少成立）",
+      "**账户级对照在把本文件写成机读形式之前已经跑过一次**（1× 成本）。规则参数与全部门槛在此之前的规范提交 `d40376a` 里已固定且未改动，暴露的是结果而不是设计；但这一点必须写明，不能声称本轮是盲的。",
+      "基线 study 012 的账户指标（266.15% / −13.87%）"
+    ],
+    "why_disclosed": "登记不制造盲测；它固定的是『改什么、怎么判定』。判据与门槛取自规范 §5（提交 `d40376a`，早于任何账户级运行），本文件逐条转录、不放宽。2× 成本情景与本文件写就时尚**未运行**。"
+  },
+  "hypothesis": {
+    "id": "B1-BOTTOM-RECLAIM",
+    "statement": "在上升趋势中等待一次「回撤达标 + 收盘收回 MA20」再入场，比 B3 的「月度动量前 5 + 市场门 + 周线门 + 日线突破/回踩」更有效：它能拿到 B3 拿不到的机会，且这些机会扣费后为正。",
+    "competing_explanation": "回撤企稳是**波动**而不是**折价** —— 下跌中的股票继续下跌的概率与原策略面对的并无不同。B3 的月度动量本身已经筛过「近期强势」，抄底信号把这一层筛掉之后，可能只是在买入更多、更差的标的。",
+    "not_claimed": [
+      "不主张这是真实底部（规范 §1）",
+      "不主张沿用 B3 的任何一道过滤 —— 本臂替换的是**整个入场包**，结论只能表述为「新入场策略 vs B3」",
+      "不主张两个局部改进叠加必然更好（那要单独登记，规划 §9 C1）",
+      "不把第一批的利润保护接进来（那一批结论是保留原退出）"
+    ]
+  },
+  "arms": {
+    "A": "B3：月排名 + 市场门 + 周线门 + 日线突破/回踩，`IncrementalCandidateGenerator`",
+    "B": "抄底信号：趋势成立 + 回撤达标 → WATCH → 收盘收回 MA20 → T+1 开盘，`BottomSignalGenerator`",
+    "shared": "同一股票池、质量要求、市场数据、日历、成本、H60 期限退出、初始硬止损公式 max(8%×价, 2.5×ATR14)、单笔风险预算、五仓上限、公司行动会计、同引擎、同空仓起点"
+  },
+  "experimental_protocol": {
+    "level": "account_level_first",
+    "why_not_opportunity_level": "两臂的**机会流不同**（这正是被测的东西），无法在同一批机会上做配对。规范 §5.3 因此以账户级为主指标，机会级只作解释。",
+    "forced_pairing_forbidden": "两侧信号密度不同（B 信号更多），不得强行把不对应的交易配成对；报告共同成交 / 仅 A / 仅 B 三块，新增盈利与新增亏损同时呈现。"
+  },
+  "decision_rules": {
+    "gates": {
+      "terminal_return_delta_positive": "全成本终值收益差 > 0（主目标，规范 §5.3）",
+      "mdd_budget": "abs(MDD_B) − abs(MDD_A) ≤ 0.03",
+      "tail_not_worse": "最差单笔净 R 不劣于 A **且** 净 R 分布下尾 5% ES 不劣于 A",
+      "not_concentrated": "新增成交的净损益里单一证券贡献 ≤ 50%，且剔除该证券后仍 > 0",
+      "held_under_2x_cost": "2× 成本下终值收益差仍 > 0"
+    },
+    "verdicts": {
+      "EVIDENCE_SUPPORTED": "终值收益差 > 0 且 MDD/尾部都没恶化、不集中、2× 成本下仍为正",
+      "RISK_TRADEOFF": "收益未改善（≤0）但 MDD 与尾部至少之一改善 ⇒ **防守选项**，不得写成全面优胜（规划 §4.4）",
+      "NO_IMPROVEMENT": "收益未改善且风险也没改善",
+      "RISK_REJECTED": "MDD 超预算或尾部恶化",
+      "CONCENTRATED": "新增成交的净损益集中在少数证券 ⇒ 按 §8.2 保留原策略",
+      "INSUFFICIENT_SAMPLE": "任一臂成交数 < 30",
+      "ENGINEERING_BLOCKED": "A 臂未复现基线 study 的成交，或会计/时序阻塞"
+    },
+    "control": "A 臂必须复现 012 的成交（按 (证券, 入场日) 的集合与逐笔净损益），否则 ENGINEERING_BLOCKED，不出收益结论。"
+  },
+  "reported_metrics": [
+    "扣费收益（终值、CAGR）",
+    "胜率、盈亏比",
+    "最大回撤、最长回撤（描述）",
+    "尾部：最差单笔净 R、下尾 5% ES",
+    "平均暴露与现金占比",
+    "换手（费用合计）",
+    "入场分解：共同成交 / 仅 A / 仅 B，各自的新增盈利与新增亏损",
+    "账户拒绝机会（按原因计数）",
+    "信号密度（B 的信号数 vs 实际成交数）",
+    "1× 与 2× 成本两个情景"
+  ],
+  "validation": {
+    "exploratory_window": {"start": "2016-01-05", "end": "2026-08-25"},
+    "exploratory_status": "已被查看过 ⇒ 只能用于**淘汰**；正式资格需另立前向登记",
+    "validation_kind": "prospective",
+    "first_assessment_at": "若值得保留，另立前向登记：≥30 个独立成熟组 且 ≥60 个交易日",
+    "independence_unit": "证券 × 信号轮次（本轮为 watch 事件）"
+  },
+  "stop_conditions": [
+    "A 臂无法复现 012 的成交 ⇒ 停在工程修复",
+    "会计/时序/公司行动阻塞 ⇒ 先修",
+    "发现信号生成读到了未来数据 ⇒ 先修（`as_of` 与本文件口径不一致即属此类）"
+  ],
+  "forbidden": [
+    "看到结果后改规则参数（趋势/回撤/确认/等待窗/冷却期任一）",
+    "在同一窗口上换参数重试到出现赢家",
+    "把 B 的「信号更多」当成优势本身",
+    "只报新增盈利不报新增亏损",
+    "把历史探索说成前向资格"
+  ]
+}

@@ -17,6 +17,11 @@ from .risk_policy import budget_bp, entry_allowed, evaluate_ladder
 from .schema import AccountState, Position
 
 
+#: `next_session` 的「本 session 之后没有会话了」哨兵（窗口末尾）。空串不是日期，
+#: 因此与「忘了传」（None）区分得开 —— 后者会直接拒绝。
+NO_NEXT_SESSION = ''
+
+
 def initial_stop_micro(entry_price_micro: int, atr14_micro: int) -> int:
     """止损距离 = max(8% × 价格, 2.5 × ATR)；stop = 价格 − 距离。"""
     min_dist = entry_price_micro * 8 // 100
@@ -46,12 +51,34 @@ def _fee(gross_micro: int, fee_bp: int) -> int:
 def step(state: AccountState, *, session: str, bars: dict, corporate_actions: list,
          intents: list, manifest, fee_bp: int = 10, model_cost: int = 0,
          model_cost_uncertain: tuple = (), model_cost_settlements: dict | None = None,
-         position_actions: dict | None = None) -> StepResult:
+         position_actions: dict | None = None, protection=None, atr: dict | None = None,
+         next_session: str | None = None, trend_exits: dict | None = None,
+         time_exit: bool = True) -> StepResult:
     """执行一个交易日。bars={sid:{open,high,low,close}}（微美元/股）；公司行动用微美元。
 
     position_actions 形如 {security_id: {'action': 'reduce'|'exit', 'tier': float,
     'decision_id': str}}，只传给 L 账户；R 传 None 时本阶段完全不生效。
+
+    `protection` 是机械利润保护策略（`strategy_research.exit_policy.ProfitProtection`），
+    `atr` 是**当日收盘可得**的 ATR14（{sid: 微美元}），`next_session` 是日历上的下一交易日
+    （保护线 T 收盘算、T+1 生效，故必须显式给出，不能由本函数猜）。
+
+    `next_session` 两种写法含义不同，缺一不可：
+      · `None`（默认）= **调用方忘了传** ⇒ 直接拒绝，不静默退化成「只有激活、没有线更新」；
+      · `NO_NEXT_SESSION`（空串）= **本 session 之后没有会话了**（窗口末尾）⇒ 照常执行
+        当日的退出逻辑，只是不排期（排了也没人会执行）。
+
+    `trend_exits`：`{sid: {'frozen_at': ...}}` —— **T 收盘冻结、T+1 开盘执行**的退出意图
+    （规则见 `strategy_research/trend_exit.py`，引擎只消费，不算指标）。引擎断言
+    `frozen_at < session`，否则就是用当天信息在当天成交（前视），直接拒绝。
+    `time_exit=False`：**显式关闭时间退出**（趋势退出臂用它替换 H60）。这是退出策略的
+    显式分派，不是把 `horizon` 改成巨大整数（设计 §6.3 明令禁止后者）。持有计数照常推进。
+
+    **`protection=None` 且 `trend_exits=None` 且 `time_exit=True`（默认）时，本引擎逐事件、
+    逐日行为与本参数引入前完全相同** —— 这是隔离版本不变性的前提（规划 §3.1），有测试钉死。
     """
+    if protection is not None and next_session is None:
+        raise ValueError('PROTECTION_REQUIRES_NEXT_SESSION')
     # 执行日守卫：整批校验必须先于任何状态变更，避免处理一半才报错；一次报全部违规。
     # 计划执行日 ≠ 当前 session 属调度/数据错误，绝不按历史开盘价补成交。
     violations = [(intent.opportunity_id(),
@@ -124,16 +151,27 @@ def step(state: AccountState, *, session: str, bars: dict, corporate_actions: li
         kind = act.get('action_type')
         if kind in ('split', 'reverse_split'):
             ratio = int(act['ratio'])
+            # H 与待生效保护线按与 stop 同一比例调整：只调 stop 会让保护线相对价格失真
+            # （2:1 拆股后 H 仍是拆股前的价格水平 ⇒ 保护线永久高于市价 ⇒ 立刻假止损）
+            pend = (None if pos.pending_stop_micro is None
+                    else (pos.pending_stop_micro // ratio if kind == 'split'
+                          else pos.pending_stop_micro * ratio))
             if kind == 'split':
                 s.positions[sid] = replace(pos, shares=pos.shares * ratio,
                                            entry_price_micro=pos.entry_price_micro // ratio,
                                            initial_stop_micro=pos.initial_stop_micro // ratio,
-                                           stop_micro=pos.stop_micro // ratio)
+                                           stop_micro=pos.stop_micro // ratio,
+                                           highest_completed_close_micro=(
+                                               pos.highest_completed_close_micro // ratio),
+                                           pending_stop_micro=pend)
             else:
                 s.positions[sid] = replace(pos, shares=pos.shares // ratio,
                                            entry_price_micro=pos.entry_price_micro * ratio,
                                            initial_stop_micro=pos.initial_stop_micro * ratio,
-                                           stop_micro=pos.stop_micro * ratio)
+                                           stop_micro=pos.stop_micro * ratio,
+                                           highest_completed_close_micro=(
+                                               pos.highest_completed_close_micro * ratio),
+                                           pending_stop_micro=pend)
             events.append({'type': 'split', 'session': session, 'security_id': sid,
                            'ratio': ratio, 'kind': kind})
         elif kind == 'cash_dividend':
@@ -141,14 +179,38 @@ def step(state: AccountState, *, session: str, bars: dict, corporate_actions: li
             total = pos.shares * per_share
             pay_date = act.get('pay_date')
             s.dividend_receivable[pay_date] = s.dividend_receivable.get(pay_date, 0) + total
-            # 除息日止损随分红下调（镜像历史引擎 simulate_fixed_horizon_exits 的 stop -= cash_amount）
-            s.positions[sid] = replace(pos, stop_micro=max(0, pos.stop_micro - per_share))
+            # 除息日止损随分红下调（镜像历史引擎 simulate_fixed_horizon_exits 的 stop -= cash_amount）。
+            # H 与待生效保护线同口径下调：不下调的话保护线会按除息前的价格水平停留，
+            # 除息当天就把一个正常持仓判成触发。
+            s.positions[sid] = replace(pos, stop_micro=max(0, pos.stop_micro - per_share),
+                                       highest_completed_close_micro=max(
+                                           0, pos.highest_completed_close_micro - per_share),
+                                       pending_stop_micro=(
+                                           None if pos.pending_stop_micro is None
+                                           else max(0, pos.pending_stop_micro - per_share)))
             events.append({'type': 'dividend_record', 'session': session, 'security_id': sid,
                            'per_share_micro': per_share, 'total_micro': total,
                            'pay_date': pay_date})
 
     # Include entitlements recorded today whose payment is already due.
     settle_dividends()
+
+    # 1.5 应用到期的保护线更新（T 收盘算、T+1 生效）。位置在公司行动之后、跳空止损之前：
+    #     拆股/除息已按同一比例调整过 stop 与 pending；抬高后的线若已在今日开盘之上，
+    #     由下面阶段 2 按**开盘价**成交（§4.2：不假定能在保护价成交）。
+    if protection is not None:
+        for sid, pos in list(s.positions.items()):
+            if pos.pending_stop_micro is None:
+                continue
+            if pos.pending_stop_effective_session and pos.pending_stop_effective_session > session:
+                continue  # 中间有会话被跳过：在第一个被处理的会话上生效，不提前
+            new_stop = max(pos.stop_micro, pos.pending_stop_micro)
+            events.append({'type': 'stop_update_applied', 'session': session,
+                           'security_id': sid, 'stop_micro': new_stop,
+                           'previous_stop_micro': pos.stop_micro,
+                           'scheduled_session': pos.pending_stop_effective_session})
+            s.positions[sid] = replace(pos, stop_micro=new_stop, pending_stop_micro=None,
+                                       pending_stop_effective_session='')
 
     # 2. 开盘风险退出（跳空止损：open <= stop）
     for sid, pos in list(s.positions.items()):
@@ -163,6 +225,33 @@ def step(state: AccountState, *, session: str, bars: dict, corporate_actions: li
             del s.positions[sid]
             events.append(_fill(session, 'SELL', sid, pos.shares, o, fee, 'GAP_STOP',
                                 pos.opportunity_id))
+
+    # 2.2 趋势退出意图（设计 §6.4：在**开盘风险退出之后**、当日新仓入场之前消费）。
+    #     阶段 2 已按 GAP_STOP 成交的持仓不在 positions 里，所以「同日只成交一次、
+    #     优先记 GAP_STOP」是**构造性**成立的，不需要额外判优先级。
+    for sid in sorted(s.positions):
+        intent = (trend_exits or {}).get(sid)
+        if intent is None:
+            continue
+        frozen_at = str(intent.get('frozen_at') or '')
+        if not frozen_at or frozen_at >= session:
+            raise ValueError(f'TREND_EXIT_NOT_FROZEN:{sid}:frozen_at={frozen_at}:'
+                             f'session={session}')
+        if sid not in bars:
+            events.append({'type': 'missed', 'session': session, 'security_id': sid,
+                           'opportunity_id': intent.get('opportunity_id') or '',
+                           'reason': 'TREND_EXIT_NO_BARS'})
+            continue
+        pos = s.positions[sid]
+        px = bars[sid]['open']          # 次**开盘**成交，不假定能按收盘价
+        gross = pos.shares * px
+        fee = _fee(gross, fee_bp)
+        s.unsettled_cash += gross - fee
+        s.fees += fee
+        del s.positions[sid]
+        events.append({**_fill(session, 'SELL', sid, pos.shares, px, fee, 'TREND_EXIT',
+                               pos.opportunity_id),
+                       'signal_session': intent.get('signal_session') or ''})
 
     # 2.5 持仓评审动作（仅 L 账户；R 传 None 时整段不生效）
     # 位置在跳空止损之后、开盘入场之前：此时公司行动已调整完 shares/stop（否则评审日
@@ -259,7 +348,10 @@ def step(state: AccountState, *, session: str, bars: dict, corporate_actions: li
                                     entry_price_micro=open_micro, entry_session=session,
                                     initial_stop_micro=stop, stop_micro=stop,
                                     exit_policy_id=intent.exit_policy_id,
-                                    opportunity_id=intent.opportunity_id())
+                                    opportunity_id=intent.opportunity_id(),
+                                    # 成交时冻结的单笔风险金额（净 R 的分母，§7）。
+                                    # 可由事件重放（shares×(成交价−止损)），故不改事件 payload。
+                                    initial_risk_micro=shares * (open_micro - stop))
         events.append({**_fill(session, 'BUY', sid, shares, open_micro, fee, 'ENTRY',
                                 intent.opportunity_id()),
                        'stop_micro': stop, 'exit_policy_id': intent.exit_policy_id})
@@ -278,13 +370,14 @@ def step(state: AccountState, *, session: str, bars: dict, corporate_actions: li
             events.append(_fill(session, 'SELL', sid, pos.shares, px, fee, 'STOP',
                                 pos.opportunity_id))
 
-    # 5. 时间退出（holding >= horizon → 收盘卖出）
+    # 5. 时间退出（holding >= horizon → 收盘卖出）。`time_exit=False` ⇒ **只记持有、不退出**：
+    #    趋势退出臂没有到期退出，也没有任何隐式的持有期上限（设计 §6.3）。
     for sid, pos in list(s.positions.items()):
         pos = replace(pos, holding_sessions=pos.holding_sessions + 1)
         s.positions[sid] = pos
         events.append({'type': 'hold', 'session': session, 'security_id': sid,
                        'holding_sessions': pos.holding_sessions})
-        if pos.holding_sessions >= horizon and sid in bars:
+        if time_exit and pos.holding_sessions >= horizon and sid in bars:
             px = bars[sid]['close']
             gross = pos.shares * px
             fee = _fee(gross, fee_bp)
@@ -293,6 +386,46 @@ def step(state: AccountState, *, session: str, bars: dict, corporate_actions: li
             del s.positions[sid]
             events.append(_fill(session, 'SELL', sid, pos.shares, px, fee, 'TIME_EXIT',
                                 pos.opportunity_id))
+
+    # 5.5 利润保护：用**截至今日收盘**的已知量算 T+1 生效的保护线（保护关闭时整段不生效）。
+    #     放在时间退出之后：今日已按 H60 卖出的持仓不再排期（它已经不在了）。
+    #     放在估值之前：估值只读个数字，与保护线无关。
+    #
+    #     每持仓每 session **无条件**写一条 `protection_state`：H 在激活之前也每 session
+    #     都在变，只在"有事发生"时写事件会让重放重建不出 H（重放不查行情），
+    #     「重放一致」就成了一句空话。激活转换、ATR 不可用、排期都由这一个事件的字段
+    #     表达（`reason` / `protection_activated` / `pending_stop_*`）—— 一件事一份定义。
+    if protection is not None:
+        for sid, pos in list(s.positions.items()):
+            if sid not in bars:
+                continue  # 缺行情：不拿旧价当收盘价，保持已生效保护线（§4.2）
+            close = bars[sid]['close']
+            high = max(pos.highest_completed_close_micro, close)
+            atr14 = (atr or {}).get(sid)
+            decision = protection.evaluate(
+                entry_price_micro=pos.entry_price_micro,
+                initial_stop_micro=pos.initial_stop_micro,
+                current_stop_micro=pos.stop_micro,
+                high_close_micro=high, atr14_micro=atr14,
+                activated=pos.protection_activated)
+            pending = pos.pending_stop_micro
+            pending_session = pos.pending_stop_effective_session
+            if decision.stop_micro is not None and next_session:
+                # next_session 为空串 = 窗口末尾，没有下一会话可排期（见函数头）
+                pending, pending_session = decision.stop_micro, next_session
+            s.positions[sid] = replace(pos, highest_completed_close_micro=high,
+                                       protection_activated=decision.activated,
+                                       pending_stop_micro=pending,
+                                       pending_stop_effective_session=pending_session)
+            events.append({'type': 'protection_state', 'session': session,
+                           'security_id': sid, 'high_close_micro': high,
+                           'protection_activated': decision.activated,
+                           'activation_price_micro': decision.activation_price_micro,
+                           'line_micro': decision.line_micro,
+                           'stop_micro': decision.stop_micro,
+                           'pending_stop_micro': pending,
+                           'pending_stop_effective_session': pending_session,
+                           'reason': decision.reason})
 
     # 6. 收盘估值 + 高水位 + 回撤阶梯
     mv = sum(p.shares * bars[p.security_id]['close'] for p in s.positions.values()

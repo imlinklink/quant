@@ -388,16 +388,21 @@ def record_data_blocked(store, scopes, opp, packet, *, session):
 
 
 def make_reviewer(store, scope, real_model, *, model_id='', model_factory=None,
-                  debug=False):
+                  debug=False, model_budget_micro=None, model_call_reserve_micro=None,
+                  timeout_seconds=None):
     """构造 L 侧评审编排者。所有入口共用同一条编排路径（设计 §7）。"""
     factory = model_factory or (
         lambda: real_model if real_model is not None else FakeModel(action='PASS',
                                                                    cost_micro=0))
     return EntryReviewer(store, scope=scope, model_factory=factory, model_id=model_id,
-                         debug=debug)
+                         debug=debug, model_budget_micro=model_budget_micro,
+                         model_call_reserve_micro=model_call_reserve_micro,
+                         timeout_seconds=timeout_seconds)
 
 
 def apply_entry_reviews(store, scope, reviews, *, deadline, real_model, model_id='',
+                        model_budget_micro=None, model_call_reserve_micro=None,
+                        timeout_seconds=None,
                         force_recall=False, reviewer=None):
     """账户相关阶段：对已冻结的证据包做三态评审。
 
@@ -407,7 +412,10 @@ def apply_entry_reviews(store, scope, reviews, *, deadline, real_model, model_id
     复用/领取/调用/冻结全部交给 `EntryReviewer`（设计 §7）：已冻结的决定原样复用；
     调用前原子领取；崩溃遗留的尝试判 UNKNOWN 而不是静默重发。
     """
-    reviewer = reviewer or make_reviewer(store, scope, real_model, model_id=model_id)
+    reviewer = reviewer or make_reviewer(store, scope, real_model, model_id=model_id,
+                                         model_budget_micro=model_budget_micro,
+                                         model_call_reserve_micro=model_call_reserve_micro,
+                                         timeout_seconds=timeout_seconds)
     kept, known_cost, uncertain = [], 0, []
     for opp, packet in reviews:
         outcome = reviewer.review(opp, packet, deadline, force_recall=force_recall)
@@ -572,6 +580,8 @@ def cmd_review_entries(args):
         store, scope, real_model,
         model_id=(m.llm_policy.get('model_id')
                   or ('real' if use_real else ('historical_debug' if debug else 'fixture'))),
+        model_budget_micro=m.llm_policy.get('model_budget_micro'),
+        model_call_reserve_micro=m.llm_policy.get('model_call_reserve_micro'),
         model_factory=((lambda: FakeModel(
             action=fixture_action, cost_micro=0, evidence_from_packet=True,
             reason_code=('MATERIAL_COMPANY_EVENT_RISK' if fixture_action == 'VETO' else '')))
@@ -732,16 +742,54 @@ def reviewable_positions(store, m) -> tuple:
     return dict(state.positions), state.last_session
 
 
+def _account_facts_for_review(state, nav) -> dict:
+    """持仓评审用的账户级技术事实（§6.2 要求把风险状态与现金暴露交给模型）。
+
+    账户级的量**只在这里算一次**并传进技术包 —— 技术包模块不重算它们（那是第二份定义）。
+    预算取 `risk_policy.budget_bp`（与引擎同一处实现），回撤取最近一次结算的
+    `full_cost_equity` 与 `high_water`（与引擎的阶梯同一口径）。
+    """
+    from .risk_policy import budget_bp
+    facts = {'risk_state': getattr(state, 'risk_state', None)}
+    if nav:
+        equity = nav.get('full_cost_equity') or nav.get('equity')
+        high_water = getattr(state, 'high_water', 0) or 0
+        if equity and high_water > 0:
+            facts['account_drawdown'] = 1.0 - equity / high_water
+        if nav.get('equity'):
+            facts['cash_share'] = nav['cash_available'] / nav['equity']
+            facts['gross_exposure'] = nav['gross_exposure'] / nav['equity']
+    return facts
+
+
+def _technical_for_position(sid, pos, *, history, atr14_micro, account_facts, session,
+                            mark_price_micro, actions):
+    from scripts.strategy_research.technical_packet import build_facts
+    if history is None or history.empty:
+        return None
+    return build_facts(security_id=sid, history=history, atr14_micro=atr14_micro,
+                       position=pos, account_facts=account_facts, session=session,
+                       mark_price_micro=mark_price_micro, actions=actions)
+
+
 def freeze_position_reviews(store, m, *, session, execution_session, closes, source,
-                            market_cutoff, as_of, evidence_mode, knowledge_cutoff):
+                            market_cutoff, as_of, evidence_mode, knowledge_cutoff,
+                            technical_inputs=None):
     """为 R 账户每只持仓冻结一个评审包（首次写入即冻结，重跑原样复用）。
 
     返回 `(frozen, blocked)`；`blocked` 是质量门判为 BLOCK 的条数。BLOCK 的包**照样评审**
     —— 门会在调用模型之前短路成 `POSITION_ABSTAIN`（零成本，采用父策略），那正是关键数据
     不可用时应有的安全结果；真正不放行的是「照常持仓」，而弃权恰好就是照常持仓。
+
+    `technical_inputs`（规划 §6.2）：`{'history': {sid: DataFrame}, 'atr14': {sid: 微美元},
+    'account_facts': {...}, 'actions': DataFrame}`。给了就按技术包自己的充分性标准开门，
+    并按 manifest 的 `open_actions` 限定动作集；不给则逐字段与引入前相同。
     """
     positions, _ = reviewable_positions(store, m)
     l_scope = next(s for s in m.account_scopes if s.endswith(':L'))
+    r_scope = next(s for s in m.account_scopes if s.endswith(':R'))
+    open_actions = (m.llm_policy.get('open_actions')
+                    if m.llm_policy.get('technical_packet') else None)
     frozen, blocked = [], 0
     for sid, pos in sorted(positions.items()):
         key = subject_key_for(pos.opportunity_id, execution_session)
@@ -753,6 +801,14 @@ def freeze_position_reviews(store, m, *, session, execution_session, closes, sou
                                     if fetch is not None
                                     else ([], {'evidence_mode': evidence_mode},
                                           'NOT_CONFIGURED'))
+            technical = None
+            if technical_inputs is not None:
+                technical = _technical_for_position(
+                    sid, pos, history=technical_inputs.get('history', {}).get(sid),
+                    atr14_micro=technical_inputs.get('atr14', {}).get(sid),
+                    account_facts=technical_inputs.get('account_facts', {}),
+                    session=session, mark_price_micro=closes.get(sid),
+                    actions=technical_inputs.get('actions'))
             packet = build_position_packet(
                 security_id=sid, trade={'entry_session': pos.entry_session},
                 protection={'active_stop': pos.stop_micro,
@@ -764,7 +820,8 @@ def freeze_position_reviews(store, m, *, session, execution_session, closes, sou
                 shares=pos.shares, entry_price_micro=pos.entry_price_micro,
                 mark_price_micro=closes.get(sid), evidence=meta,
                 model_knowledge_cutoff=knowledge_cutoff, fetch_status=status,
-                market_context={'observed_at': market_cutoff})
+                market_context={'observed_at': market_cutoff},
+                technical=technical, open_actions=open_actions)
             store.put_packet(key, packet)
         frozen.append((key, packet))
         if packet['data_quality']['level'] == 'BLOCK':
@@ -783,7 +840,11 @@ def make_position_reviewer(store, m, *, scope, model, real_model=None, debug=Fal
         factory = (lambda: FakePositionModel(action=fixture_action, tier=tier,
                                              cost_micro=0, evidence_from_packet=True))
     return PositionReviewer(store, scope=scope, model_factory=factory, model_id=model_id,
-                            debug=debug)
+                            debug=debug,
+                            model_budget_micro=m.llm_policy.get('model_budget_micro'),
+                            model_call_reserve_micro=m.llm_policy.get(
+                                'model_call_reserve_micro'),
+                            timeout_seconds=m.llm_policy.get('model_timeout_seconds'))
 
 
 def model_parts(action: str) -> tuple:
@@ -805,6 +866,31 @@ def _subject_from_packet(key: str, packet: dict) -> PositionSubject:
         security_id=(packet.get('identity') or {}).get('security_id') or '',
         reviewed_session=(packet.get('provenance') or {}).get('reviewed_session') or '',
         execution_session=(packet.get('provenance') or {}).get('execution_session') or '')
+
+
+def _technical_inputs(store, m, *, prices, actions, session, r_scope) -> dict:
+    """持仓评审技术包的输入（规划 §6.2）。
+
+    **只取截至 `session` 的行情**：切片先按 session 截断再分组，未来 bar 进不来（技术包
+    的充分性判据也读不到未来）。账户级事实取自最近一次已结算的状态与净值 —— 评审要在
+    「R 的持仓状态就在 T 收盘」的前提下做，`cmd_prepare_position_reviews` 已经先检查过
+    这一点（`POSITION_STATE_LAG`）。
+    """
+    import pandas as pd
+    from .schema import to_micro
+    cutoff = pd.Timestamp(session)
+    upto = prices[prices.session.le(cutoff)]
+    history = {str(sid): g for sid, g in upto.groupby('security_id')}
+    today = upto[upto.session.eq(cutoff)]
+    atr = {str(r.security_id): (None if pd.isna(r.asof_atr) else to_micro(r.asof_atr))
+           for r in today.itertuples(index=False)}
+    row = store.latest_state(r_scope)
+    state = state_from_dict(row[1]) if row else None
+    navs = store.daily_nav(r_scope)
+    account_facts = (_account_facts_for_review(state, navs[-1] if navs else None)
+                     if state is not None else {})
+    return {'history': history, 'atr14': atr, 'account_facts': account_facts,
+            'actions': actions}
 
 
 def cmd_prepare_position_reviews(args):
@@ -833,7 +919,7 @@ def cmd_prepare_position_reviews(args):
         print(json.dumps({'session': args.session, 'positions': 0, 'frozen': 0,
                           'execution_session': None}, ensure_ascii=False))
         return 0
-    prices, _, _, etf_raw = _market_data(getattr(args, 'etf_raw', None))
+    prices, actions, _, etf_raw = _market_data(getattr(args, 'etf_raw', None))
     cal = _forward_calendar(sorted(pd.DatetimeIndex(prices.session.unique())), args.session)
     exec_session = _next_session(cal, args.session)
     market_cutoff = entry_market_cutoff(args.session)
@@ -842,12 +928,18 @@ def cmd_prepare_position_reviews(args):
     closes = {str(r.security_id): to_micro(r.raw_close)
               for r in prices[prices.session.eq(pd.Timestamp(args.session))].itertuples(
                   index=False)}
+    technical_inputs = None
+    if m.llm_policy.get('technical_packet'):
+        r_scope = next(s for s in m.account_scopes if s.endswith(':R'))
+        technical_inputs = _technical_inputs(store, m, prices=prices, actions=actions,
+                                             session=args.session, r_scope=r_scope)
     frozen, blocked = freeze_position_reviews(
         store, m, session=args.session, execution_session=exec_session or args.session,
         closes=closes, source=_evidence_source(m, getattr(args, 'evidence', None)),
         market_cutoff=market_cutoff, as_of=as_of,
         evidence_mode=m.llm_policy.get('evidence_mode', 'strict'),
-        knowledge_cutoff=m.llm_policy.get('knowledge_cutoff'))
+        knowledge_cutoff=m.llm_policy.get('knowledge_cutoff'),
+        technical_inputs=technical_inputs)
     print(json.dumps({'session': args.session, 'execution_session': exec_session,
                       'positions': len(frozen), 'frozen': len(frozen),
                       'data_blocked': blocked}, ensure_ascii=False))
@@ -1479,7 +1571,10 @@ def cmd_run_forward(args):
             cost, uncertain = 0, []
             if overlay == 'entry_veto' and scope.endswith(':L'):
                 kept, cost, uncertain = apply_entry_reviews(
-                    store, scope, reviews, deadline=deadline, real_model=real_model)
+                    store, scope, reviews, deadline=deadline, real_model=real_model,
+                    model_budget_micro=m.llm_policy.get('model_budget_micro'),
+                    model_call_reserve_micro=m.llm_policy.get('model_call_reserve_micro'),
+                    timeout_seconds=m.llm_policy.get('model_timeout_seconds'))
                 # 只从**本批**机会的队列里摘掉被否决的，别动其它执行日的队列
                 drop_from_schedule(scheduled[scope], exec_next,
                                    {o.opportunity_id() for o, _ in reviews}

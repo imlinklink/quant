@@ -124,11 +124,15 @@ class IncrementalCandidateGenerator:
                  top_n: int = 5, max_wait_sessions: int = 20, entry_rule: str = 'b3',
                  forward_horizon: int = DEFAULT_FORWARD_HORIZON,
                  require_matured: bool = True, parent_strategy_id: str = '', now=None,
-                 observation_sink=None, members=None):
+                 observation_sink=None, members=None, monthly_snapshots=None):
         self.observation_sink = observation_sink
         # 时点宇宙掩码（可选）：见 `stock_cross_section.monthly_snapshot`。**与批处理路径
         # 共用同一处实现**，否则"前向的 B 臂"与"回测的 B 臂"会在宇宙口径上分叉。
         self.members = members
+        # 预先算好的月末截面 `{session: snapshot}`（可选）。**多臂/多情景共用同一批截面** ——
+        # 它是整个回测里最贵的一步（实测 1.29s/月末 × 127 个月末 ≈ 164s/臂），而各臂的
+        # 输入完全相同。不给它时逐字走原路径（默认行为不变）。
+        self.monthly_snapshots = monthly_snapshots
         self.prices = prices
         self.view_bars = prices[['security_id', 'session', 'raw_open', 'raw_high', 'raw_low',
                                  'raw_close', 'volume']].rename(columns={
@@ -211,7 +215,8 @@ class IncrementalCandidateGenerator:
         from scripts.medium_term.stock_cross_section import rank_monthly_snapshot
         # 掩码与排名走**与批处理同一处实现**（`rank_monthly_snapshot`），否则前向的 B 臂
         # 与回测的 B 臂会在宇宙口径上悄悄分叉。
-        snap = rank_monthly_snapshot(
+        cached = (self.monthly_snapshots or {}).get(session)
+        snap = cached if cached is not None else rank_monthly_snapshot(
             point_in_time_momentum_snapshot(self.view_bars, self.actions, session),
             session, members=self.members)
         gate = self._market_gate(session)

@@ -1,0 +1,42 @@
+{
+  "schema_version": "engineering-amendment-v1",
+  "amendment_of": "EXIT-TREND-MA2060-20260922",
+  "amended_at": "2026-09-22",
+  "returns_examined": false,
+  "why_this_amendment": "用户 2026-09-22 裁定的 3a：**检验四次 CONCENTRATED 是不是 13 只池子的产物**。规则、参数、门槛与处置方式**一字不改**，只换宇宙。",
+  "what_changed": {
+    "study_basis": {
+      "from": "SD-P0P1-20260921-012（13 只硬编码 TECH）",
+      "to": "SD-POOL32-20260922-001（32 只，`forward_arms.verified_names()`，与三臂前向的 B/C 同一份）"
+    },
+    "paired_population_and_control": {
+      "from": "study 账本里的 201 笔成交 + `exit_diagnostics.json` 作复现控制",
+      "to": "**在 32 只池子上新跑一次基线臂**（`entry_arms.run_arm('b3')`）取配对总体；复现控制改为「孤立走查的 A 臂复现这次基线臂的每一笔」",
+      "reason": "池子 study **只冻结输入**、没有账本与 `exit_diagnostics.json`（实测 `run_arm` 走 `load_study` 会 `unable to open database file`）。控制项强度不变：仍是**同一套驱动**对一个已完成的账户运行逐字段复现。"
+    },
+    "quality_file": {
+      "from": "research_quality_intervals-v3.csv（13 只）",
+      "to": "research_quality_intervals-v4.csv（32 只 verified）",
+      "reason": "v4 才是 32 只的口径；v3 里没有新增那 19 只。"
+    }
+  },
+  "what_did_not_change": [
+    "规则：T 收盘 `close <= MA20 且 close < MA60` ⇒ 次日**开盘**退出；替换 H60；**初始硬止损保留**",
+    "参数：MA20 / MA60 / next_open —— 不动，不搜索",
+    "门槛：收益为正 `> 0`、尾部不劣（最差单笔与 5% ES）、2× 成本仍为正、单一证券 ≤50% 且剔除后 >0",
+    "右删失处置：窗末未平仓按市价估值、单独报出笔数，只统计已平仓是不允许的",
+    "判定令牌：`EVIDENCE_SUPPORTED`/`RISK_TRADEOFF`/`NO_IMPROVEMENT`/`RISK_REJECTED`/`CONCENTRATED`/`INSUFFICIENT_SAMPLE`/`ENGINEERING_BLOCKED`",
+    "窗口与性质：2015-01-02→2026-08-31，**已被查看过**，只用于淘汰"
+  ],
+  "what_this_is_not": [
+    "**不是**重新登记假设、也不是换参数重试 —— 规则与阈值一个字都没动",
+    "**不是**前向证据：换池子仍在同一段被查看过的历史上",
+    "**不是**策略选型依据：若扩池后转为非集中，只说明「该增量在更大池子上可归因」，不等于可以上线"
+  ],
+  "expected_reading": {
+    "if_still_concentrated": "「单一证券 ≤50%」在 32 只上也通不过 ⇒ 集中不是 13 只池子的产物，D1 的结构性解释需要修正（问题在规则，或在方法）",
+    "if_not_concentrated": "两件事同时成立才值得继续：(a) 非集中，(b) 收益与尾部至少一项改善 —— 仅「不再集中」而收益仍为负，仍是 `NO_IMPROVEMENT`",
+    "no_threshold_relaxation": "不得因为池子换了就放宽 50% 或改窗口"
+  },
+  "scope": "本修订只覆盖 H2（趋势退出）一项。若它显示池子是主因，再按同一修订格式对 H3（固定止损）与 H-A（日线确认）各写一份。"
+}

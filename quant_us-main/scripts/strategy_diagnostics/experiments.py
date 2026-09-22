@@ -166,7 +166,8 @@ def run(path, variant='baseline'):
 
 
 def step_account_session(state, *, session, prices, acts, due, manifest, fee_bp,
-                         store=None, scope=None, saved=None):
+                         store=None, scope=None, saved=None, protection=None,
+                         atr=None, next_session=None):
     """**一个账户的一个交易日**。回测（`_run`）与三臂前向 runner 共用这一处。
 
     做的事按顺序：建当日 bars → 持仓分红必须有派发日（否则中止，不静默）→ `step`
@@ -176,6 +177,9 @@ def step_account_session(state, *, session, prices, acts, due, manifest, fee_bp,
 
     抽出来的理由与前向 runner 的登记有关：三臂只允许差"宇宙"，所以"一天怎么走"
     必须是**同一份实现** —— 另一份就是分叉的开始。
+
+    `protection`/`atr`/`next_session` 是机械利润保护用的可选通道，**默认全 None ⇒
+    行为与引入前逐字相同**（规划 §3.1 的隔离不变性）。
     """
     date = str(session.date())
     bars = {str(r.security_id): {k: to_micro(getattr(r, 'raw_' + k))
@@ -186,7 +190,8 @@ def step_account_session(state, *, session, prices, acts, due, manifest, fee_bp,
                 and not a['pay_date']):
             raise ValueError(f'HELD_DIVIDEND_PAY_DATE_MISSING:{date}:{a["security_id"]}')
     result = step(state, session=date, bars=bars, corporate_actions=acts.get(date, ()), intents=due,
-                  manifest=manifest, fee_bp=fee_bp)
+                  manifest=manifest, fee_bp=fee_bp, protection=protection, atr=atr,
+                  next_session=next_session)
     if result.nav is None:
         # 该 session 已处理过：引擎幂等返回（不推进序号/持有天数/结算）。
         # 前向 runner 按天调用、允许重跑，故这里必须早退而不是去读 nav。

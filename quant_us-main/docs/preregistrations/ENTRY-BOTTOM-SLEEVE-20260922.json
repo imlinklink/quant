@@ -1,0 +1,91 @@
+{
+  "schema_version": "diagnostic-preregistration-v1",
+  "registration_id": "ENTRY-BOTTOM-SLEEVE-20260922",
+  "registered_at": "2026-09-22",
+  "study_basis": "SD-P0P1-20260921-012",
+  "study_manifest_hash": "c40bc7b36b6a89eecc42a7a1cfae9ef5588d89075957800ae70f1deccc699c41",
+  "code_revision_at_registration": "b4e5f7e",
+  "upstream": {
+    "spec": "docs/bottom-signal-spec-2026-09-21.md",
+    "batch2_result": "docs/bottom-signal-result-2026-09-21.md",
+    "batch2_verdict": "RISK_TRADEOFF（替换 B3 入场包不值得 ⇒ 保留 B3）"
+  },
+  "prior_exposure": {
+    "blind": false,
+    "what_was_seen": [
+      "B1 的替换对照（R1）：终值收益差 −75.80pp，抄底信号单臂 +130.2R / +$188,585、362 个信号只有 170 笔成交",
+      "012 的账户指标与 201 笔成交",
+      "H3/H-A/H2 三次单项诊断的 CONCENTRATED 结论（与本题的关系见 §'为什么这一项不同于前四次'）"
+    ],
+    "why_disclosed": "本项的问题与规则在 B1 之后才提出，但**规则参数与 sleeve 大小在此前未被看过**；登记固定『改什么、怎么判定』。窗口已被查看过，只用于淘汰。"
+  },
+  "hypothesis": {
+    "id": "B1-COMPLEMENT-SLEEVE",
+    "statement": "抄底信号作为**补充**（而非替换）有价值：在**固定总风险预算**下让出一小部分容量给它，它挑到的那批机会扣费后优于被它挤掉的 B3 机会。",
+    "competing_explanation": "在容量已满的账户里，任何新信号都只是**重新分配既有容量**；若新信号的选择能力不高于原策略，结果只会因多一层交易成本与更低的暴露而更差。B1 已证它替换整个入场包会差 75.8pp，本项检验的是『只让出一小部分容量』是否不同。",
+    "not_claimed": [
+      "不主张增加总风险预算或仓位数（**这正是本项要排除的**）",
+      "不主张两个局部改进叠加必然更好（§9 C1）",
+      "不改 B3 入场规则、不改退出规则（用原 H60；S1/H2 都已判保留原退出）"
+    ]
+  },
+  "arms": {
+    "A": "**仅 B3**：`max_positions=5`、单笔 1%（总风险预算 5%）",
+    "B": "**B3 + 抄底 sleeve**：同样 5 个槽、同样单笔 1% —— **总风险预算不变**，改动只在容量分配：B3 最多 4 个槽，抄底信号最多 1 个槽",
+    "shared": "同一股票池、质量要求、市场数据、日历、成本、H60 期限退出、初始硬止损公式、单笔风险预算、公司行动会计、同引擎、同空仓起点"
+  },
+  "fixed_total_risk": {
+    "statement": "两臂的**总风险预算完全相同**（5 槽 × 1% = 5%，入场瞬间口径）。本项**不**额外加钱、**不**加风险预算、**不**加仓位数。",
+    "how": "sleeve 上限在 runner 侧对**意图**做过滤：某一路已占满其 sleeve 时，该路当日新意图不送进引擎（记 `SLEEVE_FULL`，单独报出）。引擎与 manifest 的风控参数两臂逐字相同。",
+    "why_not_a_new_engine_concept": "总风险预算、单笔风险、最大仓位数这些**受风控约束的量一个都没动**；动的只是『谁先占槽』的分配。这是分配问题，不是风险问题。",
+    "sleeve_size": {"b3": 4, "bottom": 1},
+    "sleeve_rationale_not_a_grid": "5 个槽里让出 **1 个（20% 的风险预算）**给新信号：这是能被评估的最小 sleeve（按本窗口的信号密度与持有期，1 个槽约能成交 50–60 笔，够做机会级对照）。**不动它试 {2,3}** —— 那会变成容量比例搜索，而本轮要回答的是『补充有没有价值』。"
+  },
+  "why_this_one_differs_from_the_previous_four": "H3/H-A/H-B/H2 都是**改写既有规则的出场/过滤** ⇒ 增量来自对同一批机会的重新处置，受影响子集只有几十个候选，单一标的自然占两位数百分比。本项的增量来自**新的一路机会流**（新标的、新成交），集中度门槛对它不像对单门消融那样近乎不可通过 —— 但仍必须报出。",
+  "experimental_protocol": {
+    "level": "account_level_first",
+    "why": "两臂的**成交集合不同**（B 臂多一路、且 B3 被挤掉一部分），无法在同一批机会上配对。",
+    "reports_required": [
+      "两路各自的成交笔数与净损益（**B3 被挤掉的那部分必须单独列**）",
+      "`SLEEVE_FULL` 拒绝数与被挤掉的 B3 机会清单",
+      "共同成交 / 仅 A / 仅 B 三块，新增盈利与新增亏损同时呈现；不强行配对"
+    ]
+  },
+  "decision_rules": {
+    "gates": {
+      "terminal_return_delta_positive": "全成本终值收益差 > 0（主目标）",
+      "mdd_budget": "abs(MDD_B) − abs(MDD_A) ≤ 0.03",
+      "tail_not_worse": "最差单笔净 R 不劣于 A **且** 下尾 5% ES 不劣于 A",
+      "not_concentrated": "新增成交（B 独有的）净损益里单一证券贡献 ≤ 50%，且剔除后仍 > 0",
+      "held_under_2x_cost": "2× 成本下终值收益差仍 > 0",
+      "risk_budget_unchanged": "两臂的 manifest 风控参数逐字相同（由代码断言，不靠人工核对）"
+    },
+    "verdicts": {
+      "EVIDENCE_SUPPORTED": "收益改善且风险未恶化、不集中、2× 成本下成立 ⇒ 值得另立前向登记",
+      "RISK_TRADEOFF": "风险改善但收益未改善 ⇒ 防守选项",
+      "NO_IMPROVEMENT": "收益未改善且风险也未改善",
+      "RISK_REJECTED": "MDD 超预算或尾部恶化",
+      "CONCENTRATED": "新增成交的盈亏集中在少数证券",
+      "INSUFFICIENT_SAMPLE": "B 臂的新增成交 < 30 笔",
+      "ENGINEERING_BLOCKED": "A 臂未复现基线，或控制项不过"
+    },
+    "forbidden": [
+      "给任一臂加钱、加风险预算、加仓位数",
+      "改 sleeve 大小重试到出现赢家",
+      "把『B 臂多出来的收益』直接当成信号优势而不核对总风险预算相同",
+      "只报新增盈利不报新增亏损与被挤掉的 B3 机会"
+    ]
+  },
+  "validation": {
+    "exploratory_window": {"start": "2016-01-05", "end": "2026-08-25"},
+    "exploratory_status": "已被查看过 ⇒ 只用于淘汰；正式资格需另立前向登记",
+    "validation_kind": "prospective",
+    "first_assessment_at": "若值得保留，另立前向登记：≥30 个独立成熟组 且 ≥60 个交易日",
+    "independence_unit": "证券 × 候选轮次（抄底侧为 watch 事件）"
+  },
+  "stop_conditions": [
+    "A 臂无法复现 012 的成交 ⇒ 停在工程修复",
+    "两臂的风控参数不一致 ⇒ 直接判 ENGINEERING_BLOCKED（这是本项的核心约束）",
+    "`SLEEVE_FULL` 过滤把 B3 的意图也误伤 ⇒ 先修"
+  ]
+}
