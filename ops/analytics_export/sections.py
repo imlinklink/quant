@@ -186,7 +186,8 @@ def _opportunities_section(store, entry_metrics) -> dict:
     }
 
 
-def _llm_impact_section(store, manifest, entry_metrics, position_metrics, paired) -> dict:
+def _llm_impact_section(store, manifest, entry_metrics, position_metrics, paired,
+                        forward_start_session=None) -> dict:
     """角色、决策清单、参与漏斗、R/L 配对、成本预算。
 
     **`portfolio`/`review` 两个角色标「未采集」**：现有 metrics 接口只覆盖
@@ -261,26 +262,36 @@ def _llm_impact_section(store, manifest, entry_metrics, position_metrics, paired
             l_full = l_navs[s].get('full_cost_equity')
             if r_full is None or l_full is None:
                 continue
-            nav_r.append({'session': s, 'return_pct': (r_full - initial) / initial * 100})
-            nav_l.append({'session': s, 'return_pct': (l_full - initial) / initial * 100})
+            # **每一点标注它属于回放还是前向**：图上不分开画，就会把 24 天初始化回放
+            # 当成前向业绩（需求场景 7）。页面据此把回放段画成虚线并标边界。
+            phase = ('replay' if forward_start_session and s < forward_start_session
+                     else 'forward')
+            nav_r.append({'session': s, 'return_pct': (r_full - initial) / initial * 100,
+                          'phase': phase})
+            nav_l.append({'session': s, 'return_pct': (l_full - initial) / initial * 100,
+                          'phase': phase})
     return {
         'roles': roles,
         'decision_table': table,
         'participation_funnel': {'entry': entry_metrics, 'position': position_metrics},
         'paired': paired,
         'nav_r': nav_r, 'nav_l': nav_l,
+        'forward_start_session': forward_start_session,
         'cost_budget': cost,
         # 第二批要求「最有帮助与最有损害的决策都可下钻」与「提前退出的收益与损害案例」。
-        # **没有样本就不排序**：全项目当前 1 笔成交、0 条成熟结果，按 R 差值排序等于在
-        # 噪声上排名次。宁可显示未采集 + 原因（需求 §5.4 末段：无实际干预样本时如实显示）。
+        # **这两块是未实现，不是"暂时没有样本"** —— 用户 review 点名过：原先的 why 写成
+        # 「需要已成熟的结果」，读起来像"数据到了就会自动出现"，而实际没有任何计算实现。
+        # 如实说明，免得把"没做"当成"没到"。
         'cases': {
             'best': [], 'worst': [],
-            'status': C.NOT_COLLECTED,
-            'why': '逐笔 L−R 损益差需要已成熟的结果；当前没有足够的终结决策可排序',
+            'status': C.NOT_IMPLEMENTED,
+            'why': '**未实现**：逐笔 L−R 损益差的排序与下钻尚未编写（不是样本不足 —— '
+                   '即使积累出成熟样本，这里也不会自动出现）',
             'early_exit_harm': {
-                'status': C.NOT_COLLECTED,
-                'why': '提前退出的收益/损害案例取自 S1 同机会对照（见「策略与实验」页），'
-                       '本实验的前向路径尚无样本',
+                'status': C.NOT_IMPLEMENTED,
+                'why': '**未实现**：提前退出的收益/损害案例尚未编写。'
+                       '现有的同机会对照结论在「策略与实验」页（S1 行），但那是研究产物，'
+                       '不是按本实验逐笔计算的',
             },
         },
         'vocabulary_version': VOCABULARY_VERSION,
@@ -300,9 +311,49 @@ def _call_started_keys(store) -> list:
             (exp,))]
 
 
-def _overview_section(manifest, accounts, entry_metrics, position_metrics, entry) -> dict:
+def _build_todo(entry_metrics, position_metrics, cost_budget, accounts, data_status) -> tuple:
+    """「需要处理」**必须真的检查过**，不能写死空数组。
+
+    曾经这里直接 `todo: []`，页面据此显示「当前无需处理」—— 那是**没检查过的断言**：
+    预算耗尽、VETO 未兑现、成本待补记即使发生也不会出现。用户 review 点名了这条。
+
+    现在返回 `(todos, checks)`：`checks` 列出**做过哪些检查**，以及**哪些检查本页做不到**
+    （做不到的要说明，而不是当作"没问题"）。
+    """
+    todos = []
+    if data_status != C.DS_OK:
+        todos.append(f'数据来源状态是 {data_status} —— 见本页底部「证据与诊断」的 missing_reasons')
+    if entry_metrics.get('veto_unapplied'):
+        todos.append(f"⚠️ {entry_metrics['veto_unapplied']} 次 VETO 已冻结但未落到执行"
+                     f"（账户照样买入）—— 否决必须兑现，否则等于没发生")
+    if cost_budget.get('status') == C.OK:
+        remaining = cost_budget.get('remaining_usd')
+        if remaining is not None and remaining <= 0:
+            todos.append('模型调用预算已用尽 —— 之后的评审会以 ABSTAIN 采用父策略，不再调用模型')
+        if cost_budget.get('unknown_cost_count'):
+            todos.append(f"有 {cost_budget['unknown_cost_count']} 次调用的成本未知，待补记")
+        if cost_budget.get('in_flight_count'):
+            todos.append(f"有 {cost_budget['in_flight_count']} 次调用在飞（未落库）")
+    for acct in accounts:
+        if acct.get('cost_status') == 'PROVISIONAL':
+            todos.append(f"{acct['account_id']} 的成本口径是暂定（有未知费用未补记），"
+                         f"净值只是上界")
+    checks = ['数据来源状态与 missing_reasons',
+              'VETO 未兑现（冻结了否决但账户仍买入）',
+              '模型调用预算是否用尽 / 成本未知 / 在飞调用',
+              '账户成本口径是否暂定']
+    uncheckable = ['人工确认待办（属确认台，本页不读它，见「需要处理」里的链接）',
+                   '执行结果待对账（需要执行侧对账数据，尚未接入本页）',
+                   '数据阻断的机会（需要按机会列出阻断原因，尚未接入本页）']
+    return todos, checks, uncheckable
+
+
+def _overview_section(manifest, accounts, entry_metrics, position_metrics, entry,
+                      cost_budget=None, data_status=C.DS_OK) -> dict:
     llm = manifest.llm_policy or {}
     protocol = manifest.evaluation_protocol or {}
+    todos, checks, uncheckable = _build_todo(entry_metrics, position_metrics,
+                                             cost_budget or {}, accounts, data_status)
     period = {
         'opportunities': entry_metrics['eligible_for_review'],
         'reviewed': entry_metrics['reviewed'],
@@ -332,11 +383,14 @@ def _overview_section(manifest, accounts, entry_metrics, position_metrics, entry
         }],
         'forward_start_session': entry.get('forward_start_session'),
         'boundary_source': entry.get('boundary_source'),
-        'todo': [],   # 纸面侧当前没有需要人工处理的事项；人工确认入口在 /approvals
+        'todo': todos,
+        'todo_checks': checks,
+        'todo_uncheckable': uncheckable,
     }
 
 
-def paper_scope_sections(store, entry, *, prices=None, base=None) -> tuple:
+def paper_scope_sections(store, entry, *, prices=None, base=None,
+                         data_status=C.DS_OK) -> tuple:
     """一个 paper scope 的全部 section。返回 `(sections, manifest_view)`。
 
     manifest 视图一并返回，因为信封要它的 `strategy_version` —— 不在这里返回，调用方就
@@ -357,11 +411,17 @@ def paper_scope_sections(store, entry, *, prices=None, base=None) -> tuple:
                   'why': '本实验只有一个账户（三臂只差宇宙，没有 R/L 配对）'}
     rows = rp.position_rows(store, manifest, vocab, prices)
     accounts = _account_summary(store, manifest)
+    # llm_impact 先算：「需要处理」要用它的成本预算做真实检查（不能写死空待办）
+    llm = _llm_impact_section(store, manifest, em, pm, paired,
+                              forward_start_session=entry.get('forward_start_session'))
+    overview = _overview_section(manifest, accounts, em, pm, entry,
+                                 cost_budget=llm.get('cost_budget'),
+                                 data_status=data_status)
     return {
-        'overview': _overview_section(manifest, accounts, em, pm, entry),
+        'overview': overview,
         'positions': _positions_section(rows, manifest.account_scopes),
         'opportunities': _opportunities_section(store, em),
-        'llm_impact': _llm_impact_section(store, manifest, em, pm, paired),
+        'llm_impact': llm,
         'accounts': accounts,
     }, manifest
 

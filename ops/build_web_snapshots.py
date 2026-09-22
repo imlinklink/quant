@@ -61,8 +61,6 @@ def _paper_scope(base: Path, entry: dict, now: datetime):
     prices = S.panel_closes(base, sids, sorted(set(v for v in acct_sessions.values() if v))[-1]
                             if any(acct_sessions.values()) else None)
 
-    secs, mv = S.paper_scope_sections(store, entry, prices=prices, base=base)
-
     # 回放 / 前向边界：**声明**与账本交叉核对（需求场景 7）
     boundary = {
         'replay_start_session': entry.get('replay_start_session'),
@@ -113,6 +111,11 @@ def _paper_scope(base: Path, entry: dict, now: datetime):
         missing.append(C.missing(f'reason/action:{code}',
                                  '词表未覆盖该码，页面显示为「未采集（词表未覆盖）」',
                                  status=C.UNCLASSIFIED, source=str(ledger)))
+
+    # sections 在 data_status 之后算：「需要处理」要用它做真实检查（不能写死空待办）
+    secs, mv = S.paper_scope_sections(store, entry, prices=prices, base=base,
+                                      data_status=data_status)
+
     env = C.envelope(
         generation_id=_generation_id(now), scope_id=entry['scope_id'],
         scope_kind=entry['kind'], experiment_id=entry['experiment_id'],
