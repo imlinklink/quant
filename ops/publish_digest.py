@@ -48,7 +48,8 @@ KINDS = {
     'uspostmarket': ('',    'uspostmarket',       '.html', '美股盘后深度'),
     'globalpost':   ('',    'globalpost',         '.html', '全球盘后日报'),
     'postmarket':   ('',    'postmarket',         '.html', '每日盘后复盘'),
-    'gsmonitor':    ('aux', 'gsmonitor',          '.html', 'G/S v2 波段监控页'),
+    'gsmonitor':    ('',    'gsmonitor',          '.html', 'G/S v2 波段监控页'),
+    'thsushot':     ('',    'thsushot',           '.html', '同花顺美股24小时热榜'),
     'xopinions':    ('aux', 'xopinions',          '.html', 'X 博主观点周报'),
     'probe':        ('aux', 'data_publish_probe', '.csv',  '数据源发布时点探测日志'),
 }
