@@ -137,6 +137,21 @@ JOBS = {
         'calendar': [{'Weekday': w, 'Hour': h, 'Minute': m}
                      for w in WEEKDAYS for (h, m) in ((20, 10), (21, 10))],
     },
+    'web-snapshots': {
+        # 决策可视化页面的**只读 JSON 快照**（需求 §6：各自由各自运行版本提供只读导出）。
+        # 排在所有写账本的作业**之后**：影子日最后尝试 19:40、L1 到 20:40、三臂到 21:10
+        # ⇒ 21:30 首跑，22:30 兜一次（首跑若撞上账本正在写，第二次还有机会）。
+        # 从 RUNTIME_MAIN 跑：与页面同属一个运行版本，且它的 `data/` 指向同一份真实数据。
+        'label': 'com.quant.web-snapshots',
+        'argv': ['/usr/bin/python3', str(RUNTIME_MAIN / 'ops' / 'build_web_snapshots.py')],
+        'workdir': str(RUNTIME_MAIN),
+        'stdout': 'web_snapshots.log',
+        'stderr': 'web_snapshots.err.log',
+        'process_type': 'Background',
+        'run_at_load': False,
+        'calendar': [{'Weekday': w, 'Hour': h, 'Minute': m}
+                     for w in WEEKDAYS for (h, m) in ((21, 30), (22, 30))],
+    },
     'watchdog': {
         'label': 'com.quant.watchdog',
         'argv': ['/usr/bin/python3', str(ROOT / 'ops' / 'watchdog.py'), '--once'],
