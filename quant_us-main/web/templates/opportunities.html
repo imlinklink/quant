@@ -5,6 +5,8 @@
 {% block script %}
 window.__render = function (j) {
   const env = j.envelope, s = env.sections || {}, sec = s.opportunities || {};
+  const notice = researchScopeNotice(env);
+  if (notice) return notice;
   const f = sec.funnel || {};
   const out = [];
   const stages = f.stages || [];
@@ -61,4 +63,5 @@ window.__render = function (j) {
   out.push(diagBlock('证据与诊断（opportunities section）', sec));
   return out.join('');
 };
+boot(window.__render);
 {% endblock %}

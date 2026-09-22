@@ -5,6 +5,8 @@
 {% block script %}
 window.__render = function (j) {
   const env = j.envelope, s = env.sections || {}, sec = s.positions || {};
+  const notice = researchScopeNotice(env);
+  if (notice) return notice;
   const ps = sec.positions || [];
   const out = [];
   if (!ps.length) {
@@ -74,4 +76,5 @@ window.__render = function (j) {
     页面的排序结果不是交易信号。${esc((sec.not_collected || []).map(n => n.why).join('；'))}</div>`);
   return out.join('');
 };
+boot(window.__render);
 {% endblock %}

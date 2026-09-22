@@ -157,6 +157,14 @@ function diagBlock(title, obj) {
   return `<details class="diag"><summary>${esc(title)}</summary>
     <pre>${esc(JSON.stringify(obj, null, 2))}</pre></details>`;
 }
+// 研究范围没有账户/持仓/评审对象。**不能显示成「当前没有持仓」** —— 那句话是错的：
+// 研究结论里当然有成交，只是它不是账户级的。要把「这个范围本来就没有这类东西」说清楚。
+function researchScopeNotice(env) {
+  if (!env || env.scope_kind !== 'research') return null;
+  return '<div class="empty">这是 <b>历史研究范围</b>：只有研究产物，<b>没有账户、持仓与评审对象</b>。<br>'
+       + '<span class="why">账户级的内容请看纸面范围（M1 / L1 / 三臂 A、B、C）；'
+       + '各研究结论的横向对比见「策略与实验」页。</span></div>';
+}
 async function boot(renderer) {
   try {
     const meta = await api('/api/analytics/scopes');
@@ -192,7 +200,12 @@ async function loadScope(renderer) {
       <div class="why">其他范围仍可切换查看（需求场景 10：一个来源坏了不返回伪造的空账户）。</div></div>`;
   }
 }
-</script>
+// 子模板的 script 块必须在**当前这个脚本元素里面**。放到元素外面，子模板的 JS 会被
+// 当成正文文本吐进 HTML，浏览器就把整页显示成一堆代码 —— 实测就是这么坏过一轮：
+// 五个页面全部把 JS 当文本渲染，而当时的测试只断言了「200 + 字节数」，看不出这件事。
+// 现在有测试剥掉脚本块再断言剩下正文里不含 JS
+// （见 test_analytics_readonly.TemplateSingleSourceTests）。
 {% block script %}{% endblock %}
+</script>
 </body>
 </html>
