@@ -179,6 +179,52 @@ class TemplateSingleSourceTests(unittest.TestCase):
         self.assertEqual([f.name for f in files], ['_base.html'],
                          '九态中文映射必须只在 _base.html 里定义一份')
 
+    # ---- 渲染层：JS 不得被当成正文吐出来（这一条是「页面全是代码」那次事故的回归）----
+    def _rendered(self, path):
+        client = webapp.app.test_client()
+        r = client.get(path)
+        self.assertEqual(r.status_code, 200, path)
+        return r.data.decode('utf-8')
+
+    def test_javascript_is_not_emitted_as_body_text(self):
+        """子模板的 `{% block script %}` 必须落在 `<script>` **里面**。
+
+        实测坏过一轮：block 写在 `</script>` 之后 ⇒ 五个页面的 JS 全被当成正文文本
+        吐进 HTML，浏览器显示成一片代码。而当时的测试只断言「200 + 字节数」，
+        完全看不出这件事（页面对 HTTP 是"成功"的）。
+        """
+        import re
+        for path in ('/overview', '/positions', '/opportunities', '/llm-impact',
+                     '/experiments'):
+            html = self._rendered(path)
+            body = re.sub(r'<script\b.*?</script>', '', html, flags=re.S | re.I)
+            for needle in ('window.__render', 'out.push', 'function (', '=>'):
+                self.assertNotIn(
+                    needle, body,
+                    path + ' 把 JS 当正文吐出来了（' + needle + '）—— '
+                    'block script 必须落在 <script> 里面')
+
+    def test_every_page_actually_starts(self):
+        """页面必须真的调用启动函数，否则永远停在「加载中…」（静默不加载）。"""
+        import re
+        starters = {'/overview': 'boot(window.__render)',
+                    '/positions': 'boot(window.__render)',
+                    '/opportunities': 'boot(window.__render)',
+                    '/llm-impact': 'boot(window.__render)',
+                    '/experiments': 'bootExperiments()'}
+        for path, needle in starters.items():
+            html = self._rendered(path)
+            scripts = '\n'.join(re.findall(r'<script\b.*?</script>', html, flags=re.S | re.I))
+            self.assertIn(needle, scripts, f'{path} 没有调用 {needle}')
+
+    def test_script_tags_are_balanced(self):
+        import re
+        for path in ('/overview', '/positions', '/opportunities', '/llm-impact',
+                     '/experiments'):
+            html = self._rendered(path)
+            self.assertEqual(len(re.findall(r'<script\b', html, re.I)),
+                             len(re.findall(r'</script>', html, re.I)), path)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -24,6 +24,8 @@ function navChart(r, l) {
 }
 window.__render = function (j) {
   const env = j.envelope, s = env.sections || {}, sec = s.llm_impact || {};
+  const notice = researchScopeNotice(env);
+  if (notice) return notice;
   const out = [];
   // 角色
   out.push('<div class="card"><h2>角色与权限</h2><table><tr><th>角色</th><th>状态</th><th>说明</th></tr>');
@@ -121,4 +123,5 @@ window.__render = function (j) {
   out.push(diagBlock('证据与诊断（llm_impact section）', sec));
   return out.join('');
 };
+boot(window.__render);
 {% endblock %}
