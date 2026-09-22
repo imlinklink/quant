@@ -61,8 +61,31 @@ L1 的代码在我今天的每次研究提交后都悄悄变了，而记录上�
 
 | 运行 checkout | pin 的 commit | 内容 | 约束 |
 |---|---|---|---|
-| `quant-runtime-main` | `cf2440d` = `7271033` + 段首日行动修复 | M1 影子实验、三臂前向、**实盘服务** | **store schema 9 —— 不得再往前移**（M1 的账本是 schema 9；合并后的 main 已是 schema 10） |
+| `quant-runtime-main` | `31c59ff` = `cf2440d` + 决策可视化 | M1 影子实验、三臂前向、**实盘服务**、可视化页面 | **store schema 9 —— 不得再往前移**（M1 的账本是 schema 9；合并后的 main 已是 schema 10） |
 | `quant-runtime-research` | `c43b215`（合并后的 main HEAD） | L1 持仓实验 | schema 10 |
+
+### 四之四、第三次移动 runtime-main 的 pin（2026-09-22 下午）：决策可视化六页
+
+**改了什么**：新增 `ops/analytics_export/`（只读快照导出层）、`ops/build_web_snapshots.py`、
+`ops/analytics_scopes.json`（来源登记）、`web/analytics.py` + 六个模板、
+`report.py` 的 `vocab` 形参与 `position_rows`。交付记录见
+`docs/decision-visibility-batch1-2026-09-22.md`。
+
+**为什么安全**：全部改动**不在** `frozen_code` 的 12 个文件里；`report.py` 在 pin 与 dev
+**逐字节相同**且不在冻结集 ⇒ 移动后冻结哈希 **12/12 一致**（已核）。
+
+**这次用的是「选择性 checkout」而不是 `cherry-pick`**：
+`git checkout <main 的三个提交> -- <明确列出的路径>`。理由是本轮要**刻意排除**
+`ops/install_launchd.py` —— 它只服务开发 checkout 的 `--install`/`--check`（看护从开发
+checkout 跑），而 pin 上的那一份还停在运行版本隔离**之前**的版本；把它带过去只会制造
+无谓冲突。逐一列路径也让「带了什么」在 `git status` 里看得见。
+
+**核验**：从 pin 跑导出器成功写出一代（26 文件 / 10 个范围全 OK）；新测试在 pin 上
+24 passed；三项部署漂移核对全绿；服务 health 与九个路由全 200（服务已
+`launchctl kickstart -k` 重启才加载新路由 —— **这步别忘，否则页面 404 而看起来像部署失败**）。
+
+**新增排程**：`com.quant.web-snapshots`（北京周二~周六 21:30 / 22:30），排在所有写账本的
+作业之后。
 
 ### 四之三、第二次移动 runtime-main 的 pin（2026-09-22 午间）：段首日公司行动
 
