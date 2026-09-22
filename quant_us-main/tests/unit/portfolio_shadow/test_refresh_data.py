@@ -170,6 +170,23 @@ class ClosedSessionScopingTests(unittest.TestCase):
         self.assertLessEqual(pd.to_datetime(after.session).max(),
                              pd.Timestamp(self.sessions[-1]))
 
+    def test_new_sessions_are_appended(self):
+        """**最基本的职责**：面板必须把新 session 追加上去。
+
+        第一版改写漏掉了这一步（只保留 ≤ 上周期的行）⇒ 面板永久冻结、影子作业静默停摆。
+        这条测试是本轮唯一能抓住它的东西 —— 我原来的三条测试只覆盖了「拒绝改写」与
+        「丢掉未收盘行」，没有一条检验「新数据进得来」。
+        """
+        self._build(str(self.sessions[3].date()))
+        before = len(pd.read_csv(self.panels / 'US_AAPL.csv.gz'))
+        out = self._build(str(self.sessions[-1].date()))
+        after = pd.read_csv(self.panels / 'US_AAPL.csv.gz')
+        self.assertEqual(out[0]['appended'], len(self.sessions) - 4)
+        self.assertEqual(len(after), len(self.sessions))
+        self.assertGreater(len(after), before)
+        self.assertEqual(str(pd.to_datetime(after.session).max().date()),
+                         str(self.sessions[-1].date()))
+
     def test_the_default_comes_from_the_closed_session_gate(self):
         """默认 `through` 必须来自 `data_readiness.expected_session`（同一处判据）。"""
         with unittest.mock.patch(
