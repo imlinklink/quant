@@ -133,7 +133,13 @@ def drift_checks():
                         # 才让某个行为成立"的决定记在 docs 那份**在** git 里的记录中。
                         # 记录落后于配置就比没有更糟（读的人以为那就是现状）。
                         # 会弹告警，但 `alert_if_changed` 去重 ⇒ 改配置时只弹一次。
-                        ('配置记录', ['check_config_record.py'])):
+                        ('配置记录', ['check_config_record.py']),
+                        # 运行 checkout 的 config 是否与开发 checkout 一致。
+                        # 2026-09-22 隔离搬迁时它没跟着走 ⇒ worktree 拿到 HEAD 的 93 行初始版，
+                        # `trend_breakout.enabled` 与 `llm` 全缺 ⇒ **监控器不启动、模型没有 key**，
+                        # 静默了约 24 小时才发现（上面三项都查不出，它们看的是部署定义与记录，
+                        # 不是运行 checkout 里那份**配置内容**）。
+                        ('运行配置', ['check_runtime_config.py'])):
         try:
             proc = subprocess.run(
                 [sys.executable, str(ROOT / 'ops' / args[0]), *args[1:]],

@@ -327,3 +327,56 @@ def test_market_brief_job_runs_from_the_dev_checkout():
     assert spec['workdir'] == str(REPO)
     argv = ' '.join(spec['argv'])
     assert 'ops/pipeline.py' in argv and '--mode morning' in argv and '--markets us' in argv
+
+
+# ─── 运行 checkout 的 config 必须与开发 checkout 一致 ─────────────────────────
+# 2026-09-22 隔离搬迁时 `config.yaml` 没跟着走 ⇒ worktree 从 git 拿到 HEAD 的 93 行初始版，
+# `trend_breakout.enabled` 与 `llm` 全缺 ⇒ **突破线监控器不启动、模型没有 key**，
+# 静默约 24 小时（既有三项核对看的是部署定义与记录，不是运行 checkout 里的配置内容）。
+
+def _check_runtime_config():
+    sys.path.insert(0, str(REPO / 'ops'))
+    import check_runtime_config
+    return check_runtime_config
+
+
+def test_runtime_config_matches_dev_checkout(tmp_path):
+    """本机实际的三个 checkout 必须一致（不一致就是那次事故的形态）。"""
+    crc = _check_runtime_config()
+    assert crc.compare(crc.DEV_CONFIG, crc.RUNTIME_CHECKOUTS) == []
+
+
+def test_missing_blocks_are_named(tmp_path):
+    """缺块时必须**点名**缺了哪几个 —— 只说"不一致"找不到原因。"""
+    crc = _check_runtime_config()
+    dev = tmp_path / 'dev' / 'quant_us-main'
+    rt = tmp_path / 'quant-runtime-x' / 'quant_us-main'
+    dev.mkdir(parents=True); rt.mkdir(parents=True)
+    (dev / 'config.yaml').write_text('llm:\n  enabled: true\ntrend_breakout:\n  enabled: true\n',
+                                     encoding='utf-8')
+    (rt / 'config.yaml').write_text('llm:\n  enabled: true\n', encoding='utf-8')
+    problems = crc.compare(dev / 'config.yaml', (tmp_path / 'quant-runtime-x',))
+    assert len(problems) == 1
+    assert 'trend_breakout' in problems[0]
+    assert 'quant-runtime-x' in problems[0]
+
+
+def test_identical_copy_passes(tmp_path):
+    crc = _check_runtime_config()
+    dev = tmp_path / 'dev' / 'quant_us-main'
+    rt = tmp_path / 'quant-runtime-y' / 'quant_us-main'
+    dev.mkdir(parents=True); rt.mkdir(parents=True)
+    body = 'llm:\n  enabled: true\n'
+    (dev / 'config.yaml').write_text(body, encoding='utf-8')
+    (rt / 'config.yaml').write_text(body, encoding='utf-8')
+    assert crc.compare(dev / 'config.yaml', (tmp_path / 'quant-runtime-y',)) == []
+
+
+def test_missing_runtime_config_is_reported(tmp_path):
+    crc = _check_runtime_config()
+    dev = tmp_path / 'dev' / 'quant_us-main'
+    rt = tmp_path / 'quant-runtime-z' / 'quant_us-main'
+    dev.mkdir(parents=True); rt.mkdir(parents=True)
+    (dev / 'config.yaml').write_text('llm: {}\n', encoding='utf-8')
+    problems = crc.compare(dev / 'config.yaml', (tmp_path / 'quant-runtime-z',))
+    assert len(problems) == 1 and '没有 config.yaml' in problems[0]
