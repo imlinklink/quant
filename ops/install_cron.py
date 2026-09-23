@@ -16,8 +16,8 @@ PY = '/usr/bin/python3'  # cron 环境 PATH 较短，用绝对路径
 
 # 排程来自 `jobs_spec.py`（**单一事实来源**）：`watchdog.py` 用同一份规格判断
 # "简报该不该已经更新了"。两处各写一份的话，改了一边就会**每天假报**或**真出事不报**。
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from jobs_spec import BRIEF, cron_weekday_field   # noqa: E402
+# 盘前简报 2026-09-23 起改由 launchd 驱动，这里不再渲染它的 crontab 行；
+# 那份规格仍被看护使用，所以本模块不再需要 import 它。
 
 MARK_START = '# >>> quant-ops (auto-managed) >>>'
 MARK_END = '# <<< quant-ops <<<'
@@ -32,16 +32,13 @@ def build_block() -> str:
         # `Operation not permitted`（TCC）。**实测探针确认**：仓库搬到 ~/quant 之后
         # cron 已能正常执行这里的命令（探针每分钟写一行，两次都成功）。
         # 但「macOS cron 不补跑睡过的任务」这条没变 —— 时间敏感的任务仍应走 launchd。
-        '# 盘前：美股简报 + 选股建议 + 结果回填（`--mode morning` 的构成）',
-        # 时刻与星期由 `jobs_spec.BRIEF` 渲染（原先写死成 `20 8 * * 1-5`）。
-        # 那一份写死的副本正是**看护判定会与之失配**的那份：排程挪了半小时，
-        # 看护仍然按旧时刻判断"该不该有简报"，于是每天在错的时间假报一次。
-        # 只跑美股（`--markets us`）。**选股建议会调 LLM** —— 那正该调；判断依据是
-        # "是不是该做的那件事"，不是花多少钱。
-        f'{BRIEF["minute"]} {BRIEF["hour"]} * * '
-        f'{cron_weekday_field(BRIEF["weekdays"])} cd {ROOT} && '
-        f'{PY} ops/pipeline.py --mode morning --markets us '
-        f'>> {log_dir}/cron_morning.log 2>&1',
+        # 盘前简报**已搬到 launchd**（2026-09-23，见 install_launchd.py 的 market-brief）：
+        # 实测连着两天没跑 —— 机器 08:0x 入睡、08:3x 靠开盖才醒，而 macOS 的 cron
+        # **不在唤醒后补跑**，08:20 正好落在睡眠窗口里被吞掉。launchd 睡醒会补跑一次。
+        # 时刻仍由 `jobs_spec.BRIEF` 定义（看护判断"该不该有产出"用的是同一份），
+        # 所以这里只是不再渲染 crontab 行。
+        '# 盘前简报（含选股建议与结果回填）**已移到 launchd**：见 install_launchd.py 的',
+        '#   market-brief。原因：macOS cron 不补跑睡过的任务，而 08:20 落在睡眠窗口里。',
         '# 盘后：结果回填（只美股；港股线 2026-09-19 起未恢复）',
         f'10 17 * * 1-5 cd {ROOT} && '
         f'{PY} ops/pipeline.py --mode evening --markets us '

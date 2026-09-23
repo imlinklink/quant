@@ -47,6 +47,26 @@ def cron_weekday_field(days) -> str:
     return ','.join(parts)
 
 
+def launchd_weekday(day: int) -> int:
+    """cron 的星期 → launchd 的 `Weekday`。
+
+    **两套约定不一样**：cron 是 0=周日…6=周六，launchd 是 1=周一…7=周日。
+    本文件里 `BRIEF['weekdays']` 用的是 **cron 约定**，所以渲染 launchd 时必须换算 ——
+    只在 1…6 上两者数值恰好相同，**周日一个用 0 一个用 7**，不换算就是碰巧对一半。
+    本仓库已经因为星期约定错过一次（`config.yaml` 的 `protocol_review.weekday` 把
+    美东周六当成过周五），所以这里显式转换并带测试。
+    """
+    d = int(day) % 7
+    return 7 if d == 0 else d
+
+
+def launchd_calendar(spec: dict = None) -> list:
+    """排程规格 → launchd 的 `StartCalendarInterval` 列表。"""
+    spec = spec or BRIEF
+    return [{'Weekday': launchd_weekday(d), 'Hour': int(spec['hour']),
+             'Minute': int(spec['minute'])} for d in spec['weekdays']]
+
+
 def latest_expected_date(now: datetime, spec: dict = None):
     """**≤ now 的最近一次排程**落在哪天 —— 「此刻最新可能存在的产出」应有的日期。
 

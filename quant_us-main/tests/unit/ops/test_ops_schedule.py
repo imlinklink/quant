@@ -23,6 +23,7 @@ REPO = Path(__file__).resolve().parents[4]        # quant 根目录（ops/ 的�
 sys.path.insert(0, str(REPO / 'ops'))
 
 import install_cron     # noqa: E402
+import install_launchd  # noqa: E402
 import jobs_spec        # noqa: E402
 import watchdog         # noqa: E402
 
@@ -123,41 +124,55 @@ class TestBriefFreshness:
 
 
 class TestScheduleIsSingleSource:
-    """看护的期望时刻与写进 crontab 的时刻必须是**同一份规格**。
+    """看护的期望时刻与**实际安装的排程**必须是同一份规格。
 
     这是本次修复的核心断言：修复前 crontab 里写死 `20 8 * * 1-5`、看护里写
     `date.today()`，两者毫无关系 —— 排程改了判定不会跟着改。
+
+    2026-09-23 起简报由 **launchd** 驱动（cron 不补跑睡过的任务，08:20 落在睡眠窗口里，
+    实测连着两天被吞掉），所以下面改成从 **launchd 的 calendar** 回读 ——
+    断言的对象从 crontab 行换成 plist 里的 `StartCalendarInterval`，**意图不变**。
     """
 
-    def _brief_cron_fields(self) -> list:
-        for line in install_cron.build_block().splitlines():
-            if 'ops/pipeline.py --mode morning' in line:
-                return line.split()[:5]
-        raise AssertionError('build_block() 里找不到简报那一行')
+    def _brief_launchd_calendar(self) -> list:
+        cal = install_launchd.JOBS['market-brief'].get('calendar')
+        if not cal:
+            raise AssertionError('JOBS[market-brief] 里没有 calendar')
+        return cal
 
-    def test_crontab_fields_come_from_brief_spec(self):
-        minute, hour, dom, month, dow = self._brief_cron_fields()
-        assert (minute, hour, dom, month) == (str(BRIEF['minute']), str(BRIEF['hour']), '*', '*')
-        assert dow == jobs_spec.cron_weekday_field(BRIEF['weekdays'])
+    def test_launchd_calendar_comes_from_brief_spec(self):
+        cal = self._brief_launchd_calendar()
+        assert cal == jobs_spec.launchd_calendar(BRIEF)
+        for c in cal:
+            assert c['Hour'] == BRIEF['hour']
+            assert c['Minute'] == BRIEF['minute']
 
-    def test_judgement_follows_the_rendered_crontab(self):
-        """把渲染出的 cron 字段**当成一份独立排程**回读，判定必须一致。
+    def test_judgement_follows_the_rendered_calendar(self):
+        """把渲染出的 launchd calendar **当成一份独立排程**回读，判定必须一致。
 
-        比"两边都从 BRIEF 取值"更强：它读的是最终写进 crontab 的字符串，所以哪天
-        有人在 `build_block` 里手写死一个时刻，这条会失败（而不是静静失配）。
+        比"两边都从 BRIEF 取值"更强：它读的是最终写进 plist 的东西，所以哪天有人在
+        `JOBS` 里手写死一个时刻，这条会失败（而不是静静失配）。
         """
-        minute, hour, _, _, dow = self._brief_cron_fields()
-        days = set()
-        for part in dow.split(','):
-            if '-' in part:
-                lo, hi = part.split('-')
-                days.update(range(int(lo), int(hi) + 1))
-            else:
-                days.add(int(part))
-        spec = {'hour': int(hour), 'minute': int(minute), 'weekdays': tuple(days)}
+        cal = self._brief_launchd_calendar()
+        # launchd Weekday 1=周一…7=周日 → cron 约定 0=周日…6=周六
+        days = sorted({c['Weekday'] % 7 for c in cal})
+        spec = {'hour': cal[0]['Hour'], 'minute': cal[0]['Minute'], 'weekdays': tuple(days)}
         assert jobs_spec.latest_expected_date(datetime(2026, 9, 20, 21, 13), spec) == FRI
         assert jobs_spec.latest_expected_date(datetime(2026, 9, 21, 8, 19), spec) == FRI
         assert jobs_spec.latest_expected_date(datetime(2026, 9, 21, 8, 20), spec) == MON
+
+    def test_brief_is_no_longer_in_crontab(self):
+        """搬走之后 crontab 里**不得**再有简报那一行 —— 否则一天跑两次。"""
+        for line in install_cron.build_block().splitlines():
+            assert '--mode morning' not in line or line.lstrip().startswith('#'), \
+                '简报已经搬到 launchd，crontab 里不该还有它'
+
+    def test_one_owner_for_the_brief(self):
+        """简报只能有**一个**驱动者。这条防的是"搬了一半、两边都在跑"。"""
+        in_cron = any('--mode morning' in ln and not ln.lstrip().startswith('#')
+                      for ln in install_cron.build_block().splitlines())
+        in_launchd = 'market-brief' in install_launchd.JOBS
+        assert in_launchd and not in_cron, f'launchd={in_launchd} cron={in_cron}'
 
 
 class TestProblemMessagesAreStable:
@@ -281,3 +296,34 @@ class TestNoBareVarBeforeMultibyte:
         braced = 'set -u; HOLDER=1; echo "${HOLDER}，锁"'
         proc = subprocess.run(['/bin/bash', '-c', braced], capture_output=True, text=True)
         assert proc.returncode == 0 and proc.stdout.strip() == '1，锁'
+
+
+# ─── 星期的两套约定（cron 0=周日 / launchd 1=周一）────────────────────────────
+# 本仓库已经因为星期约定错过一次（config.yaml 的 protocol_review.weekday 把美东周六
+# 当成过周五），所以显式换算 + 显式测周日。
+#
+# 盘前简报从 cron 搬到 launchd（2026-09-23）的起因：实测连着两天（09-22、09-23）没跑。
+# 机器 08:0x 入睡、08:3x 靠开盖才醒，而 **macOS 的 cron 不在唤醒后补跑** ⇒ 08:20 正好
+# 落在睡眠窗口里被吞掉。时刻与星期仍来自 `jobs_spec.BRIEF`（唯一来源），搬迁不改变排程。
+
+
+def test_launchd_weekday_converts_between_the_two_conventions():
+    assert [jobs_spec.launchd_weekday(d) for d in (1, 2, 3, 4, 5, 6)] == [1, 2, 3, 4, 5, 6]
+    assert jobs_spec.launchd_weekday(0) == 7          # cron 周日 → launchd 7
+    assert jobs_spec.launchd_weekday(7) == 7          # cron 也接受 7 表示周日
+
+
+def test_both_renderers_describe_the_same_days():
+    """crontab 与 launchd 两种渲染必须落在同一组星期上（往返一致）。"""
+    from_cron = {int(d) % 7 for d in BRIEF['weekdays']}
+    from_launchd = {c['Weekday'] % 7 for c in jobs_spec.launchd_calendar(BRIEF)}
+    assert from_cron == from_launchd, f'{from_cron} != {from_launchd}'
+
+
+def test_market_brief_job_runs_from_the_dev_checkout():
+    """简报不是实验，没有运行版本 —— 它跑的是开发 checkout（与搬到 launchd 之前一致）。"""
+    spec = install_launchd.JOBS['market-brief']
+    assert spec['label'] == 'com.quant.market-brief'
+    assert spec['workdir'] == str(REPO)
+    argv = ' '.join(spec['argv'])
+    assert 'ops/pipeline.py' in argv and '--mode morning' in argv and '--markets us' in argv

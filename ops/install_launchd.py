@@ -34,10 +34,16 @@ import argparse
 import json
 import plistlib
 import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 US = ROOT / 'quant_us-main'
+# 排程规格来自 `jobs_spec.py`（**单一事实来源**）：简报"什么时候跑"与看护判断
+# "什么时候该有产出"必须用同一份，否则各自漂移 —— 见该模块的 docstring。
+sys.path.insert(0, str(ROOT / 'ops'))
+from jobs_spec import BRIEF, launchd_calendar      # noqa: E402
+
 # 日志放 ~/Library/Logs —— **不要放回 ~/Documents**：万一 TCC 仍然拦着，
 # 至少日志本身还能写出来，否则我们会看到一个"什么都没发生"的空洞。
 #: **运行 checkout**（不可变 commit，detached HEAD）—— 与开发 checkout 分离。
@@ -151,6 +157,26 @@ JOBS = {
         'run_at_load': False,
         'calendar': [{'Weekday': w, 'Hour': h, 'Minute': m}
                      for w in WEEKDAYS for (h, m) in ((21, 30), (22, 30))],
+    },
+    'market-brief': {
+        # **从 cron 搬过来的**（2026-09-23）。原先是 crontab 的 `20 8 * * 1-5`，实测连着两天
+        # （09-22、09-23）没跑：机器 08:0x 入睡、08:3x~08:4x 靠**开盖**才醒，而
+        # **macOS 的 cron 不在唤醒后补跑** ⇒ 那条每天 08:20 正好落在睡眠窗口里，被吞掉。
+        # 本仓库早就知道这条（`forward_arms_daily.sh` 的注释里写着同一句），并已把
+        # shadow-daily / forward-arms / watchdog 都搬到了 launchd —— 只有这条简报留在 cron。
+        # launchd 的 StartCalendarInterval **睡醒后会补跑一次**（合并成一次，不堆积），
+        # 所以 08:40 开盖就会在 08:40 跑。
+        #
+        # 时刻与星期仍来自 `jobs_spec.BRIEF`（唯一来源）—— 看护判断"简报该不该已更新"
+        # 用的是同一份，搬到这里不需要改判定。
+        'label': 'com.quant.market-brief',
+        'argv': ['/usr/bin/python3', str(ROOT / 'ops' / 'pipeline.py'),
+                 '--mode', 'morning', '--markets', 'us'],
+        'workdir': str(ROOT),
+        'stdout': 'market_brief.log', 'stderr': 'market_brief.err.log',
+        'process_type': 'Background',
+        'run_at_load': False,
+        'calendar': launchd_calendar(BRIEF),
     },
     'watchdog': {
         'label': 'com.quant.watchdog',
