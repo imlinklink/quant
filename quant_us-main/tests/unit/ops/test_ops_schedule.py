@@ -343,8 +343,12 @@ def test_market_brief_job_runs_from_the_dev_checkout():
     script = REPO / 'ops' / 'market_brief_daily.sh'
     assert script.exists(), '包装脚本不存在'
     text = script.read_text(encoding='utf-8')
-    # 三件关键性质：等就绪、幂等、跑完核对产物日期
-    assert 'READY' in text and 'socket.create_connection' in text, '缺少网络就绪等待'
+    # 就绪等待**抽到了共用模块**（`shop_daily` / `forward_arms` 用同一份）——脚本里只应看到调用
+    assert 'wait_ready.py' in text, '应当调用共用的就绪等待 ops/wait_ready.py'
+    waiter = (REPO / 'ops' / 'wait_ready.py').read_text(encoding='utf-8')
+    assert 'socket.create_connection' in waiter and 'gethostbyname' in waiter, \
+        '共用模块里没有就绪判据（DNS + OpenD）'
+    # 三件关键性质：幂等、跑完核对产物日期
     assert 'market_brief/latest.json' in text and 'SKIP 今天已有简报' in text, \
         '缺少幂等守卫（多次尝试会重复调 LLM、覆盖当天简报）'
     assert 'BRIEF_DATE' in text, '跑完没有核对产出的简报是不是今天的'

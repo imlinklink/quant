@@ -317,3 +317,48 @@ class ForceTailRefetchTests(unittest.TestCase):
         state = json.loads(self.path.read_text())
         self.assertIn('US.MU|day|none|2026', state['failed'])
         self.assertIn('US.SOXL|day|none|2026', state['unavailable'])
+
+
+class DownloadFailureMessageTests(unittest.TestCase):
+    """下载失败时的报错要**带得上原因**。
+
+    实测 2026-09-23：`shadow-daily` 报的是 `RuntimeError: DOWNLOAD_FAILED:` —— 冒号后面
+    什么都没有。根因是下载工具**失败时不写 stderr**：它把摘要 JSON 打到 stdout
+    （`{"completed": n, "failed": m}`）然后 `return 1`，而旧实现只看 `proc.stderr`。
+    结果是把一个可以一眼看懂的原因（failed=N）丢成了空白 —— 当时只能靠手动重跑才排除
+    "是不是数据问题"。
+    """
+
+    def _run(self, *, rc, stdout='', stderr=''):
+        proc = unittest.mock.Mock(returncode=rc, stdout=stdout, stderr=stderr)
+        with unittest.mock.patch.object(refresh_data.subprocess, 'run', return_value=proc):
+            return refresh_data.download(
+                master=Path('/tmp/m.csv'), start='2026-01-01', end='2026-01-02',
+                output_root=Path('/tmp/raw'), checkpoint=Path('/tmp/cp.json'))
+
+    def test_summary_on_stdout_is_surfaced(self):
+        """下载工具的实际形态：stderr 空、摘要 JSON 在 stdout。"""
+        with self.assertRaises(RuntimeError) as ctx:
+            self._run(rc=1, stdout='{"completed": 3, "failed": 2}\n')
+        msg = str(ctx.exception)
+        self.assertIn('DOWNLOAD_FAILED', msg)
+        self.assertIn('rc=1', msg)
+        self.assertIn('failed=2', msg)
+
+    def test_stderr_wins_when_present(self):
+        with self.assertRaises(RuntimeError) as ctx:
+            self._run(rc=2, stdout='{"completed": 0, "failed": 1}\n',
+                      stderr='Traceback: 连接被拒\n')
+        self.assertIn('连接被拒', str(ctx.exception))
+
+    def test_both_empty_still_reports_rc(self):
+        """两个流都空（例如被信号杀掉）时，退出码是唯一线索，不能说成空白。"""
+        with self.assertRaises(RuntimeError) as ctx:
+            self._run(rc=-9)
+        msg = str(ctx.exception)
+        self.assertIn('rc=-9', msg)
+        self.assertIn('没有输出', msg)
+
+    def test_success_still_parses_the_summary(self):
+        self.assertEqual(self._run(rc=0, stdout='noise\n{"completed": 5, "failed": 0}\n'),
+                         {'completed': 5, 'failed': 0})
