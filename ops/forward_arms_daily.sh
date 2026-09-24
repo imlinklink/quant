@@ -90,13 +90,33 @@ from scripts.portfolio_shadow.refresh_data import master_codes
 from scripts.strategy_diagnostics.forward_arms import arm_names
 print(' '.join(sorted(master_codes(arm_names()['B']))))")"
 TMP_ACTIONS="$(mktemp -d)"
+# ---- 先等网络与 OpenD 就绪 ----
+# 这台机器会频繁进出睡眠，每次醒来都把网络与 Futu 连接切断（服务日志同一刻成批
+# `Disconnected: … reason=KeepAliveFail`）。实测 2026-09-23 21:08:54 本作业就是撞上
+# 那个窗口：公司行动导入 22~25 只取数失败 ⇒ 三臂**连续两天没推进**。
+# 而手动重跑同一个导入器是 0 失败 ⇒ 不是代码/数据问题，是时刻问题。
+echo "$STAMP wait-ready"
+READY_OUT="$("$PY" "$ROOT/ops/wait_ready.py" $( [ "${FORWARD_WAIT_SECONDS:-}" ] && echo "--seconds ${FORWARD_WAIT_SECONDS}" ))"
+RC=$?
+echo "$STAMP $READY_OUT"
+if [ "$RC" -ne 0 ]; then
+  watch "FAIL 网络/OpenD 未就绪，本次不推进 —— $READY_OUT"
+  rm -rf "$TMP_ACTIONS"; exit "$RC"
+fi
+
 echo "$STAMP refresh-actions codes=$(printf '%s' "$CODES" | wc -w) 只追加"
+# **导入器的输出要留着**：原先 `>/dev/null` 把 `fetch_failures` 的明细（每个代码的
+# 确切错误）一起丢了，只剩一句"22 只失败"，无法诊断。现在落文件并在失败时回显。
+IMPORT_LOG="$BASE/actions_import.log"
 "$PY" -m scripts.data.import_corporate_actions_from_futu --codes $CODES \
-  --output-dir "$TMP_ACTIONS" --archive-root "$BASE/actions_archive" >/dev/null || {
-  echo "$STAMP FAIL 行动导入失败，本次不推进"
+  --output-dir "$TMP_ACTIONS" --archive-root "$BASE/actions_archive" \
+  >> "$IMPORT_LOG" 2>&1 || {
+  echo "$STAMP FAIL 行动导入失败，本次不推进（明细见 $IMPORT_LOG 末行）"
+  tail -c 1200 "$IMPORT_LOG" | sed 's/^/    /'
   watch "FAIL 行动导入失败"
   rm -rf "$TMP_ACTIONS"; exit 1
 }
+tail -c 400 "$IMPORT_LOG" | sed 's/^/    行动导入: /'
 # 同键异内容 ⇒ `ACTION_REVISED`，非 0 退出。**必须停**：行动被修订属于输入变更，
 # 要人来决定（与 frozen_code 守卫同一立场 —— 改了尺子就不是同一件事了）。
 "$PY" -m scripts.data.merge_corporate_actions --base "$ACTIONS" \

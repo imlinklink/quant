@@ -16,6 +16,8 @@
 #   SHADOW_DIGEST_DIR  每日市场日报（HTML）的发布目录
 #   SHADOW_LIVE_ETF    live ETF 快照目录
 #   SHADOW_MODEL       real | fixture（默认 real —— 会真实计费）
+#   SHADOW_SKIP_DIGEST 1 = 技术证据实验不采集/导入市场日报
+#   SHADOW_NOT_BEFORE_LOCAL_DATE YYYY-MM-DD = 此本地日期前不启动实验日作业
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -42,6 +44,13 @@ mkdir -p "$RUNS" "$INBOX"
 # 早退分支各写一行之后，空文件只意味着一件事：**这次运行根本没发生**。
 P0_LOG="$BASE/p0-watch.log"
 p0() { printf '%s\t%s\n' "$STAMP" "$1" >> "$P0_LOG"; }
+
+if [ -n "${SHADOW_NOT_BEFORE_LOCAL_DATE:-}" ] &&
+   [[ "$TODAY" < "$SHADOW_NOT_BEFORE_LOCAL_DATE" ]]; then
+  echo "$STAMP SKIP 尚未到实验启动日（本地 ${TODAY} < ${SHADOW_NOT_BEFORE_LOCAL_DATE}）"
+  p0 "SKIP 尚未到实验启动日（本地 ${TODAY}）"
+  exit 0
+fi
 
 cd "$US" || exit 1
 
@@ -91,6 +100,20 @@ else
 fi
 
 echo "$STAMP refresh-market-data（只追加，不改历史）"
+# ---- 先等网络与 OpenD 就绪 ----
+# 这台机器会频繁进出睡眠，每次醒来都把网络与 Futu 连接切断（服务日志同一刻成批
+# `Disconnected: … reason=KeepAliveFail`）。实测 2026-09-23 20:07:51 本作业正是撞上
+# 那个窗口：`FAIL refresh`（同刻 OpenD 7 条连接一起断）。等就绪再刷，别在刚醒的网络
+# 上做决策 —— 与 `forward_arms_daily.sh` 用**同一份** `ops/wait_ready.py`。
+READY_OUT="$("$PY" "$ROOT/ops/wait_ready.py" $( [ "${SHADOW_WAIT_SECONDS:-}" ] && echo "--seconds ${SHADOW_WAIT_SECONDS}" ))"
+RC=$?
+echo "$STAMP $READY_OUT"
+if [ "$RC" -ne 0 ]; then
+  echo "$STAMP FAIL 网络/OpenD 未就绪，本次不跑 —— $READY_OUT"
+  p0 "FAIL 网络/OpenD 未就绪，本次不跑"
+  exit "$RC"
+fi
+
 "$PY" -m scripts.portfolio_shadow.refresh_data --live-dir "$LIVE_ETF" || {
   echo "$STAMP FAIL refresh 失败，本次不跑 —— 宁可停一天，也不在陈旧行情上做决策"
   p0 "FAIL refresh 失败，本次不跑"
@@ -99,18 +122,22 @@ echo "$STAMP refresh-market-data（只追加，不改历史）"
 
 # 日报 → 市场级证据 → 追加进证据存储。`--append` 是「首次导入为准」：同一天重跑不会
 # 把已有记录的 observed_at 刷新成今天。取「≤ 今天的最近一份」——日报不一定每个交易日都有。
-echo "$STAMP ingest-digest session=$TODAY dir=$DIGEST_DIR"
-DIGEST_JSONL="$INBOX/$TODAY.jsonl"
-if [ ! -d "$DIGEST_DIR" ]; then
-  echo "$STAMP 注意：日报目录不存在（${DIGEST_DIR}）—— 本次不带市场级证据"
-elif [ -z "$(ls -A "$DIGEST_DIR" 2>/dev/null)" ]; then
-  echo "$STAMP 注意：日报目录为空 —— 本次不带市场级证据（模型会因证据不足弃权）"
-fi
-"$PY" -m scripts.portfolio_shadow.market_digest --session "$TODAY" --dir "$DIGEST_DIR" \
-  --output "$DIGEST_JSONL" || echo "$STAMP 注意：日报抽取失败"
-if [ -f "$DIGEST_JSONL" ]; then
-  "$PY" -m scripts.portfolio_shadow.cli import-evidence --source "$DIGEST_JSONL" \
-    --output "$EVIDENCE" --append || echo "$STAMP 注意：日报入库失败"
+if [ "${SHADOW_SKIP_DIGEST:-0}" = 1 ]; then
+  echo "$STAMP 技术证据实验：跳过市场日报采集与导入"
+else
+  echo "$STAMP ingest-digest session=$TODAY dir=$DIGEST_DIR"
+  DIGEST_JSONL="$INBOX/$TODAY.jsonl"
+  if [ ! -d "$DIGEST_DIR" ]; then
+    echo "$STAMP 注意：日报目录不存在（${DIGEST_DIR}）—— 本次不带市场级证据"
+  elif [ -z "$(ls -A "$DIGEST_DIR" 2>/dev/null)" ]; then
+    echo "$STAMP 注意：日报目录为空 —— 本次不带市场级证据（模型会因证据不足弃权）"
+  fi
+  "$PY" -m scripts.portfolio_shadow.market_digest --session "$TODAY" --dir "$DIGEST_DIR" \
+    --output "$DIGEST_JSONL" || echo "$STAMP 注意：日报抽取失败"
+  if [ -f "$DIGEST_JSONL" ]; then
+    "$PY" -m scripts.portfolio_shadow.cli import-evidence --source "$DIGEST_JSONL" \
+      --output "$EVIDENCE" --append || echo "$STAMP 注意：日报入库失败"
+  fi
 fi
 
 echo "$STAMP run-daily model=$MODEL"

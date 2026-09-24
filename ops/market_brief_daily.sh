@@ -42,54 +42,9 @@ if [ "$EXISTING" = "$(date +%F)" ]; then
   exit 0
 fi
 
-# ---- 等网络与 OpenD 就绪 ----
-READY_OUT="$("$PY" - "$ROOT" "$WAIT_SECONDS" <<'PYEOF'
-import socket, sys, time
-from pathlib import Path
-
-root, budget = Path(sys.argv[1]), int(sys.argv[2])
-
-
-def llm_host() -> str:
-    """从 config.yaml 的 llm 段取主机名；取不到就退回一个已知主机。"""
-    fallback = 'api.deepseek.com'
-    try:
-        import yaml
-        cfg = yaml.safe_load((root / 'quant_us-main' / 'config.yaml').read_text(encoding='utf-8'))
-        base = str(((cfg or {}).get('llm') or {}).get('base_url') or '')
-        if '//' in base:
-            return base.split('//', 1)[1].split('/', 1)[0].split(':', 1)[0] or fallback
-    except Exception:
-        pass
-    return fallback
-
-
-host = llm_host()
-deadline = time.time() + budget
-tries = 0
-while True:
-    tries += 1
-    dns_ok = opend_ok = False
-    try:
-        socket.gethostbyname(host)
-        dns_ok = True
-    except Exception:
-        pass
-    try:
-        with socket.create_connection(('127.0.0.1', 11111), timeout=3):
-            opend_ok = True
-    except Exception:
-        pass
-    if dns_ok and opend_ok:
-        print(f'READY {tries} 次尝试 DNS={host} OpenD=11111')
-        break
-    if time.time() >= deadline:
-        print(f'TIMEOUT {tries} 次尝试 DNS={dns_ok} OpenD={opend_ok} '
-              f'（等了 {budget}s）')
-        sys.exit(1)
-    time.sleep(10)
-PYEOF
-)"
+# ---- 等网络与 OpenD 就绪（与 shadow_daily / forward_arms 共用**同一份**实现）----
+# 三处各写一份就是本仓库吃过多次亏的"同一件事两份定义"——所以抽成 `ops/wait_ready.py`。
+READY_OUT="$("$PY" "$ROOT/ops/wait_ready.py" --seconds "$WAIT_SECONDS")"
 RC=$?
 echo "$STAMP $READY_OUT"
 if [ "$RC" -ne 0 ]; then
