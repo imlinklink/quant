@@ -111,7 +111,23 @@ def download(*, master: Path, start: str, end: str, output_root: Path, checkpoin
            '--output-root', str(output_root), '--checkpoint', str(checkpoint)]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
-        raise RuntimeError(f'DOWNLOAD_FAILED:{proc.stderr.strip()[-400:]}')
+        # **下载工具失败时不写 stderr** —— 它把摘要 JSON 打到 **stdout**
+        # （`{"completed": n, "failed": m}`）然后 `return 1`。所以原来只看 stderr 的做法
+        # 产出的是**冒号后面什么都没有**的 `DOWNLOAD_FAILED:`，把原因丢得干干净净
+        # （2026-09-23 实测，只能靠手动重跑才知道不是数据问题）。
+        # 现在：退出码一定带上；两个流都看；摘要 JSON 里的 failed 数单独提出来。
+        err = (proc.stderr or '').strip()
+        summary = ''
+        for line in reversed((proc.stdout or '').strip().splitlines()):
+            try:
+                payload = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(payload, dict) and 'failed' in payload:
+                summary = f"failed={payload.get('failed')} completed={payload.get('completed')}"
+                break
+        detail = err or summary or (proc.stdout or '').strip() or '(子进程两个流都没有输出)'
+        raise RuntimeError(f'DOWNLOAD_FAILED:rc={proc.returncode}:{detail[-400:]}')
     for line in reversed(proc.stdout.strip().splitlines()):
         try:
             return json.loads(line)
