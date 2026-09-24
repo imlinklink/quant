@@ -142,10 +142,18 @@ class TestScheduleIsSingleSource:
 
     def test_launchd_calendar_comes_from_brief_spec(self):
         cal = self._brief_launchd_calendar()
-        assert cal == jobs_spec.launchd_calendar(BRIEF)
+        # 第一次尝试必须与 BRIEF 同源（看护判"该不该已有简报"用的就是 BRIEF 的时刻）
+        self._assert_matches_brief(cal)
+        # 允许**兜底尝试**，但它们的时刻也必须由 BRIEF 推出来（不得手写一个别的时刻）
         for c in cal:
-            assert c['Hour'] == BRIEF['hour']
             assert c['Minute'] == BRIEF['minute']
+            assert c['Hour'] in (BRIEF['hour'], (BRIEF['hour'] + 2) % 24)
+
+    @staticmethod
+    def _assert_matches_brief(cal):
+        from jobs_spec import launchd_calendar
+        assert cal[:len(launchd_calendar(BRIEF))] == launchd_calendar(BRIEF), \
+            '前几次尝试必须与 BRIEF 完全一致'
 
     def test_judgement_follows_the_rendered_calendar(self):
         """把渲染出的 launchd calendar **当成一份独立排程**回读，判定必须一致。
@@ -321,12 +329,34 @@ def test_both_renderers_describe_the_same_days():
 
 
 def test_market_brief_job_runs_from_the_dev_checkout():
-    """简报不是实验，没有运行版本 —— 它跑的是开发 checkout（与搬到 launchd 之前一致）。"""
+    """简报不是实验，没有运行版本 —— 它跑的是开发 checkout（与搬到 launchd 之前一致）。
+
+    2026-09-24 起改成跑**包装脚本**而不是直接跑 pipeline：这台机器早上 09:20 才苏醒并联网，
+    而 launchd 的补跑发生在醒来那一瞬间 ⇒ LLM 调用 DNS 失败（实测 09:03，Errno 8）。
+    脚本先等 DNS 与 OpenD 就绪再跑。
+    """
     spec = install_launchd.JOBS['market-brief']
     assert spec['label'] == 'com.quant.market-brief'
     assert spec['workdir'] == str(REPO)
     argv = ' '.join(spec['argv'])
-    assert 'ops/pipeline.py' in argv and '--mode morning' in argv and '--markets us' in argv
+    assert 'market_brief_daily.sh' in argv, '应当跑包装脚本（等网络就绪）'
+    script = REPO / 'ops' / 'market_brief_daily.sh'
+    assert script.exists(), '包装脚本不存在'
+    text = script.read_text(encoding='utf-8')
+    # 三件关键性质：等就绪、幂等、跑完核对产物日期
+    assert 'READY' in text and 'socket.create_connection' in text, '缺少网络就绪等待'
+    assert 'market_brief/latest.json' in text and 'SKIP 今天已有简报' in text, \
+        '缺少幂等守卫（多次尝试会重复调 LLM、覆盖当天简报）'
+    assert 'BRIEF_DATE' in text, '跑完没有核对产出的简报是不是今天的'
+
+
+def test_brief_script_is_executable_and_syntax_ok():
+    """脚本得真的能跑 —— 语法错会让 launchd 每次都以 exit 2 失败，且没人看。"""
+    import subprocess
+    script = REPO / 'ops' / 'market_brief_daily.sh'
+    assert script.stat().st_mode & 0o111, '脚本没有可执行位'
+    r = subprocess.run(['/bin/bash', '-n', str(script)], capture_output=True, text=True)
+    assert r.returncode == 0, f'bash -n 失败：{r.stderr}'
 
 
 # ─── 运行 checkout 的 config 必须与开发 checkout 一致 ─────────────────────────

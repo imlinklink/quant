@@ -51,6 +51,7 @@ from jobs_spec import BRIEF, launchd_calendar      # noqa: E402
 #: 换运行版本 = 改这两个路径 + 重装，并核验哈希与续跑一致。
 RUNTIME_MAIN = Path('/Users/wh1817w/quant-runtime-main')
 RUNTIME_RESEARCH = Path('/Users/wh1817w/quant-runtime-research')
+RUNTIME_ANALYTICS = Path('/Users/wh1817w/quant-runtime-analytics')
 
 LOG_DIR = Path.home() / 'Library' / 'Logs' / 'quant'
 LAUNCH_AGENTS = Path.home() / 'Library' / 'LaunchAgents'
@@ -147,10 +148,10 @@ JOBS = {
         # 决策可视化页面的**只读 JSON 快照**（需求 §6：各自由各自运行版本提供只读导出）。
         # 排在所有写账本的作业**之后**：影子日最后尝试 19:40、L1 到 20:40、三臂到 21:10
         # ⇒ 21:30 首跑，22:30 兜一次（首跑若撞上账本正在写，第二次还有机会）。
-        # 从 RUNTIME_MAIN 跑：与页面同属一个运行版本，且它的 `data/` 指向同一份真实数据。
+        # 只读导出使用独立 pin：能登记新的前向实验，不改 M1/L1/L2 的写入代码。
         'label': 'com.quant.web-snapshots',
-        'argv': ['/usr/bin/python3', str(RUNTIME_MAIN / 'ops' / 'build_web_snapshots.py')],
-        'workdir': str(RUNTIME_MAIN),
+        'argv': ['/usr/bin/python3', str(RUNTIME_ANALYTICS / 'ops' / 'build_web_snapshots.py')],
+        'workdir': str(RUNTIME_ANALYTICS),
         'stdout': 'web_snapshots.log',
         'stderr': 'web_snapshots.err.log',
         'process_type': 'Background',
@@ -170,13 +171,22 @@ JOBS = {
         # 时刻与星期仍来自 `jobs_spec.BRIEF`（唯一来源）—— 看护判断"简报该不该已更新"
         # 用的是同一份，搬到这里不需要改判定。
         'label': 'com.quant.market-brief',
-        'argv': ['/usr/bin/python3', str(ROOT / 'ops' / 'pipeline.py'),
-                 '--mode', 'morning', '--markets', 'us'],
+        # **跑脚本而不是直接跑 pipeline**：这台机器**早上 09:20 到公司才苏醒并联网**，
+        # 而 launchd 的补跑发生在醒来那一瞬间 ⇒ 2026-09-24 实测 09:03 补跑时 LLM 调用
+        # DNS 失败（Errno 8），简报没出来、看护报了一整天红。
+        # `market_brief_daily.sh` 先等 DNS 与 OpenD 就绪再跑，并且**幂等**
+        # （今天已有简报就跳过）—— 所以多次尝试是安全的。
+        'argv': ['/bin/bash', str(ROOT / 'ops' / 'market_brief_daily.sh')],
         'workdir': str(ROOT),
         'stdout': 'market_brief.log', 'stderr': 'market_brief.err.log',
         'process_type': 'Background',
         'run_at_load': False,
-        'calendar': launchd_calendar(BRIEF),
+        # 第一次按 `jobs_spec.BRIEF` 的时刻；**第二次是兜底**（首跑遇上真正的网络中断时，
+        # 一小时后还有机会）。第二次**不影响看护判定** —— 它判"该不该已有简报"用的是
+        # BRIEF 的时刻，重试晚一点不算"该有却没有"。
+        'calendar': launchd_calendar(BRIEF) + [
+            {'Weekday': w, 'Hour': (BRIEF['hour'] + 2) % 24, 'Minute': BRIEF['minute']}
+            for w in BRIEF['weekdays']],
     },
     'watchdog': {
         'label': 'com.quant.watchdog',
